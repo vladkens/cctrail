@@ -1,10 +1,12 @@
-from datetime import timedelta
+import json
+from datetime import date, timedelta
 from pathlib import Path
 
 from cctrail import iter_claude_sessions
-from cctrail.metrics import active_time
+from cctrail.metrics import active_time, usage_by_day
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
+DEDUPE_FIXTURES = Path(__file__).parent / "fixtures" / "claude_dedupe" / "projects"
 
 
 def test_iter_sessions_parses_single_session():
@@ -81,3 +83,64 @@ def test_active_time_merges_overlapping_windows():
     events = [m.timestamp for m in session.messages if m.timestamp and not m.is_api_error]
     # All 4 real messages sit within ~10s of each other, well under the 5-minute window.
     assert active_time(events) == timedelta(minutes=5, seconds=10)
+
+
+def test_unlinked_sidechains_are_parsed_but_usage_is_counted_once():
+    sessions = list(iter_claude_sessions(DEDUPE_FIXTURES))
+
+    assert len(sessions) == 3
+    sidechain = next(session for session in sessions if session.id == "side")
+    assert sidechain.kind == "agent"
+    assert sidechain.usage.total == 1600 + 38
+
+    buckets = usage_by_day(sessions)
+    assert buckets[date(2026, 1, 4)].total == 16 + 26 + 38
+
+
+def test_nested_subagent_transcript_uses_its_metadata(tmp_path: Path):
+    project = tmp_path / "project"
+    main_path = project / "session.jsonl"
+    agent_dir = project / "session" / "subagents" / "workflows" / "run"
+    agent_path = agent_dir / "agent-nested.jsonl"
+    agent_dir.mkdir(parents=True)
+
+    main_entries = [
+        {
+            "type": "assistant",
+            "message": {
+                "id": "message",
+                "content": [{"type": "tool_use", "id": "tool", "name": "Agent", "input": {}}],
+                "usage": {},
+            },
+            "timestamp": "2026-01-01T00:00:00Z",
+            "sessionId": "session",
+        },
+        {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": "tool"}]},
+            "toolUseResult": "User rejected tool use",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "sessionId": "session",
+        },
+    ]
+    main_path.write_text("\n".join(map(json.dumps, main_entries)), encoding="utf-8")
+    agent_path.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {"id": "answer", "content": [], "usage": {"output_tokens": 1}},
+                "timestamp": "2026-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    agent_path.with_suffix(".meta.json").write_text(
+        json.dumps({"agentType": "Explore", "description": "Nested research", "toolUseId": "tool"}),
+        encoding="utf-8",
+    )
+
+    sessions = list(iter_claude_sessions(tmp_path))
+
+    assert len(sessions) == 1
+    assert sessions[0].agents[0].agent_type == "Explore"
+    assert sessions[0].agents[0].title == "Nested research"

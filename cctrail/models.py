@@ -48,12 +48,15 @@ class ToolCall:
 class Message:
     role: Literal["user", "assistant"]
     timestamp: datetime | None
+    id: str | None = None
+    request_id: str | None = None
     text: str = ""
     model: str | None = None
     usage: Usage | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     turn_duration: timedelta | None = None
     is_api_error: bool = False
+    is_sidechain: bool = False
 
 
 @dataclass

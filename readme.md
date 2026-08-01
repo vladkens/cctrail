@@ -1,52 +1,68 @@
 # cctrail
 
-Streaming parser for coding agent chat history (Claude Code today, Codex later) into
-structured, typed sessions — for building your own usage reports, dashboards or analysis
-on top.
+`cctrail` is a Python library and a small CLI for reading local coding-agent history and turning it into structured sessions, messages, tool calls, token usage, and project statistics.
 
-Give it a folder, get back `Session` objects one at a time: tokens (input/output,
-cache read/write), tool calls (name, input, output, timing), and the full sub-agent
-tree (`Agent`/`Task` tool calls resolved into nested sessions with their own usage and
-duration), without loading the whole history into memory at once.
+It currently supports Claude Code. Codex support is planned.
 
-## Usage
+## Python API
 
 ```python
 from cctrail import iter_claude_sessions
 
-for session in iter_claude_sessions():  # defaults to ~/.claude/projects
+for session in iter_claude_sessions():
     print(session.cwd, session.title, session.usage.total)
 
-    for call, count in session.tool_call_counts.items():
-        print(f"  {call}: {count}")
+    for call in session.tool_calls:
+        print(call.name, call.input, call.duration)
 
-    for agent in session.walk():  # session itself, then every nested agent run
-        print(f"  agent {agent.agent_type}: {agent.usage.total} tokens, {agent.duration}")
+    for agent in session.agents:
+        print(agent.agent_type, agent.usage.total)
 ```
 
-Point it at any directory tree instead of the default:
+By default, sessions are read from `~/.claude/projects`. A different history directory can be passed explicitly:
 
 ```python
-for session in iter_claude_sessions("/path/to/backup/.claude/projects"):
-    ...
+sessions = iter_claude_sessions("/path/to/.claude/projects")
 ```
 
-## Model
+The iterator reads one transcript at a time. Sub-agent transcripts are resolved automatically and attached to the `Agent` or `Task` tool call that launched them.
 
-- `Usage` — `input` / `cache_write` / `cache_read` / `output` token counts, plus `.total`.
-- `ToolCall` — `name`, `input`, `output_text`, `is_error`, `started_at`/`ended_at`/`duration`,
-  and `raw_result` (Claude Code's raw `toolUseResult`, e.g. `toolStats` for `Agent` calls).
-- `Message` — one user or assistant turn: `text`, `usage`, `tool_calls`, and for user turns
-  the harness-reported `turn_duration` (how long the agent took to answer).
-- `Session` — a conversation: `messages`, `usage`, `tool_calls`, `tool_call_counts`,
-  `duration`, and `agents` (sub-agent runs launched from this session, each a `Session`
-  of `kind="agent"`). `.walk()` flattens the whole tree.
+The main data types are `Session`, `Message`, `ToolCall`, and `Usage`. Parsed objects can be converted to dictionaries or JSON with `as_dict()` and `as_json()`.
 
-`cctrail.metrics.active_time(timestamps)` turns a list of event timestamps into a
-merged "actually active" duration (bursts of activity within a 5-minute window count
-once), useful for "how much time went into this project" style rollups across sessions.
+```python
+from cctrail import as_json, iter_claude_sessions
 
-## Status
+session = next(iter_claude_sessions())
+print(as_json(session, indent=2))
+```
 
-Claude Code only for now. Codex support is planned as a second `cctrail.codex` module
-behind the same `Session`/`Message`/`ToolCall` model.
+## CLI
+
+Show token usage by day:
+
+```sh
+uv run cctrail usage
+uv run cctrail usage --since 2026-07-01 --until 2026-07-31
+```
+
+Show usage grouped by project directory:
+
+```sh
+uv run cctrail projects
+```
+
+Both commands use `~/.claude/projects` by default and accept `--root` for another history directory.
+
+## Development
+
+The project requires Python 3.11 or newer and uses [uv](https://docs.astral.sh/uv/).
+
+```sh
+uv sync
+make check
+make test
+```
+
+## License
+
+Distributed under the [MIT License](LICENSE).

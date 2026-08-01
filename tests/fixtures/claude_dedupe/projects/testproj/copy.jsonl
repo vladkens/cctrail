@@ -1,0 +1,1 @@
+{"type":"assistant","requestId":"req-exact","message":{"id":"exact","model":"claude-sonnet-5","content":[{"type":"text","text":"copied"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":20,"output_tokens":4}},"timestamp":"2026-01-04T00:00:02Z","cwd":"/repo","sessionId":"copy"}

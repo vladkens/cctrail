@@ -20,12 +20,55 @@ def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
     whole agent tree.
     """
     root = Path(root) if root is not None else default_root()
-    for path in sorted(root.rglob("*.jsonl")):
+    paths = sorted(root.rglob("*.jsonl"))
+    agent_paths = subagent_paths(paths)
+    linked_subagents: set[Path] = set()
+    for path in paths:
         if "subagents" in path.parts:
             continue
-        session = parse_file(path)
+
+        session = parse_file(
+            path,
+            subagent_paths=agent_paths,
+            linked_subagents=linked_subagents,
+            session_dir=path.parent / path.stem,
+        )
         if session.messages:
             yield session
+
+    for path in paths:
+        if "subagents" not in path.parts or path in linked_subagents:
+            continue
+
+        session = parse_file(
+            path,
+            session_id=path.stem.removeprefix("agent-"),
+            kind="agent",
+            subagent_paths=agent_paths,
+            linked_subagents=linked_subagents,
+            session_dir=session_dir(path),
+        )
+        if session.messages:
+            yield session
+
+
+def subagent_paths(paths: list[Path]) -> dict[tuple[Path, str], Path]:
+    result: dict[tuple[Path, str], Path] = {}
+    for path in paths:
+        if "subagents" not in path.parts or not path.name.startswith("agent-"):
+            continue
+
+        parent_dir = session_dir(path)
+        result[parent_dir, path.stem.removeprefix("agent-")] = path
+        tool_id = string_or_none(read_object(path.with_suffix(".meta.json")).get("toolUseId"))
+        if tool_id:
+            result[parent_dir, tool_id] = path
+
+    return result
+
+
+def session_dir(path: Path) -> Path:
+    return next(parent.parent for parent in path.parents if parent.name == "subagents")
 
 
 def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
@@ -34,10 +77,12 @@ def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
             line = line.strip()
             if not line:
                 continue
+
             try:
                 value = json.loads(line)
             except json.JSONDecodeError:
                 continue
+
             if isinstance(value, dict):
                 yield value
 
@@ -45,6 +90,7 @@ def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 def parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
+
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
@@ -54,44 +100,70 @@ def parse_timestamp(value: Any) -> datetime | None:
 def extract_text(content: Any) -> str:
     if isinstance(content, str):
         return content
+
     if not isinstance(content, list):
         return ""
+
     parts = []
     for block in content:
         if not isinstance(block, dict) or block.get("type") not in ("text", "input_text"):
             continue
+
         text = block.get("text")
         if isinstance(text, str):
             parts.append(text)
+
     return "\n".join(parts)
 
 
 def usage_from_raw(raw: Any) -> Usage:
     if not isinstance(raw, dict):
         return Usage()
-    return Usage(
+
+    result = Usage(
         input=int(raw.get("input_tokens") or 0),
         cache_write=int(raw.get("cache_creation_input_tokens") or 0),
         cache_read=int(raw.get("cache_read_input_tokens") or 0),
         output=int(raw.get("output_tokens") or 0),
     )
+    iterations = raw.get("iterations")
+    if isinstance(iterations, list):
+        for iteration in iterations:
+            if isinstance(iteration, dict) and iteration.get("type") == "advisor_message":
+                result += usage_from_raw(iteration)
+    return result
 
 
 def parse_file(
-    path: Path, *, session_id: str | None = None, kind: Literal["main", "agent"] = "main"
+    path: Path,
+    *,
+    session_id: str | None = None,
+    kind: Literal["main", "agent"] = "main",
+    subagent_paths: dict[tuple[Path, str], Path] | None = None,
+    linked_subagents: set[Path] | None = None,
+    session_dir: Path | None = None,
 ) -> Session:
     session = Session(id=session_id or path.stem, kind=kind)
+    if kind == "agent":
+        metadata = read_object(path.with_suffix(".meta.json"))
+        session.agent_type = string_or_none(metadata.get("agentType"))
+        session.title = string_or_none(metadata.get("description")) or session.agent_type
+
     pending_tools: dict[str, ToolCall] = {}
     open_turns: dict[Any, Message] = {}
     last_user_message: Message | None = None
+    ai_titles: dict[str, str] = {}
+    custom_titles: dict[str, str] = {}
 
     for item in read_jsonl(path):
         cwd = item.get("cwd")
         if cwd and not session.cwd:
             session.cwd = cwd
+
         branch = item.get("gitBranch")
         if branch and not session.git_branch:
             session.git_branch = branch
+
         # Sub-agent transcripts carry the *parent* sessionId on every line, so
         # only trust this field to identify main sessions (which may resume
         # under a new id after a compaction).
@@ -102,10 +174,12 @@ def parse_file(
 
         item_type = item.get("type")
 
-        if item_type == "ai-title":
-            title = item.get("aiTitle")
-            if title:
-                session.title = title
+        if item_type in ("ai-title", "custom-title"):
+            sid = item.get("sessionId")
+            field = "aiTitle" if item_type == "ai-title" else "customTitle"
+            title = item.get(field)
+            if isinstance(sid, str) and isinstance(title, str):
+                (ai_titles if item_type == "ai-title" else custom_titles)[sid] = title
             continue
 
         if item_type == "system":
@@ -122,20 +196,37 @@ def parse_file(
             # Claude Code writes one JSONL line per content block but repeats
             # the same message id/usage on each, so blocks are merged back
             # into a single logical turn here.
-            msg_key = message.get("id") or item.get("requestId") or item.get("uuid")
+            message_id = message.get("id")
+            if not isinstance(message_id, str):
+                message_id = None
+
+            request_id = item.get("requestId")
+            if not isinstance(request_id, str):
+                request_id = None
+
+            msg_key = (message_id, request_id) if message_id else request_id or item.get("uuid")
             turn = open_turns.get(msg_key)
             if turn is None:
-                turn = Message(role="assistant", timestamp=timestamp)
+                turn = Message(
+                    role="assistant",
+                    timestamp=timestamp,
+                    id=message_id,
+                    request_id=request_id,
+                    is_sidechain=item.get("isSidechain") is True,
+                )
                 open_turns[msg_key] = turn
                 session.messages.append(turn)
+
             turn.model = turn.model or message.get("model")
             turn.is_api_error = turn.is_api_error or bool(item.get("isApiErrorMessage"))
             usage = usage_from_raw(message.get("usage"))
             if turn.usage is None or usage.total > turn.usage.total:
                 turn.usage = usage
+
             for block in content:
                 if not isinstance(block, dict):
                     continue
+
                 block_type = block.get("type")
                 if block_type == "text":
                     turn.text += block.get("text", "")
@@ -164,51 +255,88 @@ def parse_file(
                     call = pending_tools.pop(block.get("tool_use_id"), None)
                     if call is None:
                         continue
+
                     call.ended_at = timestamp
                     call.is_error = bool(block.get("is_error"))
                     call.output_text = extract_text(block.get("content"))
                     call.raw_result = item.get("toolUseResult")
                     if call.name in ("Agent", "Task"):
-                        call.agent = build_agent_session(path, call.raw_result, call, session)
+                        call.agent = build_agent_session(
+                            call.raw_result,
+                            call,
+                            session,
+                            subagent_paths,
+                            linked_subagents,
+                            session_dir,
+                        )
                 continue
 
             # Synthetic prompts injected by the harness itself (hook output,
             # local-command caveats, skill listings) aren't user input.
             if item.get("isMeta"):
                 continue
+
             text = extract_text(content).strip()
             if not text:
                 continue
+
             message_obj = Message(role="user", timestamp=timestamp, text=text)
             session.messages.append(message_obj)
             last_user_message = message_obj
             continue
 
+    if kind == "main":
+        if session.id in custom_titles:
+            session.title = custom_titles[session.id]
+        else:
+            session.title = ai_titles.get(session.id)
+
     return session
 
 
 def build_agent_session(
-    parent_path: Path, raw: Any, call: ToolCall, parent: Session
+    raw: Any,
+    call: ToolCall,
+    parent: Session,
+    subagent_paths: dict[tuple[Path, str], Path] | None,
+    linked_subagents: set[Path] | None,
+    session_dir: Path | None,
 ) -> Session | None:
-    if not isinstance(raw, dict):
-        return None
-    agent_id = raw.get("agentId")
-    if not isinstance(agent_id, str):
+    raw = raw if isinstance(raw, dict) else {}
+    agent_id = string_or_none(raw.get("agentId"))
+
+    sub_path = (
+        subagent_paths.get((session_dir, agent_id or call.id))
+        if subagent_paths and session_dir
+        else None
+    )
+    if agent_id is None and sub_path is not None:
+        agent_id = sub_path.stem.removeprefix("agent-")
+
+    if agent_id is None:
         return None
 
-    sub_path = parent_path.parent / parent_path.stem / "subagents" / f"agent-{agent_id}.jsonl"
-    if sub_path.exists():
-        agent = parse_file(sub_path, session_id=agent_id, kind="agent")
+    if sub_path is not None:
+        if linked_subagents is not None:
+            linked_subagents.add(sub_path)
+        agent = parse_file(
+            sub_path,
+            session_id=agent_id,
+            kind="agent",
+            subagent_paths=subagent_paths,
+            linked_subagents=linked_subagents,
+            session_dir=session_dir,
+        )
     else:
         agent = Session(id=agent_id, kind="agent")
 
     agent.cwd = agent.cwd or parent.cwd
     agent.git_branch = agent.git_branch or parent.git_branch
-    agent.agent_type = raw.get("agentType") or call.input.get("subagent_type")
-    agent.title = call.input.get("description") or agent.agent_type
+    agent.agent_type = raw.get("agentType") or call.input.get("subagent_type") or agent.agent_type
+    agent.title = call.input.get("description") or agent.title or agent.agent_type
 
-    # Older/aborted runs may lack a resolvable transcript file; fall back to
-    # the aggregate usage Claude Code already attached to the tool result.
+    # Older/aborted runs may lack a resolvable transcript file; retain the
+    # final usage snapshot Claude Code attached to the tool result.
     if not agent.messages:
         usage = usage_from_raw(raw.get("usage"))
         agent.messages.append(Message(role="assistant", timestamp=call.ended_at, usage=usage))
@@ -218,3 +346,16 @@ def build_agent_session(
         agent.duration_override = timedelta(milliseconds=duration_ms)
 
     return agent
+
+
+def read_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return value if isinstance(value, dict) else {}
+
+
+def string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
