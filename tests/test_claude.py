@@ -1,0 +1,83 @@
+from datetime import timedelta
+from pathlib import Path
+
+from cctrail import iter_claude_sessions
+from cctrail.metrics import active_time
+
+FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
+
+
+def test_iter_sessions_parses_single_session():
+    sessions = list(iter_claude_sessions(FIXTURES))
+    assert len(sessions) == 1
+
+    session = sessions[0]
+    assert session.id == "s-main-1"
+    assert session.title == "Fix the bug"
+    assert session.cwd == "/repo"
+    assert session.git_branch == "main"
+    assert session.provider == "claude"
+    assert session.kind == "main"
+
+
+def test_messages_merge_content_blocks_and_skip_synthetic_ones():
+    session = list(iter_claude_sessions(FIXTURES))[0]
+    roles = [m.role for m in session.messages]
+    assert roles == ["user", "assistant", "assistant", "assistant", "assistant"]
+    assert session.messages[0].text == "fix the bug"
+    assert session.messages[0].turn_duration == timedelta(milliseconds=9100)
+
+
+def test_api_error_messages_are_flagged_not_dropped():
+    session = list(iter_claude_sessions(FIXTURES))[0]
+    assert [m.is_api_error for m in session.messages] == [False, False, False, False, True]
+    usage = session.messages[-1].usage
+    assert usage is not None
+    assert usage.total == 0
+
+
+def test_usage_is_summed_per_logical_turn_not_per_line():
+    session = list(iter_claude_sessions(FIXTURES))[0]
+    assert session.usage.total == 135 + 57 + 161
+    assert session.usage.cache_read == 100 + 50 + 150
+
+
+def test_tool_calls_and_counts():
+    session = list(iter_claude_sessions(FIXTURES))[0]
+    assert session.tool_call_counts == {"Bash": 1, "Agent": 1}
+    bash_call = next(c for c in session.tool_calls if c.name == "Bash")
+    assert bash_call.output_text == "file1\nfile2"
+    assert bash_call.is_error is False
+    assert bash_call.duration == timedelta(seconds=1)
+
+
+def test_agent_tool_call_resolves_nested_session():
+    session = list(iter_claude_sessions(FIXTURES))[0]
+    assert len(session.agents) == 1
+
+    agent = session.agents[0]
+    assert agent.kind == "agent"
+    assert agent.id == "a-explore-1"
+    assert agent.agent_type == "Explore"
+    assert agent.title == "investigate"
+    assert agent.cwd == "/repo"
+
+    # Usage comes from the agent's own transcript, not the parent's summary.
+    assert agent.usage.total == (1 + 0 + 20 + 10) + (1 + 0 + 30 + 12)
+
+    # Wall-clock duration is Claude Code's authoritative figure, not derived
+    # from message timestamps (which would give 4.8s here, not 5s).
+    assert agent.duration == timedelta(seconds=5)
+    assert agent.tool_call_counts == {"Read": 1}
+
+
+def test_walk_yields_main_session_and_every_nested_agent():
+    session = list(iter_claude_sessions(FIXTURES))[0]
+    assert [s.id for s in session.walk()] == ["s-main-1", "a-explore-1"]
+
+
+def test_active_time_merges_overlapping_windows():
+    session = list(iter_claude_sessions(FIXTURES))[0]
+    events = [m.timestamp for m in session.messages if m.timestamp and not m.is_api_error]
+    # All 4 real messages sit within ~10s of each other, well under the 5-minute window.
+    assert active_time(events) == timedelta(minutes=5, seconds=10)

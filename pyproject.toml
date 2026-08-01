@@ -1,7 +1,39 @@
 [project]
 name = "cctrail"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "Streaming parser for Claude Code (and later Codex) chat history into structured sessions"
+readme = "readme.md"
 requires-python = ">=3.11"
-dependencies = []
+authors = [{ name = "vladkens" }]
+license = { text = "MIT" }
+dependencies = [
+    "rich>=15.0.0",
+]
+
+[project.scripts]
+cctrail = "cctrail.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0.0", "pytest-cov>=5.0.0", "ruff>=0.6.0", "ty>=0.0.1"]
+
+[build-system]
+requires = ["hatchling>=1.9.1"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cctrail"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.ty.environment]
+python-version = "3.11"

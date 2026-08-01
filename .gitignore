@@ -1,2 +1,5 @@
 /3rd
 /samples
+.coverage
+__pycache__/
+*.pyc
