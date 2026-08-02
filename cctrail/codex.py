@@ -8,6 +8,7 @@ from .models import Message, Session, ToolCall, Usage
 from .utils import (
     extract_text,
     imap,
+    int_or_zero,
     json_dump,
     json_lines,
     json_load,
@@ -389,7 +390,7 @@ def load_titles(root: Path) -> dict[str, str]:
 
 
 def attach_agent(parent: Session, agent: Session) -> bool:
-    spawn_calls = [call for call in parent.tool_calls if call.name.endswith("spawn_agent")]
+    spawn_calls = [call for call in parent.iter_tool_calls() if call.name.endswith("spawn_agent")]
     call = next((call for call in spawn_calls if agent_id(call.raw_result) == agent.id), None)
     call = call or next((call for call in spawn_calls if call.agent is None), None)
     if call is None:
@@ -421,13 +422,13 @@ def usage_from_raw(value: Any) -> Usage | None:
     if not isinstance(value, dict):
         return None
 
-    input_tokens = int(value.get("input_tokens") or 0)
-    cache_read = min(int(value.get("cached_input_tokens") or 0), input_tokens)
-    output_tokens = int(value.get("output_tokens") or 0)
-    reasoning = min(int(value.get("reasoning_output_tokens") or 0), output_tokens)
+    input_tokens = int_or_zero(value.get("input_tokens"))
+    cache_read = min(int_or_zero(value.get("cached_input_tokens")), input_tokens)
+    output_tokens = int_or_zero(value.get("output_tokens"))
+    reasoning = min(int_or_zero(value.get("reasoning_output_tokens")), output_tokens)
     return Usage(
         input=input_tokens - cache_read,
-        cache_write=max(0, int(value.get("cache_write_input_tokens") or 0)),
+        cache_write=int_or_zero(value.get("cache_write_input_tokens")),
         cache_read=cache_read,
         output=output_tokens - reasoning,
         reasoning=reasoning,
@@ -439,7 +440,7 @@ def usage_signature(value: Any) -> tuple[int, ...] | None:
         return None
 
     return tuple(
-        int(value.get(key) or 0)
+        int_or_zero(value.get(key))
         for key in (
             "input_tokens",
             "cached_input_tokens",

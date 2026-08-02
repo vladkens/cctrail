@@ -1,18 +1,25 @@
-from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from .utils import as_dict, as_json
+from .utils import json_dump
 
 
+@dataclass
 class JsonTrait:
     def as_dict(self) -> dict[str, Any]:
-        return as_dict(self)
+        """Return the model's stored dataclass fields as a dictionary.
 
-    def as_json(self, **kwargs: Any) -> str:
-        return as_json(self, **kwargs)
+        Every declared field is included recursively. For a Session this means
+        that messages, their tool calls, and linked agents are serialized.
+        Computed properties such as `usage`, `started_at`, `ended_at`, and
+        `duration`, along with values exposed through methods, are not included.
+        """
+        return asdict(self)
+
+    def as_json(self, indent: int | None = None) -> str:
+        return json_dump(self.as_dict(), default=str, indent=indent)
 
 
 @dataclass
@@ -75,7 +82,7 @@ class Message(JsonTrait):
 class Session(JsonTrait):
     id: str
     kind: Literal["main", "agent"] = "main"
-    provider: str = "claude"
+    provider: Literal["claude", "codex"] = "claude"
     agent_type: str | None = None
     title: str | None = None
     cwd: str | None = None
@@ -92,17 +99,14 @@ class Session(JsonTrait):
 
         return result
 
-    @property
-    def tool_calls(self) -> list[ToolCall]:
-        return [call for message in self.messages for call in message.tool_calls]
+    def iter_tool_calls(self) -> Iterator[ToolCall]:
+        for message in self.messages:
+            yield from message.tool_calls
 
-    @property
-    def tool_call_counts(self) -> Counter[str]:
-        return Counter(call.name for call in self.tool_calls)
-
-    @property
-    def agents(self) -> list["Session"]:
-        return [call.agent for call in self.tool_calls if call.agent is not None]
+    def iter_agents(self) -> Iterator["Session"]:
+        for call in self.iter_tool_calls():
+            if call.agent is not None:
+                yield call.agent
 
     def activity_stamps(self) -> list[datetime]:
         # A failed API call carries no real work, and including it here would
@@ -132,5 +136,5 @@ class Session(JsonTrait):
     def walk(self) -> Iterator["Session"]:
         """Yield this session and every nested agent run, depth-first."""
         yield self
-        for agent in self.agents:
+        for agent in self.iter_agents():
             yield from agent.walk()

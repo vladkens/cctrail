@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .models import Message, Session, ToolCall, Usage
-from .utils import extract_text, json_lines, json_load, parse_timestamp, string_or_none
+from .utils import extract_text, int_or_zero, json_lines, json_load, parse_timestamp, string_or_none
 
 
 def default_root() -> Path:
@@ -76,10 +76,10 @@ def usage_from_raw(raw: Any) -> Usage:
         return Usage()
 
     result = Usage(
-        input=int(raw.get("input_tokens") or 0),
-        cache_write=int(raw.get("cache_creation_input_tokens") or 0),
-        cache_read=int(raw.get("cache_read_input_tokens") or 0),
-        output=int(raw.get("output_tokens") or 0),
+        input=int_or_zero(raw.get("input_tokens")),
+        cache_write=int_or_zero(raw.get("cache_creation_input_tokens")),
+        cache_read=int_or_zero(raw.get("cache_read_input_tokens")),
+        output=int_or_zero(raw.get("output_tokens")),
     )
     iterations = raw.get("iterations")
     if isinstance(iterations, list):
@@ -105,35 +105,35 @@ def parse_file(
         session.title = string_or_none(metadata.get("description")) or session.agent_type
 
     pending_tools: dict[str, ToolCall] = {}
-    open_turns: dict[Any, Message] = {}
+    open_turns: dict[str | tuple[str, str | None], Message] = {}
     last_user_message: Message | None = None
     ai_titles: dict[str, str] = {}
     custom_titles: dict[str, str] = {}
 
     for item in json_lines(path):
-        cwd = item.get("cwd")
-        if cwd and not session.cwd:
+        cwd = string_or_none(item.get("cwd"))
+        if cwd and session.cwd is None:
             session.cwd = cwd
 
-        branch = item.get("gitBranch")
-        if branch and not session.git_branch:
+        branch = string_or_none(item.get("gitBranch"))
+        if branch and session.git_branch is None:
             session.git_branch = branch
 
         # Sub-agent transcripts carry the *parent* sessionId on every line, so
         # only trust this field to identify main sessions (which may resume
         # under a new id after a compaction).
         if kind == "main":
-            sid = item.get("sessionId")
-            if isinstance(sid, str):
+            sid = string_or_none(item.get("sessionId"))
+            if sid:
                 session.id = sid
 
         item_type = item.get("type")
 
         if item_type in ("ai-title", "custom-title"):
-            sid = item.get("sessionId")
+            sid = string_or_none(item.get("sessionId"))
             field = "aiTitle" if item_type == "ai-title" else "customTitle"
-            title = item.get(field)
-            if isinstance(sid, str) and isinstance(title, str):
+            title = string_or_none(item.get(field))
+            if sid and title:
                 (ai_titles if item_type == "ai-title" else custom_titles)[sid] = title
             continue
 
@@ -145,22 +145,23 @@ def parse_file(
             continue
 
         if item_type == "assistant":
-            message = item.get("message") or {}
-            content = message.get("content") or []
+            message = item.get("message")
+            if not isinstance(message, dict):
+                continue
+
+            content = message.get("content")
+            if not isinstance(content, list):
+                content = []
             timestamp = parse_timestamp(item.get("timestamp"))
             # Claude Code writes one JSONL line per content block but repeats
             # the same message id/usage on each, so blocks are merged back
             # into a single logical turn here.
-            message_id = message.get("id")
-            if not isinstance(message_id, str):
-                message_id = None
+            message_id = string_or_none(message.get("id"))
+            request_id = string_or_none(item.get("requestId"))
 
-            request_id = item.get("requestId")
-            if not isinstance(request_id, str):
-                request_id = None
-
-            msg_key = (message_id, request_id) if message_id else request_id or item.get("uuid")
-            turn = open_turns.get(msg_key)
+            uuid = string_or_none(item.get("uuid"))
+            msg_key = (message_id, request_id) if message_id else request_id or uuid
+            turn = open_turns.get(msg_key) if msg_key is not None else None
             if turn is None:
                 turn = Message(
                     role="assistant",
@@ -169,11 +170,12 @@ def parse_file(
                     request_id=request_id,
                     is_sidechain=item.get("isSidechain") is True,
                 )
-                open_turns[msg_key] = turn
+                if msg_key is not None:
+                    open_turns[msg_key] = turn
                 session.messages.append(turn)
 
-            turn.model = turn.model or message.get("model")
-            turn.is_api_error = turn.is_api_error or bool(item.get("isApiErrorMessage"))
+            turn.model = turn.model or string_or_none(message.get("model"))
+            turn.is_api_error = turn.is_api_error or item.get("isApiErrorMessage") is True
             usage = usage_from_raw(message.get("usage"))
             if turn.usage is None or usage.total > turn.usage.total:
                 turn.usage = usage
@@ -184,12 +186,18 @@ def parse_file(
 
                 block_type = block.get("type")
                 if block_type == "text":
-                    turn.text += block.get("text", "")
+                    turn.text += string_or_none(block.get("text")) or ""
                 elif block_type == "tool_use":
+                    call_id = string_or_none(block.get("id"))
+                    name = string_or_none(block.get("name"))
+                    if call_id is None or name is None:
+                        continue
+
+                    call_input = block.get("input")
                     call = ToolCall(
-                        id=block.get("id", ""),
-                        name=block.get("name", ""),
-                        input=block.get("input") or {},
+                        id=call_id,
+                        name=name,
+                        input=call_input if isinstance(call_input, dict) else {},
                         started_at=timestamp,
                     )
                     turn.tool_calls.append(call)
@@ -197,7 +205,10 @@ def parse_file(
             continue
 
         if item_type == "user":
-            message = item.get("message") or {}
+            message = item.get("message")
+            if not isinstance(message, dict):
+                continue
+
             content = message.get("content")
             timestamp = parse_timestamp(item.get("timestamp"))
             blocks = content if isinstance(content, list) else []
@@ -207,12 +218,16 @@ def parse_file(
 
             if tool_results:
                 for block in tool_results:
-                    call = pending_tools.pop(block.get("tool_use_id"), None)
+                    tool_id = string_or_none(block.get("tool_use_id"))
+                    if tool_id is None:
+                        continue
+
+                    call = pending_tools.pop(tool_id, None)
                     if call is None:
                         continue
 
                     call.ended_at = timestamp
-                    call.is_error = bool(block.get("is_error"))
+                    call.is_error = block.get("is_error") is True
                     call.output_text = extract_text(block.get("content"), ("text", "input_text"))
                     call.raw_result = item.get("toolUseResult")
                     if call.name in ("Agent", "Task"):
@@ -287,8 +302,12 @@ def build_agent_session(
 
     agent.cwd = agent.cwd or parent.cwd
     agent.git_branch = agent.git_branch or parent.git_branch
-    agent.agent_type = raw.get("agentType") or call.input.get("subagent_type") or agent.agent_type
-    agent.title = call.input.get("description") or agent.title or agent.agent_type
+    agent.agent_type = (
+        string_or_none(raw.get("agentType"))
+        or string_or_none(call.input.get("subagent_type"))
+        or agent.agent_type
+    )
+    agent.title = string_or_none(call.input.get("description")) or agent.title or agent.agent_type
 
     # Older/aborted runs may lack a resolvable transcript file; retain the
     # final usage snapshot Claude Code attached to the tool result.

@@ -23,6 +23,13 @@ def human(n: int) -> str:
     return str(n)
 
 
+def format_local_date(value: datetime) -> str:
+    if value.tzinfo is not None:
+        value = value.astimezone()
+
+    return value.date().isoformat()
+
+
 def cmd_usage(args: argparse.Namespace) -> None:
     buckets = usage_by_day(iter_sessions(args.root))
     days = sorted(
@@ -88,7 +95,7 @@ def cmd_projects(args: argparse.Namespace) -> None:
             project.project,
             str(project.session_count),
             human(project.usage.total),
-            project.last_activity.date().isoformat() if project.last_activity else "-",
+            format_local_date(project.last_activity) if project.last_activity else "-",
         )
 
     Console().print(table)

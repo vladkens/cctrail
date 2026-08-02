@@ -2,7 +2,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import cctrail.codex as codex
-from cctrail import iter_codex_sessions
+from cctrail import iter_codex_sessions, tool_call_counts
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex"
 
@@ -45,19 +45,19 @@ def test_tool_calls_parse_json_custom_input_and_output():
     session = next(
         session for session in iter_codex_sessions(FIXTURES) if session.id == "codex-main-1"
     )
-    assert session.tool_call_counts == {
+    assert tool_call_counts(session) == {
         "exec_command": 1,
         "web_search": 1,
         "apply_patch": 1,
         "spawn_agent": 1,
     }
 
-    command = next(call for call in session.tool_calls if call.name == "exec_command")
+    command = next(call for call in session.iter_tool_calls() if call.name == "exec_command")
     assert command.input == {"cmd": "rg parser"}
     assert command.output_text == "parser.py"
     assert command.duration == timedelta(seconds=2)
 
-    patch = next(call for call in session.tool_calls if call.name == "apply_patch")
+    patch = next(call for call in session.iter_tool_calls() if call.name == "apply_patch")
     assert patch.input == {"value": "*** Begin Patch"}
     assert patch.output_text == "Done!"
 
@@ -68,7 +68,7 @@ def test_spawned_agent_is_attached_to_the_call():
     )
     assert [item.id for item in session.walk()] == ["codex-main-1", "codex-agent-1"]
 
-    agent = session.agents[0]
+    agent = next(session.iter_agents())
     assert agent.kind == "agent"
     assert agent.provider == "codex"
     assert agent.agent_type == "explorer"

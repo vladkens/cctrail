@@ -2,7 +2,7 @@ import json
 from datetime import date, timedelta
 from pathlib import Path
 
-from cctrail import iter_claude_sessions
+from cctrail import iter_claude_sessions, tool_call_counts
 from cctrail.metrics import active_time, usage_by_day
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
@@ -46,8 +46,8 @@ def test_usage_is_summed_per_logical_turn_not_per_line():
 
 def test_tool_calls_and_counts():
     session = list(iter_claude_sessions(FIXTURES))[0]
-    assert session.tool_call_counts == {"Bash": 1, "Agent": 1}
-    bash_call = next(c for c in session.tool_calls if c.name == "Bash")
+    assert tool_call_counts(session) == {"Bash": 1, "Agent": 1}
+    bash_call = next(c for c in session.iter_tool_calls() if c.name == "Bash")
     assert bash_call.output_text == "file1\nfile2"
     assert bash_call.is_error is False
     assert bash_call.duration == timedelta(seconds=1)
@@ -55,9 +55,10 @@ def test_tool_calls_and_counts():
 
 def test_agent_tool_call_resolves_nested_session():
     session = list(iter_claude_sessions(FIXTURES))[0]
-    assert len(session.agents) == 1
+    agents = list(session.iter_agents())
+    assert len(agents) == 1
 
-    agent = session.agents[0]
+    agent = agents[0]
     assert agent.kind == "agent"
     assert agent.id == "a-explore-1"
     assert agent.agent_type == "Explore"
@@ -70,7 +71,7 @@ def test_agent_tool_call_resolves_nested_session():
     # Wall-clock duration is Claude Code's authoritative figure, not derived
     # from message timestamps (which would give 4.8s here, not 5s).
     assert agent.duration == timedelta(seconds=5)
-    assert agent.tool_call_counts == {"Read": 1}
+    assert tool_call_counts(agent) == {"Read": 1}
 
 
 def test_walk_yields_main_session_and_every_nested_agent():
@@ -142,5 +143,31 @@ def test_nested_subagent_transcript_uses_its_metadata(tmp_path: Path):
     sessions = list(iter_claude_sessions(tmp_path))
 
     assert len(sessions) == 1
-    assert sessions[0].agents[0].agent_type == "Explore"
-    assert sessions[0].agents[0].title == "Nested research"
+    agent = next(sessions[0].iter_agents())
+    assert agent.agent_type == "Explore"
+    assert agent.title == "Nested research"
+
+
+def test_malformed_structured_fields_do_not_abort_the_file(tmp_path: Path):
+    path = tmp_path / "session.jsonl"
+    entries = [
+        {"type": "assistant", "message": "invalid"},
+        {
+            "type": "assistant",
+            "message": {
+                "id": "answer",
+                "content": [{"type": "tool_use", "id": {}, "name": "Read", "input": []}],
+                "usage": {"input_tokens": {}},
+            },
+        },
+        {
+            "type": "user",
+            "message": {"content": [{"type": "text", "text": "hello"}]},
+        },
+    ]
+    path.write_text("\n".join(map(json.dumps, entries)), encoding="utf-8")
+
+    session = list(iter_claude_sessions(tmp_path))[0]
+    assert [message.role for message in session.messages] == ["assistant", "user"]
+    assert list(session.iter_tool_calls()) == []
+    assert session.usage.total == 0

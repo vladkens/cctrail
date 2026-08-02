@@ -10,58 +10,70 @@
 
 </div>
 
-`cctrail` is a Python library and a small CLI for reading local Claude Code and Codex history and turning it into structured sessions, messages, tool calls, token usage, and project statistics.
-
-## Python API
-
-```python
-from cctrail import iter_sessions
-
-for session in iter_sessions():
-    print(session.provider, session.cwd, session.title, session.usage.total)
-
-    for call in session.tool_calls:
-        print(call.name, call.input, call.duration)
-
-    for agent in session.agents:
-        print(agent.agent_type, agent.usage.total)
-```
-
-By default, sessions are read from `~/.claude/projects` and `~/.codex`. A specific history directory can be passed explicitly:
-
-```python
-sessions = iter_sessions("/path/to/history")
-```
-
-Provider-specific iterators are also available as `iter_claude_sessions()` and `iter_codex_sessions()`. Sub-agent transcripts are resolved automatically and attached to the tool call that launched them.
-
-The main data types are `Session`, `Message`, `ToolCall`, and `Usage`. Every model can be converted to a dictionary or JSON with `.as_dict()` and `.as_json()`.
-
-```python
-from cctrail import iter_sessions
-
-session = next(iter_sessions())
-print(session.as_json(indent=2))
-```
+`cctrail` reads local Claude Code and Codex history and reports token usage and project statistics. It can also be used as a Python library for working with parsed sessions, messages, tool calls, and agents.
 
 ## CLI
 
 Show token usage by day:
 
 ```sh
-uv run cctrail usage
-uv run cctrail usage --since 2026-07-01 --until 2026-07-31
+uvx cctrail usage
+```
+
+Limit the report to a date range:
+
+```sh
+uvx cctrail usage --since 2026-07-01 --until 2026-07-31
 ```
 
 Show usage grouped by project directory:
 
 ```sh
-uv run cctrail projects
+uvx cctrail projects
 ```
 
-Both commands combine Claude Code and Codex history by default and accept `--root` for another history directory.
+Both commands read `~/.claude/projects` and `~/.codex` by default. Pass `--root /path/to/history` to read another directory.
 
 Usage reports count each provider message once, while parsed sessions retain their original message and sub-agent structure.
+
+## Python library
+
+Add `cctrail` to a project:
+
+```sh
+uv add cctrail
+```
+
+Iterate over parsed sessions:
+
+```python
+from cctrail import iter_sessions, tool_call_counts
+
+for session in iter_sessions():
+    print(session.provider, session.cwd, session.title, session.usage.total)
+
+    for call in session.iter_tool_calls():
+        print(call.name, call.input, call.duration)
+
+    for agent in session.iter_agents():
+        print(agent.agent_type, agent.usage.total)
+
+    print(tool_call_counts(session))
+```
+
+Provider-specific iterators are available as `iter_claude_sessions()` and `iter_codex_sessions()`. Sub-agent transcripts are attached to the tool call that launched them.
+
+The main data types are `Session`, `Message`, `ToolCall`, and `Usage`. Every model supports `.as_dict()` and `.as_json()`.
+
+```python
+from cctrail import by_project, iter_sessions, usage_by_day
+
+sessions = list(iter_sessions())
+daily = usage_by_day(sessions)
+projects = by_project(sessions)
+```
+
+Daily usage is grouped in the system timezone by default. Pass a `datetime.tzinfo` as the `timezone` argument to `usage_by_day()` to use another timezone.
 
 ## Development
 

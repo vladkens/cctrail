@@ -1,6 +1,7 @@
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 
 from .models import JsonTrait, Message, Session, Usage
 
@@ -44,17 +45,24 @@ def usage_rank(message: Message) -> int:
     return message.usage.total
 
 
-def usage_by_day(sessions: Iterable[Session]) -> dict[date, Usage]:
-    """Sum token usage per calendar day, across each session and its nested agents."""
+def usage_by_day(
+    sessions: Iterable[Session], *, timezone: tzinfo | None = None
+) -> dict[date, Usage]:
+    """Sum token usage per calendar day, using the system timezone by default."""
     buckets: dict[date, Usage] = {}
     for _, message in usage_messages(sessions):
         if message.timestamp is None or message.usage is None:
             continue
 
-        day = message.timestamp.date()
+        day = calendar_date(message.timestamp, timezone)
         buckets[day] = buckets.get(day, Usage()) + message.usage
 
     return buckets
+
+
+def tool_call_counts(session: Session) -> Counter[str]:
+    """Count tool calls in one session, excluding nested agent sessions."""
+    return Counter(call.name for call in session.iter_tool_calls())
 
 
 @dataclass
@@ -73,13 +81,15 @@ def by_project(sessions: Iterable[Session]) -> dict[str, ProjectSummary]:
     for session in sessions:
         project = session.cwd or "unknown"
         summary = result.setdefault(project, ProjectSummary(project=project))
-        summary.session_count += 1
+        if session.kind == "main":
+            summary.session_count += 1
 
-        started, ended = session.started_at, session.ended_at
-        if started and (summary.first_activity is None or started < summary.first_activity):
-            summary.first_activity = started
-        if ended and (summary.last_activity is None or ended > summary.last_activity):
-            summary.last_activity = ended
+        for nested in session.walk():
+            started, ended = nested.started_at, nested.ended_at
+            if started and (summary.first_activity is None or started < summary.first_activity):
+                summary.first_activity = started
+            if ended and (summary.last_activity is None or ended > summary.last_activity):
+                summary.last_activity = ended
 
     for session, message in usage_messages(sessions):
         project = session.cwd or "unknown"
@@ -87,6 +97,13 @@ def by_project(sessions: Iterable[Session]) -> dict[str, ProjectSummary]:
         result[project].usage = result[project].usage + message.usage
 
     return result
+
+
+def calendar_date(timestamp: datetime, timezone: tzinfo | None) -> date:
+    if timestamp.tzinfo is None:
+        return timestamp.date()
+
+    return timestamp.astimezone(timezone).date()
 
 
 def active_time(events: Iterable[datetime], window: timedelta = timedelta(minutes=5)) -> timedelta:

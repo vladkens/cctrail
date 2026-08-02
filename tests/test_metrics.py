@@ -1,8 +1,15 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
-from cctrail import Message, Session, Usage, iter_claude_sessions, iter_sessions
-from cctrail.metrics import by_project, usage_by_day
+from cctrail import (
+    Message,
+    Session,
+    Usage,
+    by_project,
+    iter_claude_sessions,
+    iter_sessions,
+    usage_by_day,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
 
@@ -38,7 +45,7 @@ def test_metrics_combine_claude_and_codex_sessions():
     projects = by_project(iter_sessions(fixtures))
 
     summary = projects["/repo"]
-    assert summary.session_count == 6
+    assert summary.session_count == 5
     assert summary.usage.total == (353 + 74) + 80 + (410 + 20 + 25)
 
 
@@ -61,3 +68,14 @@ def test_usage_identity_includes_request_id_except_for_sidechain_replays():
     )
 
     assert usage_by_day([session])[date(2026, 1, 1)].total == 30
+
+
+def test_usage_by_day_accepts_a_timezone_override():
+    timestamp = datetime(2026, 1, 1, 23, 30, tzinfo=UTC)
+    session = Session(
+        id="session",
+        messages=[Message("assistant", timestamp, usage=Usage(input=10))],
+    )
+
+    utc_plus_two = timezone(timedelta(hours=2))
+    assert list(usage_by_day([session], timezone=utc_plus_two)) == [date(2026, 1, 2)]

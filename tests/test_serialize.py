@@ -1,51 +1,51 @@
 import json
+from datetime import datetime
 from pathlib import Path
 
 import cctrail
-from cctrail import Message, Session, ToolCall, Usage, iter_claude_sessions
+from cctrail import Message, ProjectSummary, Session, ToolCall, Usage, iter_claude_sessions
 from cctrail.utils import json_dump, json_lines, json_load
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
 
 
-def test_as_dict_includes_computed_properties_not_just_raw_fields():
+def test_as_dict_serializes_stored_model_fields():
     session = list(iter_claude_sessions(FIXTURES))[0]
     data = session.as_dict()
 
-    # Raw stored field.
     assert data["id"] == "s-main-1"
-    # Computed properties, not declared dataclass fields (including Usage's
-    # own `total` property, one level down).
-    assert data["usage"] == {
-        "input": 15,
+    assert data["messages"][1]["usage"] == {
+        "input": 10,
         "cache_write": 5,
-        "cache_read": 300,
-        "output": 33,
+        "cache_read": 100,
+        "output": 20,
         "reasoning": 0,
-        "total": 353,
     }
-    assert data["tool_call_counts"] == {"Bash": 1, "Agent": 1}
-    assert data["duration"] == 10.0  # timedelta -> seconds, not repr
+    assert "usage" not in data
+    assert "duration" not in data
+    assert "agents" not in data
+    assert "tool_calls" not in data
 
-    # Nested agent session serializes recursively, including its own properties.
-    assert len(data["agents"]) == 1
-    agent = data["agents"][0]
+    agent = next(
+        call["agent"]
+        for message in data["messages"]
+        for call in message["tool_calls"]
+        if call["agent"] is not None
+    )
     assert agent["id"] == "a-explore-1"
-    assert agent["duration"] == 5.0
-    assert agent["tool_call_counts"] == {"Read": 1}
 
 
-def test_as_dict_formats_timestamps_as_iso_strings():
+def test_as_dict_preserves_python_values():
     session = list(iter_claude_sessions(FIXTURES))[0]
     data = session.as_dict()
-    assert data["messages"][0]["timestamp"] == "2026-01-01T00:00:00+00:00"
+    assert isinstance(data["messages"][0]["timestamp"], datetime)
 
 
 def test_as_json_round_trips_through_stdlib_json():
     session = list(iter_claude_sessions(FIXTURES))[0]
     parsed = json.loads(session.as_json())
     assert parsed["id"] == "s-main-1"
-    assert parsed["usage"]["total"] == 15 + 5 + 300 + 33
+    assert parsed["messages"][0]["text"] == "fix the bug"
 
 
 def test_all_models_have_json_methods():
@@ -54,6 +54,7 @@ def test_all_models_have_json_methods():
         ToolCall(id="call", name="Read", input={}),
         Message(role="user", timestamp=None),
         Session(id="session"),
+        ProjectSummary(project="/repo"),
     ]
     for value in values:
         assert isinstance(value.as_dict(), dict)
