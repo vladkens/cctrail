@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from cctrail import as_dict, as_json, iter_claude_sessions
+from cctrail.utils import json_dump, json_lines, json_load
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
 
@@ -44,3 +45,13 @@ def test_as_json_round_trips_through_stdlib_json():
     parsed = json.loads(as_json(session))
     assert parsed["id"] == "s-main-1"
     assert parsed["usage"]["total"] == 15 + 5 + 300 + 33
+
+
+def test_json_helpers_handle_invalid_values_and_jsonl(tmp_path: Path):
+    assert json_load("invalid", "fallback") == "fallback"
+    assert json_load("null", "fallback") is None
+    assert json_load(json_dump({"text": "привет"})) == {"text": "привет"}
+
+    path = tmp_path / "history.jsonl"
+    path.write_bytes(b'invalid\n{"id":"one"}\n\n{"id":"two"}\n')
+    assert list(json_lines(path)) == [{"id": "one"}, {"id": "two"}]

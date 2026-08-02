@@ -1,10 +1,10 @@
-import json
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from .models import Message, Session, ToolCall, Usage
+from .utils import json_lines, json_load
 
 
 def default_root() -> Path:
@@ -69,22 +69,6 @@ def subagent_paths(paths: list[Path]) -> dict[tuple[Path, str], Path]:
 
 def session_dir(path: Path) -> Path:
     return next(parent.parent for parent in path.parents if parent.name == "subagents")
-
-
-def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            if isinstance(value, dict):
-                yield value
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -155,7 +139,7 @@ def parse_file(
     ai_titles: dict[str, str] = {}
     custom_titles: dict[str, str] = {}
 
-    for item in read_jsonl(path):
+    for item in json_lines(path):
         cwd = item.get("cwd")
         if cwd and not session.cwd:
             session.cwd = cwd
@@ -350,8 +334,8 @@ def build_agent_session(
 
 def read_object(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        value = json_load(path.read_text(encoding="utf-8"))
+    except OSError:
         return {}
 
     return value if isinstance(value, dict) else {}

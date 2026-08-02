@@ -3,7 +3,7 @@ from .codex import iter_sessions as iter_codex_sessions
 from .history import iter_sessions
 from .metrics import active_time
 from .models import Message, Session, ToolCall, Usage
-from .serialize import as_dict, as_json
+from .utils import as_dict, as_json
 
 __all__ = [
     "Message",

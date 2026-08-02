@@ -1,6 +1,7 @@
 from datetime import timedelta
 from pathlib import Path
 
+import cctrail.codex as codex
 from cctrail import iter_codex_sessions
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex"
@@ -86,3 +87,12 @@ def test_fork_is_a_root_session_without_replayed_history():
     assert [message.role for message in fork.messages] == ["user", "assistant"]
     assert fork.messages[0].text == "try another approach"
     assert fork.usage.total == 25
+
+
+def test_parallel_parser_matches_sequential_parser(monkeypatch):
+    sequential = list(iter_codex_sessions(FIXTURES))
+
+    monkeypatch.setattr(codex, "_PARALLEL_MIN_FILES", 0)
+    parallel = list(iter_codex_sessions(FIXTURES))
+
+    assert parallel == sequential

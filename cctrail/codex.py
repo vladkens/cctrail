@@ -1,4 +1,3 @@
-import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -6,6 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from .models import Message, Session, ToolCall, Usage
+from .utils import imap, json_dump, json_lines, json_load
+
+PARALLEL_MIN_FILES = 32
 
 
 @dataclass(frozen=True)
@@ -32,16 +34,15 @@ def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
     titles = load_titles(root)
     rollouts = [rollout for path in history_files(root) if (rollout := read_meta(path))]
     by_id = {rollout.id: rollout for rollout in rollouts}
-    usage_cache: dict[str, list[tuple[int, ...]]] = {}
+    rollouts = list(by_id.values())
+    paths = replay_paths(rollouts, by_id)
 
-    sessions = {
-        rollout.id: parse_file(
-            rollout,
-            titles.get(rollout.id),
-            replay_end(rollout, by_id, usage_cache),
-        )
-        for rollout in by_id.values()
-    }
+    workers = None if len(rollouts) >= PARALLEL_MIN_FILES else 1
+    replay_events = dict(zip(paths, imap(usage_events, paths, workers=workers)))
+    jobs = parse_jobs(rollouts, by_id, titles, replay_events)
+    parsed = list(imap(parse_job, jobs, workers=workers))
+
+    sessions = {session.id: session for session in parsed}
 
     attached: set[str] = set()
     for rollout in by_id.values():
@@ -52,6 +53,22 @@ def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
     for session_id, session in sessions.items():
         if session_id not in attached and session.messages:
             yield session
+
+
+def parse_jobs(
+    rollouts: list[Rollout],
+    by_id: dict[str, Rollout],
+    titles: dict[str, str],
+    replay_events: dict[Path, list[tuple[int, tuple[int, ...]]]],
+) -> list[tuple[Rollout, str | None, int]]:
+    return [
+        (rollout, titles.get(rollout.id), replay_end(rollout, by_id, replay_events))
+        for rollout in rollouts
+    ]
+
+
+def parse_job(job: tuple[Rollout, str | None, int]) -> Session:
+    return parse_file(*job)
 
 
 def history_files(root: Path) -> list[Path]:
@@ -68,23 +85,8 @@ def history_files(root: Path) -> list[Path]:
     return sorted(paths)
 
 
-def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                if isinstance(value, dict):
-                    yield value
-    except OSError:
-        return
-
-
 def read_meta(path: Path) -> Rollout | None:
-    item = next(read_jsonl(path), None)
+    item = next(json_lines(path), None)
     if not isinstance(item, dict) or item.get("type") != "session_meta":
         return None
 
@@ -139,7 +141,7 @@ def parse_file(rollout: Rollout, title: str | None, replay_end: int) -> Session:
 
         return current_assistant
 
-    for line_number, item in enumerate(read_jsonl(rollout.path)):
+    for line_number, item in enumerate(json_lines(rollout.path)):
         payload = item.get("payload")
         if not isinstance(payload, dict):
             continue
@@ -287,29 +289,20 @@ def nested_parent_id(value: Any) -> str | None:
 def replay_end(
     rollout: Rollout,
     by_id: dict[str, Rollout],
-    usage_cache: dict[str, list[tuple[int, ...]]],
+    replay_events: dict[Path, list[tuple[int, tuple[int, ...]]]],
 ) -> int:
     """Return the last legacy line copied from a fork's source rollout."""
-    if (
-        rollout.forked_from_id is None
-        or rollout.has_history_base
-        or rollout.own_start_ordinal is not None
-    ):
-        return -1
-    parent = by_id.get(rollout.forked_from_id)
+    parent = replay_parent(rollout, by_id)
     if parent is None:
         return -1
 
-    if parent.id not in usage_cache:
-        usage_cache[parent.id] = [usage for _, usage in usage_events(parent.path)]
-
-    parent_usage = usage_cache[parent.id]
+    parent_usage = [usage for _, usage in replay_events[parent.path]]
     if not parent_usage:
         return -1
 
     parent_position = 0
     replay_end = -1
-    for line_number, usage in usage_events(rollout.path):
+    for line_number, usage in replay_events[rollout.path]:
         while parent_position < len(parent_usage) and parent_usage[parent_position] != usage:
             parent_position += 1
 
@@ -322,10 +315,31 @@ def replay_end(
     return replay_end
 
 
+def replay_paths(rollouts: list[Rollout], by_id: dict[str, Rollout]) -> list[Path]:
+    paths: set[Path] = set()
+    for rollout in rollouts:
+        parent = replay_parent(rollout, by_id)
+        if parent is not None:
+            paths.update((rollout.path, parent.path))
+
+    return sorted(paths)
+
+
+def replay_parent(rollout: Rollout, by_id: dict[str, Rollout]) -> Rollout | None:
+    if (
+        rollout.forked_from_id is None
+        or rollout.has_history_base
+        or rollout.own_start_ordinal is not None
+    ):
+        return None
+
+    return by_id.get(rollout.forked_from_id)
+
+
 def usage_events(path: Path) -> list[tuple[int, tuple[int, ...]]]:
     events: list[tuple[int, tuple[int, ...]]] = []
     previous_total: tuple[int, ...] | None = None
-    for line_number, item in enumerate(read_jsonl(path)):
+    for line_number, item in enumerate(json_lines(path)):
         payload = item.get("payload")
         if (
             item.get("type") != "event_msg"
@@ -358,7 +372,7 @@ def load_titles(root: Path) -> dict[str, str]:
     for path in sorted(candidates):
         if not path.is_file():
             continue
-        for item in read_jsonl(path):
+        for item in json_lines(path):
             session_id = string_or_none(item.get("id"))
             title = string_or_none(item.get("thread_name"))
             if session_id and title:
@@ -441,17 +455,14 @@ def json_value(value: Any) -> Any:
     if not isinstance(value, str):
         return value
 
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value
+    return json_load(value, value)
 
 
 def output_text(value: Any) -> str | None:
     if value is None:
         return None
 
-    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return value if isinstance(value, str) else json_dump(value)
 
 
 def is_error(value: Any) -> bool:
