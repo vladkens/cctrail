@@ -35,13 +35,13 @@ sessions = iter_sessions("/path/to/history")
 
 Provider-specific iterators are also available as `iter_claude_sessions()` and `iter_codex_sessions()`. Sub-agent transcripts are resolved automatically and attached to the tool call that launched them.
 
-The main data types are `Session`, `Message`, `ToolCall`, and `Usage`. Parsed objects can be converted to dictionaries or JSON with `as_dict()` and `as_json()`.
+The main data types are `Session`, `Message`, `ToolCall`, and `Usage`. Every model can be converted to a dictionary or JSON with `.as_dict()` and `.as_json()`.
 
 ```python
-from cctrail import as_json, iter_sessions
+from cctrail import iter_sessions
 
 session = next(iter_sessions())
-print(as_json(session, indent=2))
+print(session.as_json(indent=2))
 ```
 
 ## CLI

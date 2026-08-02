@@ -5,7 +5,15 @@ from pathlib import Path
 from typing import Any
 
 from .models import Message, Session, ToolCall, Usage
-from .utils import imap, json_dump, json_lines, json_load
+from .utils import (
+    extract_text,
+    imap,
+    json_dump,
+    json_lines,
+    json_load,
+    parse_timestamp,
+    string_or_none,
+)
 
 PARALLEL_MIN_FILES = 32
 
@@ -215,7 +223,7 @@ def parse_file(rollout: Rollout, title: str | None, replay_end: int) -> Session:
 
         subtype = payload.get("type")
         if subtype == "message" and payload.get("role") == "assistant":
-            text = message_text(payload.get("content"))
+            text = extract_text(payload.get("content"), ("output_text", "text"))
             if text:
                 message = assistant(timestamp)
                 message.text = "\n".join(filter(None, (message.text, text)))
@@ -272,9 +280,9 @@ def parent_id(payload: dict[str, Any]) -> str | None:
 
 def nested_parent_id(value: Any) -> str | None:
     if isinstance(value, dict):
-        value_parent_id = string_or_none(value.get("parent_thread_id"))
-        if value_parent_id:
-            return value_parent_id
+        parent_id = string_or_none(value.get("parent_thread_id"))
+        if parent_id:
+            return parent_id
         for child in value.values():
             if child_parent_id := nested_parent_id(child):
                 return child_parent_id
@@ -476,33 +484,6 @@ def is_error(value: Any) -> bool:
         or isinstance(status, str)
         and status in {"failed", "error"}
     )
-
-
-def message_text(content: Any) -> str:
-    if not isinstance(content, list):
-        return ""
-
-    return "\n".join(
-        block["text"]
-        for block in content
-        if isinstance(block, dict)
-        and block.get("type") in {"output_text", "text"}
-        and isinstance(block.get("text"), str)
-    )
-
-
-def parse_timestamp(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def string_or_none(value: Any) -> str | None:
-    return value if isinstance(value, str) and value else None
 
 
 def integer(value: Any) -> int | None:

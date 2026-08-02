@@ -2,7 +2,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from .models import Message, Session, Usage
+from .models import JsonTrait, Message, Session, Usage
 
 
 def usage_messages(sessions: Iterable[Session]) -> list[tuple[Session, Message]]:
@@ -58,7 +58,7 @@ def usage_by_day(sessions: Iterable[Session]) -> dict[date, Usage]:
 
 
 @dataclass
-class ProjectSummary:
+class ProjectSummary(JsonTrait):
     project: str
     usage: Usage = field(default_factory=Usage)
     session_count: int = 0

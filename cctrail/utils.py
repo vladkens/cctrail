@@ -1,6 +1,6 @@
 import dataclasses
 import json
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from datetime import date, datetime, timedelta
 from inspect import getmembers
 from multiprocessing import cpu_count, get_all_start_methods, get_context
@@ -56,6 +56,36 @@ def json_lines(path: Path) -> Iterator[dict[str, Any]]:
                     yield value
     except OSError:
         return
+
+
+def parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def extract_text(content: Any, block_types: Collection[str]) -> str:
+    if isinstance(content, str):
+        return content
+
+    if not isinstance(content, list):
+        return ""
+
+    return "\n".join(
+        block["text"]
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") in block_types
+        and isinstance(block.get("text"), str)
+    )
 
 
 def as_dict(obj: Any) -> Any:

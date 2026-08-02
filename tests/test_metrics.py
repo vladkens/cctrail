@@ -30,6 +30,7 @@ def test_by_project_groups_by_cwd_and_sums_agent_usage():
     assert summary.usage.total == (135 + 57 + 161) + (31 + 43)
     assert summary.first_activity is not None
     assert summary.last_activity is not None
+    assert summary.as_dict()["session_count"] == 1
 
 
 def test_metrics_combine_claude_and_codex_sessions():

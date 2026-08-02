@@ -4,9 +4,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
+from .utils import as_dict, as_json
+
+
+class JsonTrait:
+    def as_dict(self) -> dict[str, Any]:
+        return as_dict(self)
+
+    def as_json(self, **kwargs: Any) -> str:
+        return as_json(self, **kwargs)
+
 
 @dataclass
-class Usage:
+class Usage(JsonTrait):
     input: int = 0
     cache_write: int = 0
     cache_read: int = 0
@@ -28,7 +38,7 @@ class Usage:
 
 
 @dataclass
-class ToolCall:
+class ToolCall(JsonTrait):
     id: str
     name: str
     input: dict[str, Any]
@@ -47,7 +57,7 @@ class ToolCall:
 
 
 @dataclass
-class Message:
+class Message(JsonTrait):
     role: Literal["user", "assistant"]
     timestamp: datetime | None
     id: str | None = None
@@ -62,7 +72,7 @@ class Message:
 
 
 @dataclass
-class Session:
+class Session(JsonTrait):
     id: str
     kind: Literal["main", "agent"] = "main"
     provider: str = "claude"

@@ -1,10 +1,10 @@
 from collections.abc import Iterator
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from .models import Message, Session, ToolCall, Usage
-from .utils import json_lines, json_load
+from .utils import extract_text, json_lines, json_load, parse_timestamp, string_or_none
 
 
 def default_root() -> Path:
@@ -69,35 +69,6 @@ def subagent_paths(paths: list[Path]) -> dict[tuple[Path, str], Path]:
 
 def session_dir(path: Path) -> Path:
     return next(parent.parent for parent in path.parents if parent.name == "subagents")
-
-
-def parse_timestamp(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def extract_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-
-    if not isinstance(content, list):
-        return ""
-
-    parts = []
-    for block in content:
-        if not isinstance(block, dict) or block.get("type") not in ("text", "input_text"):
-            continue
-
-        text = block.get("text")
-        if isinstance(text, str):
-            parts.append(text)
-
-    return "\n".join(parts)
 
 
 def usage_from_raw(raw: Any) -> Usage:
@@ -242,7 +213,7 @@ def parse_file(
 
                     call.ended_at = timestamp
                     call.is_error = bool(block.get("is_error"))
-                    call.output_text = extract_text(block.get("content"))
+                    call.output_text = extract_text(block.get("content"), ("text", "input_text"))
                     call.raw_result = item.get("toolUseResult")
                     if call.name in ("Agent", "Task"):
                         call.agent = build_agent_session(
@@ -260,7 +231,7 @@ def parse_file(
             if item.get("isMeta"):
                 continue
 
-            text = extract_text(content).strip()
+            text = extract_text(content, ("text", "input_text")).strip()
             if not text:
                 continue
 
@@ -339,7 +310,3 @@ def read_object(path: Path) -> dict[str, Any]:
         return {}
 
     return value if isinstance(value, dict) else {}
-
-
-def string_or_none(value: Any) -> str | None:
-    return value if isinstance(value, str) and value else None
