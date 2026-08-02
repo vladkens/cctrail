@@ -19,6 +19,7 @@ def test_as_dict_includes_computed_properties_not_just_raw_fields():
         "cache_write": 5,
         "cache_read": 300,
         "output": 33,
+        "reasoning": 0,
         "total": 353,
     }
     assert data["tool_call_counts"] == {"Bash": 1, "Agent": 1}

@@ -1,7 +1,7 @@
 [project]
 name = "cctrail"
 version = "0.1.0"
-description = "Streaming parser for Claude Code (and later Codex) chat history into structured sessions"
+description = "Streaming parser for Claude Code and Codex chat history"
 readme = "readme.md"
 requires-python = ">=3.11"
 authors = [{ name = "vladkens" }]

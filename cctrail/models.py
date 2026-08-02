@@ -11,10 +11,11 @@ class Usage:
     cache_write: int = 0
     cache_read: int = 0
     output: int = 0
+    reasoning: int = 0
 
     @property
     def total(self) -> int:
-        return self.input + self.cache_write + self.cache_read + self.output
+        return self.input + self.cache_write + self.cache_read + self.output + self.reasoning
 
     def __add__(self, other: "Usage") -> "Usage":
         return Usage(
@@ -22,6 +23,7 @@ class Usage:
             cache_write=self.cache_write + other.cache_write,
             cache_read=self.cache_read + other.cache_read,
             output=self.output + other.output,
+            reasoning=self.reasoning + other.reasoning,
         )
 
 

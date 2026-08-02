@@ -4,7 +4,7 @@ from datetime import date, datetime
 from rich.console import Console
 from rich.table import Table
 
-from .claude import iter_sessions
+from .history import iter_sessions
 from .metrics import by_project, usage_by_day
 from .models import Usage
 
@@ -32,7 +32,15 @@ def cmd_usage(args: argparse.Namespace) -> None:
     )
 
     table = Table(box=None, header_style="bold")
-    for column in ("Date", "Input", "Output", "Cache write", "Cache read", "Total"):
+    for column in (
+        "Date",
+        "Input",
+        "Output",
+        "Reasoning",
+        "Cache write",
+        "Cache read",
+        "Total",
+    ):
         table.add_column(column, justify="right" if column != "Date" else "left")
 
     total = Usage()
@@ -43,6 +51,7 @@ def cmd_usage(args: argparse.Namespace) -> None:
             day.isoformat(),
             human(usage.input),
             human(usage.output),
+            human(usage.reasoning),
             human(usage.cache_write),
             human(usage.cache_read),
             human(usage.total),
@@ -53,6 +62,7 @@ def cmd_usage(args: argparse.Namespace) -> None:
         "total",
         human(total.input),
         human(total.output),
+        human(total.reasoning),
         human(total.cache_write),
         human(total.cache_read),
         human(total.total),
@@ -90,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
 
     usage_parser = subparsers.add_parser("usage", help="Token usage by day")
     usage_parser.add_argument(
-        "--root", default=None, help="Claude projects dir (default: ~/.claude/projects)"
+        "--root", default=None, help="History dir (default: Claude and Codex homes)"
     )
     usage_parser.add_argument("--since", type=parse_date, default=None, metavar="YYYY-MM-DD")
     usage_parser.add_argument("--until", type=parse_date, default=None, metavar="YYYY-MM-DD")
@@ -98,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
 
     projects_parser = subparsers.add_parser("projects", help="Token usage aggregated by project")
     projects_parser.add_argument(
-        "--root", default=None, help="Claude projects dir (default: ~/.claude/projects)"
+        "--root", default=None, help="History dir (default: Claude and Codex homes)"
     )
     projects_parser.set_defaults(func=cmd_projects)
 

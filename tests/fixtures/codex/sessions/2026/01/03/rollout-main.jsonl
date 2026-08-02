@@ -1,0 +1,16 @@
+{"timestamp":"2026-01-03T10:00:00Z","type":"session_meta","payload":{"id":"codex-main-1","timestamp":"2026-01-03T10:00:00Z","cwd":"/repo","source":"cli","git":{"branch":"main"}}}
+{"timestamp":"2026-01-03T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1","started_at":"2026-01-03T10:00:00Z"}}
+{"timestamp":"2026-01-03T10:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"fix the parser"}}
+{"timestamp":"2026-01-03T10:00:00Z","type":"turn_context","payload":{"turn_id":"turn-1","cwd":"/repo","model":"gpt-5.4"}}
+{"timestamp":"2026-01-03T10:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will inspect it."}]}}
+{"timestamp":"2026-01-03T10:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rg parser\"}","call_id":"call-exec"}}
+{"timestamp":"2026-01-03T10:00:01Z","type":"response_item","payload":{"type":"web_search_call","id":"web-1","status":"completed","action":{"type":"search","query":"Codex JSONL"}}}
+{"timestamp":"2026-01-03T10:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-exec","output":"parser.py"}}
+{"timestamp":"2026-01-03T10:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120},"total_token_usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120}}}}
+{"timestamp":"2026-01-03T10:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch","call_id":"call-patch","status":"completed"}}
+{"timestamp":"2026-01-03T10:00:06Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-patch","output":"Done!"}}
+{"timestamp":"2026-01-03T10:00:07Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":200,"cached_input_tokens":150,"output_tokens":30,"reasoning_output_tokens":10,"total_tokens":230},"total_token_usage":{"input_tokens":300,"cached_input_tokens":210,"output_tokens":50,"reasoning_output_tokens":15,"total_tokens":350}}}}
+{"timestamp":"2026-01-03T10:00:08Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","arguments":"{\"agent_type\":\"explorer\",\"message\":\"inspect fixtures\"}","call_id":"call-agent"}}
+{"timestamp":"2026-01-03T10:00:09Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-agent","output":"{\"agent_id\":\"codex-agent-1\",\"nickname\":\"Scout\",\"status\":{\"completed\":true}}"}}
+{"timestamp":"2026-01-03T10:00:10Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":2,"total_tokens":60},"total_token_usage":{"input_tokens":350,"cached_input_tokens":230,"output_tokens":60,"reasoning_output_tokens":17,"total_tokens":410}}}}
+{"timestamp":"2026-01-03T10:00:30Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}

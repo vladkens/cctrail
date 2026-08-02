@@ -1,0 +1,9 @@
+{"timestamp":"2026-01-03T11:00:00Z","type":"session_meta","payload":{"id":"codex-fork-1","session_id":"codex-main-1","timestamp":"2026-01-03T11:00:00Z","cwd":"/repo","forked_from_id":"codex-main-1","source":"cli","git":{"branch":"experiment"}}}
+{"timestamp":"2026-01-03T11:00:00.010Z","type":"session_meta","payload":{"id":"codex-main-1","timestamp":"2026-01-03T10:00:00Z","cwd":"/repo","source":"cli","git":{"branch":"main"}}}
+{"timestamp":"2026-01-03T11:00:00.020Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120},"total_token_usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120}}}}
+{"timestamp":"2026-01-03T11:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"fork-turn","started_at":"2026-01-03T11:00:01Z"}}
+{"timestamp":"2026-01-03T11:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"try another approach"}}
+{"timestamp":"2026-01-03T11:00:01Z","type":"turn_context","payload":{"turn_id":"fork-turn","cwd":"/repo","model":"gpt-5.4"}}
+{"timestamp":"2026-01-03T11:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will try a different approach."}]}}
+{"timestamp":"2026-01-03T11:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"cached_input_tokens":5,"output_tokens":5,"reasoning_output_tokens":1,"total_tokens":25},"total_token_usage":{"input_tokens":120,"cached_input_tokens":65,"output_tokens":25,"reasoning_output_tokens":6,"total_tokens":145}}}}
+{"timestamp":"2026-01-03T11:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"fork-turn"}}
