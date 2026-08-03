@@ -1,4 +1,5 @@
 import json
+import signal
 from collections.abc import Callable, Collection, Iterable, Iterator
 from datetime import datetime
 from multiprocessing import cpu_count, get_all_start_methods, get_context
@@ -9,6 +10,10 @@ import orjson
 
 T = TypeVar("T")
 R = TypeVar("R")
+
+
+def ignore_sigint() -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
 def imap(
@@ -27,7 +32,7 @@ def imap(
         yield from map(func, items)
         return
 
-    with get_context("fork").Pool(workers) as pool:
+    with get_context("fork").Pool(workers, initializer=ignore_sigint) as pool:
         yield from pool.imap(func, items, chunksize)
 
 

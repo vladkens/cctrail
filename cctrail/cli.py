@@ -120,5 +120,9 @@ def main(argv: list[str] | None = None) -> int:
     projects_parser.set_defaults(func=cmd_projects)
 
     args = parser.parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        return 130
+
     return 0

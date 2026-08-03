@@ -26,3 +26,11 @@ def test_projects_command_combines_providers(capsys):
     out = capsys.readouterr().out
     assert "/repo" in out
     assert "962" in out
+
+
+def test_keyboard_interrupt_exits_without_a_traceback(monkeypatch):
+    def interrupted(_root):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("cctrail.cli.iter_sessions", interrupted)
+    assert main(["usage"]) == 130
