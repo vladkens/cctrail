@@ -1,12 +1,15 @@
 import argparse
+from collections import Counter
 from datetime import date, datetime
+from importlib.metadata import PackageNotFoundError, version
 
 from rich.console import Console
 from rich.table import Table
 
 from .history import iter_sessions
-from .metrics import by_project, usage_by_day
+from .metrics import by_project, usage_by_day, usage_messages
 from .models import Usage
+from .pricing import get_pricing
 
 
 def parse_date(value: str) -> date:
@@ -113,6 +116,67 @@ def cmd_projects(args: argparse.Namespace) -> None:
     Console().print(table)
 
 
+def cmd_audit(args: argparse.Namespace) -> None:
+    sessions = list(iter_sessions(args.root))
+    messages = usage_messages(sessions)
+    issue_messages: Counter[tuple[str, str, str]] = Counter()
+    issue_tokens: Counter[tuple[str, str, str]] = Counter()
+    total_tokens = 0
+
+    for session, message in messages:
+        assert message.usage is not None
+        total_tokens += message.usage.total
+        if message.model is None:
+            issue = "missing model", session.provider, "-"
+        elif get_pricing(message.model, provider=session.provider) is None:
+            issue = "missing pricing", session.provider, message.model
+        else:
+            continue
+
+        issue_messages[issue] += 1
+        issue_tokens[issue] += message.usage.total
+
+    unpriced_messages = sum(issue_messages.values())
+    unpriced_tokens = sum(issue_tokens.values())
+    try:
+        current_version = version("cctrail")
+    except PackageNotFoundError:
+        current_version = "unknown"
+
+    summary = Table(title="Pricing audit", box=None, header_style="bold")
+    summary.add_column("Metric")
+    summary.add_column("Value", justify="right")
+    summary.add_row("cctrail version", current_version)
+    summary.add_row("Sessions", f"{len(sessions):,}")
+    summary.add_row("Billable messages", f"{len(messages):,}")
+    summary.add_row("Billable tokens", f"{total_tokens:,}")
+    summary.add_row("Unpriced messages", f"{unpriced_messages:,}")
+    summary.add_row("Unpriced tokens", f"{unpriced_tokens:,}")
+
+    console = Console()
+    console.print(summary)
+    if not issue_messages:
+        console.print("No pricing issues found.")
+        return
+
+    issues = Table(title="Pricing issues", box=None, header_style="bold")
+    issues.add_column("Issue")
+    issues.add_column("Provider")
+    issues.add_column("Model")
+    issues.add_column("Messages", justify="right")
+    issues.add_column("Tokens", justify="right")
+    for issue in sorted(issue_messages):
+        kind, provider, model = issue
+        issues.add_row(
+            kind,
+            provider,
+            model,
+            f"{issue_messages[issue]:,}",
+            f"{issue_tokens[issue]:,}",
+        )
+    console.print(issues)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cctrail")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -130,6 +194,12 @@ def main(argv: list[str] | None = None) -> int:
         "--root", default=None, help="History dir (default: Claude and Codex homes)"
     )
     projects_parser.set_defaults(func=cmd_projects)
+
+    audit_parser = subparsers.add_parser("audit", help="Check pricing coverage")
+    audit_parser.add_argument(
+        "--root", default=None, help="History dir (default: Claude and Codex homes)"
+    )
+    audit_parser.set_defaults(func=cmd_audit)
 
     args = parser.parse_args(argv)
     try:
