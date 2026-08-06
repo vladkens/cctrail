@@ -153,6 +153,29 @@ def test_service_tier_is_kept_with_usage(tmp_path: Path):
     assert messages[1].speed is None
 
 
+def test_codex_home_combines_comma_separated_directories(tmp_path: Path, monkeypatch):
+    roots = [tmp_path / "first", tmp_path / "second"]
+    for index, root in enumerate(roots):
+        path = root / "sessions" / f"session-{index}.jsonl"
+        path.parent.mkdir(parents=True)
+        entries = [
+            {"type": "session_meta", "payload": {"id": f"session-{index}"}},
+            {"type": "turn_context", "payload": {"model": "gpt-5.4"}},
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {"last_token_usage": {"input_tokens": 1}},
+                },
+            },
+        ]
+        path.write_text("\n".join(map(json.dumps, entries)), encoding="utf-8")
+
+    monkeypatch.setenv("CODEX_HOME", ",".join(map(str, roots)))
+
+    assert {session.id for session in iter_codex_sessions()} == {"session-0", "session-1"}
+
+
 def test_parallel_parser_matches_sequential_parser(monkeypatch):
     sequential = list(iter_codex_sessions(FIXTURES))
 

@@ -1,4 +1,5 @@
 import json
+import os
 import signal
 from collections.abc import Callable, Collection, Iterable, Iterator
 from datetime import datetime
@@ -14,6 +15,15 @@ R = TypeVar("R")
 
 def ignore_sigint() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def data_paths(variable: str, defaults: Iterable[Path]) -> list[Path]:
+    value = os.environ.get(variable)
+    if value is None:
+        paths = list(defaults)
+    else:
+        paths = [Path(item.strip()).expanduser() for item in value.split(",") if item.strip()]
+    return list(dict.fromkeys(paths))
 
 
 def imap(

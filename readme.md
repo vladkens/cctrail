@@ -30,12 +30,14 @@ Show usage grouped by project directory:
 
 ```sh
 uvx cctrail projects
-
-# Check whether every billable message has model pricing
-uvx cctrail audit
 ```
 
-All commands read `~/.claude/projects` and `~/.codex` by default. Pass `--root /path/to/history` to read another directory. Audit output contains only aggregate counts and model names, so it can be attached directly to a bug report.
+Claude data is read from `~/.config/claude` and `~/.claude`, while Codex data is read from `~/.codex`. Set `CLAUDE_CONFIG_DIR` or `CODEX_HOME` to replace these defaults. Both variables accept comma-separated directories:
+
+```sh
+CLAUDE_CONFIG_DIR="$HOME/.claude,$HOME/.claude-qh" uvx cctrail usage
+CODEX_HOME="$HOME/.codex,$HOME/.codex-work" uvx cctrail usage
+```
 
 Usage reports count each provider message once, while parsed sessions retain their original message and sub-agent structure. Costs are estimates based on the pricing catalog embedded in the installed cctrail version.
 

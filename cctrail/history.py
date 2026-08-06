@@ -9,9 +9,10 @@ from .models import Session
 def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
     """Stream Claude Code and Codex sessions.
 
-    Without a root, each provider's standard history directory is used. When
-    a root is provided, both parsers inspect that tree and ignore files that
-    belong to the other provider.
+    Without a root, provider directories come from `CLAUDE_CONFIG_DIR` and
+    `CODEX_HOME`, falling back to their standard locations. When a root is
+    provided, both parsers inspect that tree and ignore files that belong to
+    the other provider.
     """
     if root is None:
         yield from iter_claude_sessions()

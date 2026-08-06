@@ -4,23 +4,35 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .models import Message, Session, ToolCall, Usage
-from .utils import extract_text, int_or_zero, json_lines, json_load, parse_timestamp, string_or_none
+from .utils import (
+    data_paths,
+    extract_text,
+    int_or_zero,
+    json_lines,
+    json_load,
+    parse_timestamp,
+    string_or_none,
+)
 
 
-def default_root() -> Path:
-    return Path.home() / ".claude" / "projects"
+def default_roots() -> list[Path]:
+    home = Path.home()
+    return data_paths(
+        "CLAUDE_CONFIG_DIR",
+        (home / ".config" / "claude", home / ".claude"),
+    )
 
 
 def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
-    """Stream Claude Code sessions found under `root`, one file at a time.
+    """Stream Claude Code sessions, one file at a time.
 
-    Defaults to `~/.claude/projects`. Sub-agent transcripts (spawned via the
-    `Agent`/`Task` tool) are resolved automatically and attached to the tool
-    call that launched them, so a fully parsed `Session` already contains its
-    whole agent tree.
+    Without an explicit root, `CLAUDE_CONFIG_DIR` accepts comma-separated
+    directories and replaces the default `~/.config/claude` and `~/.claude`
+    lookup. Sub-agent transcripts are attached to the tool call that launched
+    them, so a fully parsed `Session` already contains its whole agent tree.
     """
-    root = Path(root) if root is not None else default_root()
-    paths = sorted(root.rglob("*.jsonl"))
+    roots = [Path(root).expanduser()] if root is not None else default_roots()
+    paths = sorted({path for root in roots for path in root.rglob("*.jsonl")})
     agent_paths = subagent_paths(paths)
     linked_subagents: set[Path] = set()
     for path in paths:

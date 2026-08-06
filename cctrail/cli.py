@@ -38,7 +38,7 @@ def format_local_date(value: datetime) -> str:
 
 
 def cmd_usage(args: argparse.Namespace) -> None:
-    buckets = usage_by_day(iter_sessions(args.root))
+    buckets = usage_by_day(iter_sessions())
     days = sorted(
         day
         for day in buckets
@@ -93,7 +93,7 @@ def cmd_usage(args: argparse.Namespace) -> None:
 
 def cmd_projects(args: argparse.Namespace) -> None:
     projects = sorted(
-        by_project(iter_sessions(args.root)).values(),
+        by_project(iter_sessions()).values(),
         key=lambda p: p.usage.total,
         reverse=True,
     )
@@ -117,7 +117,7 @@ def cmd_projects(args: argparse.Namespace) -> None:
 
 
 def cmd_audit(args: argparse.Namespace) -> None:
-    sessions = list(iter_sessions(args.root))
+    sessions = list(iter_sessions())
     messages = usage_messages(sessions)
     issue_messages: Counter[tuple[str, str, str]] = Counter()
     issue_tokens: Counter[tuple[str, str, str]] = Counter()
@@ -182,23 +182,14 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     usage_parser = subparsers.add_parser("usage", help="Token usage by day")
-    usage_parser.add_argument(
-        "--root", default=None, help="History dir (default: Claude and Codex homes)"
-    )
     usage_parser.add_argument("--since", type=parse_date, default=None, metavar="YYYY-MM-DD")
     usage_parser.add_argument("--until", type=parse_date, default=None, metavar="YYYY-MM-DD")
     usage_parser.set_defaults(func=cmd_usage)
 
     projects_parser = subparsers.add_parser("projects", help="Token usage aggregated by project")
-    projects_parser.add_argument(
-        "--root", default=None, help="History dir (default: Claude and Codex homes)"
-    )
     projects_parser.set_defaults(func=cmd_projects)
 
     audit_parser = subparsers.add_parser("audit", help="Check pricing coverage")
-    audit_parser.add_argument(
-        "--root", default=None, help="History dir (default: Claude and Codex homes)"
-    )
     audit_parser.set_defaults(func=cmd_audit)
 
     args = parser.parse_args(argv)

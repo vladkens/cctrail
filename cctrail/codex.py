@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from .models import Message, Session, ToolCall, Usage
 from .utils import (
+    data_paths,
     extract_text,
     imap,
     int_or_zero,
@@ -33,15 +34,23 @@ class Rollout:
     git_branch: str | None
 
 
-def default_root() -> Path:
-    return Path.home() / ".codex"
+def default_roots() -> list[Path]:
+    return data_paths("CODEX_HOME", (Path.home() / ".codex",))
 
 
 def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
-    """Stream Codex sessions, attaching spawned agents to their tool calls."""
-    root = Path(root) if root is not None else default_root()
-    titles = load_titles(root)
-    rollouts = [rollout for path in history_files(root) if (rollout := read_meta(path))]
+    """Stream Codex sessions, attaching spawned agents to their tool calls.
+
+    Without an explicit root, `CODEX_HOME` accepts comma-separated directories
+    and replaces the default `~/.codex` lookup.
+    """
+    roots = [Path(root).expanduser()] if root is not None else default_roots()
+    titles = {
+        session_id: title for root in roots for session_id, title in load_titles(root).items()
+    }
+    rollouts = [
+        rollout for root in roots for path in history_files(root) if (rollout := read_meta(path))
+    ]
     by_id = {rollout.id: rollout for rollout in rollouts}
     rollouts = list(by_id.values())
     paths = replay_paths(rollouts, by_id)
