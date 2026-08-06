@@ -24,7 +24,8 @@ def test_usage_by_day_includes_nested_agent_messages():
     day_total = buckets[date(2026, 1, 1)]
 
     # main session (135 + 57 + 161) + agent transcript (31 + 43)
-    assert day_total.total == (135 + 57 + 161) + (31 + 43)
+    assert day_total.usage.total == (135 + 57 + 161) + (31 + 43)
+    assert day_total.cost > 0
 
 
 def test_by_project_groups_by_cwd_and_sums_agent_usage():
@@ -67,7 +68,7 @@ def test_usage_identity_includes_request_id_except_for_sidechain_replays():
         ],
     )
 
-    assert usage_by_day([session])[date(2026, 1, 1)].total == 30
+    assert usage_by_day([session])[date(2026, 1, 1)].usage.total == 30
 
 
 def test_usage_by_day_accepts_a_timezone_override():
@@ -79,3 +80,29 @@ def test_usage_by_day_accepts_a_timezone_override():
 
     utc_plus_two = timezone(timedelta(hours=2))
     assert list(usage_by_day([session], timezone=utc_plus_two)) == [date(2026, 1, 2)]
+
+
+def test_usage_cost_is_calculated_before_daily_aggregation():
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    session = Session(
+        id="session",
+        provider="codex",
+        messages=[
+            Message(
+                "assistant",
+                timestamp,
+                model="gpt-5.4",
+                usage=Usage(input=200_000, output=1_000),
+            ),
+            Message(
+                "assistant",
+                timestamp,
+                model="gpt-5.4",
+                usage=Usage(input=200_000, output=1_000),
+            ),
+        ],
+    )
+
+    summary = usage_by_day([session])[date(2026, 1, 1)]
+    assert summary.usage.input == 400_000
+    assert summary.cost == 1.03

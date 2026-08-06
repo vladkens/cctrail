@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .models import Message, Session, ToolCall, Usage
 from .utils import (
@@ -137,13 +137,19 @@ def parse_file(rollout: Rollout, title: str | None, replay_end: int) -> Session:
     current_assistant: Message | None = None
     current_user: Message | None = None
     current_model: str | None = None
+    current_speed: Literal["standard", "fast"] | None = None
     turn_started_at: datetime | None = None
     last_cumulative: tuple[int, ...] | None = None
 
     def assistant(timestamp: datetime | None) -> Message:
         nonlocal current_assistant
         if current_assistant is None:
-            current_assistant = Message(role="assistant", timestamp=timestamp, model=current_model)
+            current_assistant = Message(
+                role="assistant",
+                timestamp=timestamp,
+                model=current_model,
+                speed=current_speed,
+            )
             session.messages.append(current_assistant)
         elif current_assistant.model is None:
             current_assistant.model = current_model
@@ -168,6 +174,12 @@ def parse_file(rollout: Rollout, title: str | None, replay_end: int) -> Session:
             and ordinal < rollout.own_start_ordinal
         )
         if inherited:
+            if item_type == "turn_context":
+                current_model = string_or_none(payload.get("model")) or current_model
+            elif item_type == "event_msg" and payload.get("type") == "thread_settings_applied":
+                has_speed, speed = speed_from_payload(payload)
+                if has_speed:
+                    current_speed = speed
             if item_type == "event_msg" and payload.get("type") == "token_count":
                 info = payload.get("info")
                 if isinstance(info, dict):
@@ -179,6 +191,9 @@ def parse_file(rollout: Rollout, title: str | None, replay_end: int) -> Session:
 
         if item_type == "turn_context":
             current_model = string_or_none(payload.get("model")) or current_model
+            has_speed, speed = speed_from_payload(payload)
+            if has_speed:
+                current_speed = speed
             session.cwd = string_or_none(payload.get("cwd")) or session.cwd
             continue
 
@@ -200,6 +215,10 @@ def parse_file(rollout: Rollout, title: str | None, replay_end: int) -> Session:
 
                 current_assistant = None
                 turn_started_at = None
+            elif subtype == "thread_settings_applied":
+                has_speed, speed = speed_from_payload(payload)
+                if has_speed:
+                    current_speed = speed
             elif subtype == "token_count":
                 info = payload.get("info")
                 if not isinstance(info, dict):
@@ -215,6 +234,7 @@ def parse_file(rollout: Rollout, title: str | None, replay_end: int) -> Session:
                     message = assistant(timestamp)
                     message.usage = message_usage
                     message.timestamp = timestamp or message.timestamp
+                    message.speed = current_speed
 
                 current_assistant = None
             continue
@@ -428,7 +448,7 @@ def usage_from_raw(value: Any) -> Usage | None:
     reasoning = min(int_or_zero(value.get("reasoning_output_tokens")), output_tokens)
     return Usage(
         input=input_tokens - cache_read,
-        cache_write=int_or_zero(value.get("cache_write_input_tokens")),
+        cache_write_5m=int_or_zero(value.get("cache_write_input_tokens")),
         cache_read=cache_read,
         output=output_tokens - reasoning,
         reasoning=reasoning,
@@ -450,6 +470,22 @@ def usage_signature(value: Any) -> tuple[int, ...] | None:
             "total_tokens",
         )
     )
+
+
+def speed_from_payload(
+    payload: dict[str, Any],
+) -> tuple[bool, Literal["standard", "fast"] | None]:
+    settings = payload.get("thread_settings")
+    source = settings if isinstance(settings, dict) else payload
+    if "service_tier" not in source:
+        return False, None
+
+    speed = string_or_none(source.get("service_tier"))
+    if speed in ("fast", "priority"):
+        return True, "fast"
+    if speed in ("standard", "default"):
+        return True, "standard"
+    return True, None
 
 
 def tool_input(payload: dict[str, Any]) -> dict[str, Any]:

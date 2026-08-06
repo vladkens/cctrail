@@ -25,10 +25,15 @@ class JsonTrait:
 @dataclass
 class Usage(JsonTrait):
     input: int = 0
-    cache_write: int = 0
+    cache_write_5m: int = 0
+    cache_write_1h: int = 0
     cache_read: int = 0
     output: int = 0
     reasoning: int = 0
+
+    @property
+    def cache_write(self) -> int:
+        return self.cache_write_5m + self.cache_write_1h
 
     @property
     def total(self) -> int:
@@ -37,7 +42,8 @@ class Usage(JsonTrait):
     def __add__(self, other: "Usage") -> "Usage":
         return Usage(
             input=self.input + other.input,
-            cache_write=self.cache_write + other.cache_write,
+            cache_write_5m=self.cache_write_5m + other.cache_write_5m,
+            cache_write_1h=self.cache_write_1h + other.cache_write_1h,
             cache_read=self.cache_read + other.cache_read,
             output=self.output + other.output,
             reasoning=self.reasoning + other.reasoning,
@@ -72,6 +78,7 @@ class Message(JsonTrait):
     text: str = ""
     model: str | None = None
     usage: Usage | None = None
+    speed: Literal["standard", "fast"] | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     turn_duration: timedelta | None = None
     is_api_error: bool = False

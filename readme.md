@@ -10,7 +10,7 @@
 
 </div>
 
-`cctrail` reads local Claude Code and Codex history and reports token usage and project statistics. It can also be used as a Python library for working with parsed sessions, messages, tool calls, and agents.
+`cctrail` reads local Claude Code and Codex history and reports token usage, estimated cost, and project statistics. It can also be used as a Python library for working with parsed sessions, messages, tool calls, and agents.
 
 ## CLI
 
@@ -34,7 +34,7 @@ uvx cctrail projects
 
 Both commands read `~/.claude/projects` and `~/.codex` by default. Pass `--root /path/to/history` to read another directory.
 
-Usage reports count each provider message once, while parsed sessions retain their original message and sub-agent structure.
+Usage reports count each provider message once, while parsed sessions retain their original message and sub-agent structure. Costs are estimates based on the pricing catalog embedded in the installed cctrail version.
 
 ## Python library
 
@@ -66,14 +66,17 @@ Provider-specific iterators are available as `iter_claude_sessions()` and `iter_
 The main data types are `Session`, `Message`, `ToolCall`, and `Usage`. Every model supports `.as_dict()` and `.as_json()`.
 
 ```python
-from cctrail import by_project, iter_sessions, usage_by_day
+from cctrail import Usage, by_project, calculate_cost, get_pricing, iter_sessions, usage_by_day
 
 sessions = list(iter_sessions())
 daily = usage_by_day(sessions)
 projects = by_project(sessions)
+
+pricing = get_pricing("claude-sonnet-5")
+cost = calculate_cost("claude-sonnet-5", Usage(input=1_000, output=100))
 ```
 
-Daily usage is grouped in the system timezone by default. Pass a `datetime.tzinfo` as the `timezone` argument to `usage_by_day()` to use another timezone.
+Daily usage is grouped in the system timezone by default. Pass a `datetime.tzinfo` as the `timezone` argument to `usage_by_day()` to use another timezone. Daily `UsageSummary` values and `ProjectSummary` values expose estimated cost through `.cost`.
 
 ## Development
 

@@ -16,6 +16,7 @@ test:
 
 update:
 	uv sync --upgrade --all-groups
+	uv run --script scripts/update-pricing.py
 
 install:
 	uv sync

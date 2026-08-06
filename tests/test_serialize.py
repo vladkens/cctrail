@@ -3,7 +3,16 @@ from datetime import datetime
 from pathlib import Path
 
 import cctrail
-from cctrail import Message, ProjectSummary, Session, ToolCall, Usage, iter_claude_sessions
+from cctrail import (
+    Message,
+    Pricing,
+    ProjectSummary,
+    Session,
+    ToolCall,
+    Usage,
+    UsageSummary,
+    iter_claude_sessions,
+)
 from cctrail.utils import json_dump, json_lines, json_load
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
@@ -16,7 +25,8 @@ def test_as_dict_serializes_stored_model_fields():
     assert data["id"] == "s-main-1"
     assert data["messages"][1]["usage"] == {
         "input": 10,
-        "cache_write": 5,
+        "cache_write_5m": 5,
+        "cache_write_1h": 0,
         "cache_read": 100,
         "output": 20,
         "reasoning": 0,
@@ -54,7 +64,9 @@ def test_all_models_have_json_methods():
         ToolCall(id="call", name="Read", input={}),
         Message(role="user", timestamp=None),
         Session(id="session"),
+        Pricing(input=1, output=2),
         ProjectSummary(project="/repo"),
+        UsageSummary(),
     ]
     for value in values:
         assert isinstance(value.as_dict(), dict)

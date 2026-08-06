@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 
 from .models import JsonTrait, Message, Session, Usage
+from .pricing import calculate_cost
 
 
 def usage_messages(sessions: Iterable[Session]) -> list[tuple[Session, Message]]:
@@ -40,22 +41,35 @@ def usage_messages(sessions: Iterable[Session]) -> list[tuple[Session, Message]]
     )
 
 
-def usage_rank(message: Message) -> int:
+def usage_rank(message: Message) -> tuple[int, bool]:
     assert message.usage is not None
-    return message.usage.total
+    return message.usage.total, message.speed is not None
+
+
+@dataclass
+class UsageSummary(JsonTrait):
+    usage: Usage = field(default_factory=Usage)
+    cost: float = 0.0
 
 
 def usage_by_day(
     sessions: Iterable[Session], *, timezone: tzinfo | None = None
-) -> dict[date, Usage]:
+) -> dict[date, UsageSummary]:
     """Sum token usage per calendar day, using the system timezone by default."""
-    buckets: dict[date, Usage] = {}
-    for _, message in usage_messages(sessions):
+    buckets: dict[date, UsageSummary] = {}
+    for session, message in usage_messages(sessions):
         if message.timestamp is None or message.usage is None:
             continue
 
         day = calendar_date(message.timestamp, timezone)
-        buckets[day] = buckets.get(day, Usage()) + message.usage
+        summary = buckets.setdefault(day, UsageSummary())
+        summary.usage = summary.usage + message.usage
+        summary.cost += calculate_cost(
+            message.model or "",
+            message.usage,
+            provider=session.provider,
+            speed=message.speed,
+        )
 
     return buckets
 
@@ -69,6 +83,7 @@ def tool_call_counts(session: Session) -> Counter[str]:
 class ProjectSummary(JsonTrait):
     project: str
     usage: Usage = field(default_factory=Usage)
+    cost: float = 0.0
     session_count: int = 0
     first_activity: datetime | None = None
     last_activity: datetime | None = None
@@ -95,6 +110,12 @@ def by_project(sessions: Iterable[Session]) -> dict[str, ProjectSummary]:
         project = session.cwd or "unknown"
         assert message.usage is not None
         result[project].usage = result[project].usage + message.usage
+        result[project].cost += calculate_cost(
+            message.model or "",
+            message.usage,
+            provider=session.provider,
+            speed=message.speed,
+        )
 
     return result
 

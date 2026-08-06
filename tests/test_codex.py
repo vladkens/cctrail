@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 from pathlib import Path
 
@@ -89,10 +90,73 @@ def test_fork_is_a_root_session_without_replayed_history():
     assert fork.usage.total == 25
 
 
+def test_service_tier_is_kept_with_usage(tmp_path: Path):
+    path = tmp_path / "session.jsonl"
+    entries = [
+        {"type": "session_meta", "payload": {"id": "session"}},
+        {"type": "turn_context", "payload": {"model": "gpt-5.4"}},
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "thread_settings_applied",
+                "thread_settings": {"service_tier": "priority"},
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {"type": "thread_settings_applied", "thread_settings": {}},
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 60,
+                        "output_tokens": 20,
+                        "reasoning_output_tokens": 5,
+                    }
+                },
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "thread_settings_applied",
+                "thread_settings": {"service_tier": "unknown"},
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                    }
+                },
+            },
+        },
+    ]
+    path.write_text("\n".join(map(json.dumps, entries)), encoding="utf-8")
+
+    messages = list(iter_codex_sessions(tmp_path))[0].messages
+    message = messages[0]
+    assert message.speed == "fast"
+    assert message.usage is not None
+    assert message.usage.input == 40
+    assert message.usage.cache_read == 60
+    assert message.usage.output == 15
+    assert message.usage.reasoning == 5
+    assert messages[1].speed is None
+
+
 def test_parallel_parser_matches_sequential_parser(monkeypatch):
     sequential = list(iter_codex_sessions(FIXTURES))
 
-    monkeypatch.setattr(codex, "_PARALLEL_MIN_FILES", 0)
+    monkeypatch.setattr(codex, "PARALLEL_MIN_FILES", 0)
     parallel = list(iter_codex_sessions(FIXTURES))
 
     assert parallel == sequential

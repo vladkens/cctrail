@@ -23,6 +23,10 @@ def human(n: int) -> str:
     return str(n)
 
 
+def money(n: float) -> str:
+    return f"${n:.2f}"
+
+
 def format_local_date(value: datetime) -> str:
     if value.tzinfo is not None:
         value = value.astimezone()
@@ -47,13 +51,17 @@ def cmd_usage(args: argparse.Namespace) -> None:
         "Cache write",
         "Cache read",
         "Total",
+        "Cost",
     ):
         table.add_column(column, justify="right" if column != "Date" else "left")
 
     total = Usage()
+    total_cost = 0.0
     for day in days:
-        usage = buckets[day]
+        summary = buckets[day]
+        usage = summary.usage
         total = total + usage
+        total_cost += summary.cost
         table.add_row(
             day.isoformat(),
             human(usage.input),
@@ -62,6 +70,7 @@ def cmd_usage(args: argparse.Namespace) -> None:
             human(usage.cache_write),
             human(usage.cache_read),
             human(usage.total),
+            money(summary.cost),
         )
 
     table.add_section()
@@ -73,6 +82,7 @@ def cmd_usage(args: argparse.Namespace) -> None:
         human(total.cache_write),
         human(total.cache_read),
         human(total.total),
+        money(total_cost),
         style="bold",
     )
     Console().print(table)
@@ -89,12 +99,14 @@ def cmd_projects(args: argparse.Namespace) -> None:
     table.add_column("Project")
     table.add_column("Sessions", justify="right")
     table.add_column("Total tokens", justify="right")
+    table.add_column("Cost", justify="right")
     table.add_column("Last active")
     for project in projects:
         table.add_row(
             project.project,
             str(project.session_count),
             human(project.usage.total),
+            money(project.cost),
             format_local_date(project.last_activity) if project.last_activity else "-",
         )
 

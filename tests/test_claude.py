@@ -2,7 +2,7 @@ import json
 from datetime import date, timedelta
 from pathlib import Path
 
-from cctrail import iter_claude_sessions, tool_call_counts
+from cctrail import Usage, iter_claude_sessions, tool_call_counts
 from cctrail.metrics import active_time, usage_by_day
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
@@ -95,7 +95,45 @@ def test_unlinked_sidechains_are_parsed_but_usage_is_counted_once():
     assert sidechain.usage.total == 1600 + 38
 
     buckets = usage_by_day(sessions)
-    assert buckets[date(2026, 1, 4)].total == 16 + 26 + 38
+    assert buckets[date(2026, 1, 4)].usage.total == 16 + 26 + 38
+
+
+def test_usage_keeps_cache_duration_and_speed(tmp_path: Path):
+    path = tmp_path / "session.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "message",
+                    "model": "claude-opus-4-6",
+                    "content": [],
+                    "usage": {
+                        "input_tokens": 1,
+                        "cache_creation_input_tokens": 5,
+                        "cache_read_input_tokens": 2,
+                        "output_tokens": 3,
+                        "cache_creation": {
+                            "ephemeral_5m_input_tokens": 2,
+                            "ephemeral_1h_input_tokens": 3,
+                        },
+                        "speed": "fast",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    message = list(iter_claude_sessions(tmp_path))[0].messages[0]
+    assert message.speed == "fast"
+    assert message.usage == Usage(
+        input=1,
+        cache_write_5m=2,
+        cache_write_1h=3,
+        cache_read=2,
+        output=3,
+    )
 
 
 def test_nested_subagent_transcript_uses_its_metadata(tmp_path: Path):

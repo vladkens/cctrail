@@ -10,6 +10,8 @@ def test_usage_command_runs(capsys):
     out = capsys.readouterr().out
     assert "2026-01-01" in out
     assert "total" in out
+    assert "Cost" in out
+    assert "$" in out
     # 2026-01-02 has only a zero-usage API-error turn; must not print as a row.
     assert "2026-01-02" not in out
 
@@ -18,6 +20,7 @@ def test_projects_command_runs(capsys):
     assert main(["projects", "--root", str(FIXTURES)]) == 0
     out = capsys.readouterr().out
     assert "/repo" in out
+    assert "Cost" in out
 
 
 def test_projects_command_combines_providers(capsys):

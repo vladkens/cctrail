@@ -75,9 +75,19 @@ def usage_from_raw(raw: Any) -> Usage:
     if not isinstance(raw, dict):
         return Usage()
 
+    cache_write = int_or_zero(raw.get("cache_creation_input_tokens"))
+    cache_creation = raw.get("cache_creation")
+    if isinstance(cache_creation, dict):
+        cache_write_5m = int_or_zero(cache_creation.get("ephemeral_5m_input_tokens"))
+        cache_write_1h = int_or_zero(cache_creation.get("ephemeral_1h_input_tokens"))
+    else:
+        cache_write_5m = cache_write
+        cache_write_1h = 0
+
     result = Usage(
         input=int_or_zero(raw.get("input_tokens")),
-        cache_write=int_or_zero(raw.get("cache_creation_input_tokens")),
+        cache_write_5m=cache_write_5m,
+        cache_write_1h=cache_write_1h,
         cache_read=int_or_zero(raw.get("cache_read_input_tokens")),
         output=int_or_zero(raw.get("output_tokens")),
     )
@@ -87,6 +97,18 @@ def usage_from_raw(raw: Any) -> Usage:
             if isinstance(iteration, dict) and iteration.get("type") == "advisor_message":
                 result += usage_from_raw(iteration)
     return result
+
+
+def speed_from_raw(raw: Any) -> Literal["standard", "fast"] | None:
+    if not isinstance(raw, dict):
+        return None
+
+    speed = string_or_none(raw.get("speed")) or string_or_none(raw.get("service_tier"))
+    if speed in ("fast", "priority"):
+        return "fast"
+    if speed in ("standard", "default"):
+        return "standard"
+    return None
 
 
 def parse_file(
@@ -176,9 +198,11 @@ def parse_file(
 
             turn.model = turn.model or string_or_none(message.get("model"))
             turn.is_api_error = turn.is_api_error or item.get("isApiErrorMessage") is True
-            usage = usage_from_raw(message.get("usage"))
+            raw_usage = message.get("usage")
+            usage = usage_from_raw(raw_usage)
             if turn.usage is None or usage.total > turn.usage.total:
                 turn.usage = usage
+            turn.speed = speed_from_raw(raw_usage) or turn.speed
 
             for block in content:
                 if not isinstance(block, dict):
@@ -312,8 +336,15 @@ def build_agent_session(
     # Older/aborted runs may lack a resolvable transcript file; retain the
     # final usage snapshot Claude Code attached to the tool result.
     if not agent.messages:
-        usage = usage_from_raw(raw.get("usage"))
-        agent.messages.append(Message(role="assistant", timestamp=call.ended_at, usage=usage))
+        raw_usage = raw.get("usage")
+        agent.messages.append(
+            Message(
+                role="assistant",
+                timestamp=call.ended_at,
+                usage=usage_from_raw(raw_usage),
+                speed=speed_from_raw(raw_usage),
+            )
+        )
 
     duration_ms = raw.get("totalDurationMs")
     if isinstance(duration_ms, (int, float)):
