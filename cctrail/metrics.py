@@ -1,4 +1,4 @@
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
@@ -50,12 +50,14 @@ def usage_rank(message: Message) -> tuple[int, bool]:
 class UsageSummary(JsonTrait):
     usage: Usage = field(default_factory=Usage)
     cost: float = 0.0
+    active_time: timedelta = field(default_factory=timedelta)
 
 
 def usage_by_day(
     sessions: Iterable[Session], *, timezone: tzinfo | None = None
 ) -> dict[date, UsageSummary]:
-    """Sum token usage per calendar day, using the system timezone by default."""
+    """Summarize usage and estimated activity per calendar day."""
+    sessions = list(sessions)
     buckets: dict[date, UsageSummary] = {}
     for session, message in usage_messages(sessions):
         if message.timestamp is None or message.usage is None:
@@ -71,6 +73,10 @@ def usage_by_day(
             speed=message.speed,
         )
 
+    events = activity_stamps(sessions)
+    for day, duration in active_time_by_day(events, timezone=timezone).items():
+        buckets.setdefault(day, UsageSummary()).active_time = duration
+
     return buckets
 
 
@@ -84,6 +90,7 @@ class ProjectSummary(JsonTrait):
     project: str
     usage: Usage = field(default_factory=Usage)
     cost: float = 0.0
+    active_time: timedelta = field(default_factory=timedelta)
     session_count: int = 0
     first_activity: datetime | None = None
     last_activity: datetime | None = None
@@ -93,6 +100,7 @@ def by_project(sessions: Iterable[Session]) -> dict[str, ProjectSummary]:
     """Group sessions by working directory, summing usage across each session's agent tree."""
     sessions = list(sessions)
     result: dict[str, ProjectSummary] = {}
+    events: defaultdict[str, list[datetime]] = defaultdict(list)
     for session in sessions:
         project = session.cwd or "unknown"
         summary = result.setdefault(project, ProjectSummary(project=project))
@@ -100,6 +108,7 @@ def by_project(sessions: Iterable[Session]) -> dict[str, ProjectSummary]:
             summary.session_count += 1
 
         for nested in session.walk():
+            events[project].extend(nested.activity_stamps())
             started, ended = nested.started_at, nested.ended_at
             if started and (summary.first_activity is None or started < summary.first_activity):
                 summary.first_activity = started
@@ -117,6 +126,9 @@ def by_project(sessions: Iterable[Session]) -> dict[str, ProjectSummary]:
             speed=message.speed,
         )
 
+    for project, project_events in events.items():
+        result[project].active_time = active_time(project_events)
+
     return result
 
 
@@ -127,24 +139,66 @@ def calendar_date(timestamp: datetime, timezone: tzinfo | None) -> date:
     return timestamp.astimezone(timezone).date()
 
 
+def activity_stamps(sessions: Iterable[Session]) -> list[datetime]:
+    return [
+        stamp
+        for session in sessions
+        for nested in session.walk()
+        for stamp in nested.activity_stamps()
+    ]
+
+
+def activity_intervals(
+    events: Iterable[datetime], window: timedelta = timedelta(minutes=5)
+) -> list[tuple[datetime, datetime]]:
+    ordered = sorted(set(events))
+    if not ordered:
+        return []
+
+    start = ordered[0]
+    end = start + window
+    intervals: list[tuple[datetime, datetime]] = []
+    for stamp in ordered[1:]:
+        interval_end = stamp + window
+        if stamp <= end:
+            end = max(end, interval_end)
+        else:
+            intervals.append((start, end))
+            start, end = stamp, interval_end
+    intervals.append((start, end))
+    return intervals
+
+
 def active_time(events: Iterable[datetime], window: timedelta = timedelta(minutes=5)) -> timedelta:
     """Total wall-clock time covered by `events`, each active for `window` after it fires.
 
     Overlapping windows are merged, so idle gaps between bursts of activity
     (and between parallel sessions on the same project) aren't counted twice.
     """
-    ordered = sorted(events)
-    if not ordered:
-        return timedelta()
+    return sum((end - start for start, end in activity_intervals(events, window)), timedelta())
 
-    total = timedelta()
-    start = end = ordered[0]
-    for stamp in ordered[1:]:
-        if stamp <= end + window:
-            end = stamp
-        else:
-            total += end - start + window
-            start = end = stamp
 
-    total += end - start + window
-    return total
+def active_time_by_day(
+    events: Iterable[datetime],
+    *,
+    timezone: tzinfo | None = None,
+    window: timedelta = timedelta(minutes=5),
+) -> dict[date, timedelta]:
+    result: defaultdict[date, timedelta] = defaultdict(timedelta)
+    for start, end in activity_intervals(events, window):
+        cursor = start
+        while cursor < end:
+            local = cursor if cursor.tzinfo is None else cursor.astimezone(timezone)
+            boundary = (local + timedelta(days=1)).replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            if cursor.tzinfo is not None:
+                boundary = boundary.astimezone(cursor.tzinfo)
+            part_end = min(end, boundary)
+            result[local.date()] += part_end - cursor
+            cursor = part_end
+
+    return dict(result)

@@ -36,6 +36,7 @@ def test_by_project_groups_by_cwd_and_sums_agent_usage():
     summary = projects["/repo"]
     assert summary.session_count == 1
     assert summary.usage.total == (135 + 57 + 161) + (31 + 43)
+    assert summary.active_time == timedelta(minutes=5, seconds=10)
     assert summary.first_activity is not None
     assert summary.last_activity is not None
     assert summary.as_dict()["session_count"] == 1
@@ -106,3 +107,24 @@ def test_usage_cost_is_calculated_before_daily_aggregation():
     summary = usage_by_day([session])[date(2026, 1, 1)]
     assert summary.usage.input == 400_000
     assert summary.cost == 1.03
+
+
+def test_usage_by_day_splits_active_time_at_midnight_and_merges_parallel_sessions():
+    sessions = [
+        Session(
+            id="first",
+            messages=[
+                Message("user", datetime(2026, 1, 1, 23, 58, tzinfo=UTC)),
+                Message("assistant", datetime(2026, 1, 2, 0, 0, tzinfo=UTC)),
+            ],
+        ),
+        Session(
+            id="second",
+            messages=[Message("assistant", datetime(2026, 1, 2, 0, 1, tzinfo=UTC))],
+        ),
+    ]
+
+    buckets = usage_by_day(sessions, timezone=UTC)
+
+    assert buckets[date(2026, 1, 1)].active_time == timedelta(minutes=2)
+    assert buckets[date(2026, 1, 2)].active_time == timedelta(minutes=6)

@@ -70,7 +70,7 @@ def test_all_models_have_json_methods():
     ]
     for value in values:
         assert isinstance(value.as_dict(), dict)
-        assert json.loads(value.as_json()) == value.as_dict()
+        assert json.loads(value.as_json()) == json.loads(json.dumps(value.as_dict(), default=str))
 
 
 def test_json_functions_are_not_exported_from_package():

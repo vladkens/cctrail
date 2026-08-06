@@ -1,6 +1,6 @@
 import argparse
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 
 from rich.console import Console
@@ -30,6 +30,12 @@ def money(n: float) -> str:
     return f"${n:.2f}"
 
 
+def duration(value: timedelta) -> str:
+    minutes = int((value.total_seconds() + 30) // 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
 def format_local_date(value: datetime) -> str:
     if value.tzinfo is not None:
         value = value.astimezone()
@@ -45,26 +51,29 @@ def cmd_usage(args: argparse.Namespace) -> None:
         if (args.since is None or day >= args.since) and (args.until is None or day <= args.until)
     )
 
-    table = Table(box=None, header_style="bold")
+    table = Table(box=None, header_style="bold", pad_edge=False, collapse_padding=True)
     for column in (
         "Date",
         "Input",
         "Output",
         "Reasoning",
-        "Cache write",
-        "Cache read",
+        "Cache W",
+        "Cache R",
         "Total",
         "Cost",
+        "Time",
     ):
         table.add_column(column, justify="right" if column != "Date" else "left")
 
     total = Usage()
     total_cost = 0.0
+    total_active = timedelta()
     for day in days:
         summary = buckets[day]
         usage = summary.usage
         total = total + usage
         total_cost += summary.cost
+        total_active += summary.active_time
         table.add_row(
             day.isoformat(),
             human(usage.input),
@@ -74,6 +83,7 @@ def cmd_usage(args: argparse.Namespace) -> None:
             human(usage.cache_read),
             human(usage.total),
             money(summary.cost),
+            duration(summary.active_time),
         )
 
     table.add_section()
@@ -86,6 +96,7 @@ def cmd_usage(args: argparse.Namespace) -> None:
         human(total.cache_read),
         human(total.total),
         money(total_cost),
+        duration(total_active),
         style="bold",
     )
     Console().print(table)
@@ -98,19 +109,21 @@ def cmd_projects(args: argparse.Namespace) -> None:
         reverse=True,
     )
 
-    table = Table(box=None, header_style="bold")
+    table = Table(box=None, header_style="bold", pad_edge=False, collapse_padding=True)
     table.add_column("Project")
     table.add_column("Sessions", justify="right")
     table.add_column("Total tokens", justify="right")
-    table.add_column("Cost", justify="right")
     table.add_column("Last active")
+    table.add_column("Cost", justify="right")
+    table.add_column("Time", justify="right")
     for project in projects:
         table.add_row(
             project.project,
             str(project.session_count),
             human(project.usage.total),
-            money(project.cost),
             format_local_date(project.last_activity) if project.last_activity else "-",
+            money(project.cost),
+            duration(project.active_time),
         )
 
     Console().print(table)

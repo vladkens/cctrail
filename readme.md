@@ -41,6 +41,8 @@ CODEX_HOME="$HOME/.codex,$HOME/.codex-work" uvx cctrail usage
 
 Usage reports count each provider message once, while parsed sessions retain their original message and sub-agent structure. Costs are estimates based on the pricing catalog embedded in the installed cctrail version.
 
+Active time is estimated by treating every activity event as a five-minute window and merging overlaps, including activity from concurrent sessions.
+
 ## Python library
 
 Add `cctrail` to a project:
@@ -81,7 +83,7 @@ pricing = get_pricing("claude-sonnet-5")
 cost = calculate_cost("claude-sonnet-5", Usage(input=1_000, output=100))
 ```
 
-Daily usage is grouped in the system timezone by default. Pass a `datetime.tzinfo` as the `timezone` argument to `usage_by_day()` to use another timezone. Daily `UsageSummary` values and `ProjectSummary` values expose estimated cost through `.cost`.
+Daily usage is grouped in the system timezone by default. Pass a `datetime.tzinfo` as the `timezone` argument to `usage_by_day()` to use another timezone. Daily `UsageSummary` values and `ProjectSummary` values expose `.cost` and `.active_time`.
 
 ## Development
 
