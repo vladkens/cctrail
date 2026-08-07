@@ -187,6 +187,25 @@ def test_projects_reports_invalid_config(tmp_path, capsys, monkeypatch):
     assert "config error:" in capsys.readouterr().err
 
 
+def test_reports_read_provider_sources_from_config(tmp_path, capsys, monkeypatch):
+    fixtures = Path(__file__).parent / "fixtures"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'[sources]\nclaude = ["{fixtures / "claude"}"]\ncodex = ["{fixtures / "codex"}"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CCTRAIL_CONFIG", str(config))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+    assert main(["usage", "--provider", "claude", "--json"]) == 0
+    claude = json.loads(capsys.readouterr().out)
+    assert main(["usage", "--provider", "codex", "--json"]) == 0
+    codex = json.loads(capsys.readouterr().out)
+    assert claude["total"]["usage"]["total"] > 0
+    assert codex["total"]["usage"]["total"] > 0
+
+
 @pytest.mark.parametrize("command", ["usage", "projects", "audit"])
 def test_reports_can_filter_by_provider(command, capsys, monkeypatch):
     fixtures = Path(__file__).parent / "fixtures"

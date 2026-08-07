@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,18 +38,35 @@ def default_roots() -> list[Path]:
     return data_paths("CODEX_HOME", (Path.home() / ".codex",))
 
 
-def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
+def iter_sessions(
+    root: str | Path | None = None,
+    *,
+    roots: Iterable[str | Path] | None = None,
+) -> Iterator[Session]:
     """Stream Codex sessions, attaching spawned agents to their tool calls.
 
     Without an explicit root, `CODEX_HOME` accepts comma-separated directories
     and replaces the default `~/.codex` lookup.
     """
-    roots = [Path(root).expanduser()] if root is not None else default_roots()
+    if root is not None and roots is not None:
+        raise ValueError("root and roots cannot be combined")
+    search_roots = (
+        [Path(item).expanduser() for item in roots]
+        if roots is not None
+        else [Path(root).expanduser()]
+        if root is not None
+        else default_roots()
+    )
     titles = {
-        session_id: title for root in roots for session_id, title in load_titles(root).items()
+        session_id: title
+        for search_root in search_roots
+        for session_id, title in load_titles(search_root).items()
     }
     rollouts = [
-        rollout for root in roots for path in history_files(root) if (rollout := read_meta(path))
+        rollout
+        for search_root in search_roots
+        for path in history_files(search_root)
+        if (rollout := read_meta(path))
     ]
     by_id = {rollout.id: rollout for rollout in rollouts}
     rollouts = list(by_id.values())

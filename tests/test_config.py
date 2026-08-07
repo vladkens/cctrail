@@ -30,6 +30,40 @@ def test_missing_config_has_no_aliases(tmp_path: Path):
     assert Config.load(tmp_path / "missing.toml") == Config()
 
 
+def test_config_loads_provider_sources(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[sources]\nclaude = ["~/.claude", "~/work/claude"]\n'
+        'codex = ["~/.codex", "~/work/codex"]\n',
+        encoding="utf-8",
+    )
+
+    config = Config.load(path)
+    assert config.claude_sources == (
+        str(Path.home() / ".claude"),
+        str(Path.home() / "work" / "claude"),
+    )
+    assert config.codex_sources == (
+        str(Path.home() / ".codex"),
+        str(Path.home() / "work" / "codex"),
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        'sources = ["~/.claude"]\n',
+        "[sources]\nclaude = []\n",
+        '[sources]\nother = ["~/history"]\n',
+    ],
+)
+def test_config_rejects_invalid_sources(tmp_path: Path, content: str):
+    path = tmp_path / "config.toml"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ConfigError):
+        Config.load(path)
+
+
 def test_config_resolves_exact_and_wildcard_paths(tmp_path: Path):
     path = tmp_path / "config.toml"
     path.write_text(

@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -23,7 +23,11 @@ def default_roots() -> list[Path]:
     )
 
 
-def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
+def iter_sessions(
+    root: str | Path | None = None,
+    *,
+    roots: Iterable[str | Path] | None = None,
+) -> Iterator[Session]:
     """Stream Claude Code sessions, one file at a time.
 
     Without an explicit root, `CLAUDE_CONFIG_DIR` accepts comma-separated
@@ -31,8 +35,16 @@ def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
     lookup. Sub-agent transcripts are attached to the tool call that launched
     them, so a fully parsed `Session` already contains its whole agent tree.
     """
-    roots = [Path(root).expanduser()] if root is not None else default_roots()
-    paths = sorted({path for root in roots for path in root.rglob("*.jsonl")})
+    if root is not None and roots is not None:
+        raise ValueError("root and roots cannot be combined")
+    search_roots = (
+        [Path(item).expanduser() for item in roots]
+        if roots is not None
+        else [Path(root).expanduser()]
+        if root is not None
+        else default_roots()
+    )
+    paths = sorted({path for search_root in search_roots for path in search_root.rglob("*.jsonl")})
     agent_paths = subagent_paths(paths)
     linked_subagents: set[Path] = set()
     for path in paths:

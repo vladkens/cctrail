@@ -58,6 +58,8 @@ class ProjectAlias:
 @dataclass(frozen=True)
 class Config:
     aliases: tuple[ProjectAlias, ...] = ()
+    claude_sources: tuple[str, ...] | None = None
+    codex_sources: tuple[str, ...] | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -94,7 +96,31 @@ class Config:
                         raise ConfigError(f"project path appears in multiple aliases: {member}")
                     exact_paths.add(member)
             aliases.append(ProjectAlias(name, paths))
-        return cls(tuple(aliases))
+
+        raw_sources = value.get("sources", {})
+        if not isinstance(raw_sources, dict):
+            raise ConfigError("sources must be a table")
+        unknown_sources = {str(key) for key in raw_sources} - {"claude", "codex"}
+        if unknown_sources:
+            raise ConfigError(f"unknown sources: {', '.join(sorted(unknown_sources))}")
+
+        def sources(provider: str) -> tuple[str, ...] | None:
+            raw_paths = raw_sources.get(provider)
+            if raw_paths is None:
+                return None
+            if (
+                not isinstance(raw_paths, list)
+                or not raw_paths
+                or not all(isinstance(item, str) and item.strip() for item in raw_paths)
+            ):
+                raise ConfigError(f"sources.{provider} needs at least one path")
+            return tuple(normalize_path(item) for item in raw_paths)
+
+        return cls(
+            aliases=tuple(aliases),
+            claude_sources=sources("claude"),
+            codex_sources=sources("codex"),
+        )
 
     def resolve_project(self, project: str) -> str:
         normalized = normalize_path(project)

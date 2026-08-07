@@ -1,9 +1,11 @@
 import argparse
 import calendar
+import os
 import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
+from itertools import chain
 from pathlib import Path
 
 from rich.console import Console
@@ -344,13 +346,12 @@ def cmd_usage(args: argparse.Namespace) -> None:
 
 def cmd_projects(args: argparse.Namespace) -> None:
     since, until = date_range(args)
-    config = Config.load()
     projects = sorted(
         by_project(
             filtered_sessions(args),
             since=since,
             until=until,
-            project_resolver=config.resolve_project,
+            project_resolver=args.config.resolve_project,
         ).values(),
         key=lambda p: p.usage.total,
         reverse=True,
@@ -531,11 +532,18 @@ def add_output_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def filtered_sessions(args: argparse.Namespace):
+    claude_roots = None if "CLAUDE_CONFIG_DIR" in os.environ else args.config.claude_sources
+    codex_roots = None if "CODEX_HOME" in os.environ else args.config.codex_sources
     if args.provider == "claude":
-        return iter_claude_sessions()
+        return iter_claude_sessions(roots=claude_roots)
     if args.provider == "codex":
-        return iter_codex_sessions()
-    return iter_sessions()
+        return iter_codex_sessions(roots=codex_roots)
+    if claude_roots is None and codex_roots is None:
+        return iter_sessions()
+    return chain(
+        iter_claude_sessions(roots=claude_roots),
+        iter_codex_sessions(roots=codex_roots),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -580,6 +588,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--since must not be later than --until")
 
     try:
+        args.config = Config.load()
         args.func(args)
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)

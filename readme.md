@@ -70,6 +70,16 @@ Alias paths support `~` and glob patterns. `*` matches within one path segment, 
 2. `./cctrail.toml`
 3. `~/.config/cctrail.toml`
 
+You can also configure every Claude Code and Codex history directory instead of setting `CLAUDE_CONFIG_DIR` or `CODEX_HOME` for each command:
+
+```toml
+[sources]
+claude = ["~/.claude", "~/.claude-work"]
+codex = ["~/.codex", "~/.codex-work"]
+```
+
+When a provider is present in `[sources]`, its list replaces the default directories. Environment variables still take precedence when set.
+
 Claude data is read from `~/.config/claude` and `~/.claude`, while Codex data is read from `~/.codex`. Set `CLAUDE_CONFIG_DIR` or `CODEX_HOME` to replace these defaults. Both variables accept comma-separated directories:
 
 ```sh
