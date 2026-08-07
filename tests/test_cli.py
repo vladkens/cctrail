@@ -1,11 +1,11 @@
 import calendar
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
 
-from cctrail import ModelSummary, ProjectSummary
+from cctrail import Message, ModelSummary, ProjectSummary, Session, Usage
 from cctrail.cli import human, main, model_label, period_label, period_range
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
@@ -166,6 +166,49 @@ def test_projects_command_combines_providers(capsys, monkeypatch):
     assert "962" in out
 
 
+def test_groups_aggregate_projects_without_double_counting_active_time(
+    tmp_path, capsys, monkeypatch
+):
+    stamp = datetime(2026, 1, 1, tzinfo=UTC)
+    sessions = [
+        Session(
+            id=project,
+            cwd=project,
+            messages=[
+                Message(
+                    role="assistant",
+                    timestamp=stamp,
+                    usage=Usage(input=usage),
+                    model="unknown",
+                )
+            ],
+        )
+        for project, usage in (("/repo", 10), ("/worktree", 20), ("/personal", 5))
+    ]
+    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda: iter(sessions))
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[aliases]\napp = ["/repo", "/worktree"]\n[groups]\nwork = ["app"]\n',
+        encoding="utf-8",
+    )
+
+    assert main(["--config", str(config), "groups", "--json"]) == 0
+    groups = json.loads(capsys.readouterr().out)["groups"]
+    assert [(group["group"], group["projects"]) for group in groups] == [
+        ("work", 1),
+        ("ungrouped", 1),
+    ]
+    assert groups[0]["sessions"] == 2
+    assert groups[0]["usage"]["total"] == 30
+    assert groups[0]["active_seconds"] == 300
+
+    assert main(["--config", str(config), "groups"]) == 0
+    output = capsys.readouterr().out
+    assert "Group" in output
+    assert "work" in output
+    assert "ungrouped" in output
+
+
 def test_projects_uses_configured_aliases(tmp_path, capsys, monkeypatch):
     set_data_dirs(monkeypatch, FIXTURES)
     config = tmp_path / "config.toml"
@@ -236,7 +279,7 @@ def test_reports_read_provider_sources_from_config(tmp_path, capsys, monkeypatch
     assert codex["total"]["usage"]["total"] > 0
 
 
-@pytest.mark.parametrize("command", ["usage", "projects", "audit"])
+@pytest.mark.parametrize("command", ["usage", "projects", "groups", "audit"])
 def test_reports_can_filter_by_provider(command, capsys, monkeypatch):
     fixtures = Path(__file__).parent / "fixtures"
     set_data_dirs(monkeypatch, fixtures, fixtures)
@@ -249,7 +292,7 @@ def test_reports_can_filter_by_provider(command, capsys, monkeypatch):
     assert claude != codex
 
 
-@pytest.mark.parametrize("command", ["usage", "projects", "audit"])
+@pytest.mark.parametrize("command", ["usage", "projects", "groups", "audit"])
 def test_report_commands_support_json(command, capsys, monkeypatch):
     set_data_dirs(monkeypatch, FIXTURES)
     assert main([command, "--json"]) == 0

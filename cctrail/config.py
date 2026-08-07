@@ -52,8 +52,15 @@ class ProjectAlias:
 
 
 @dataclass(frozen=True)
+class ProjectGroup:
+    name: str
+    projects: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Config:
     aliases: tuple[ProjectAlias, ...] = ()
+    groups: tuple[ProjectGroup, ...] = ()
     claude_sources: tuple[str, ...] | None = None
     codex_sources: tuple[str, ...] | None = None
 
@@ -95,6 +102,33 @@ class Config:
                     exact_paths.add(member)
             aliases.append(ProjectAlias(name, paths))
 
+        raw_groups = value.get("groups", {})
+        if not isinstance(raw_groups, dict):
+            raise ConfigError("groups must be a table")
+
+        groups = []
+        exact_projects: set[str] = set()
+        for raw_name, raw_projects in raw_groups.items():
+            name = str(raw_name).strip()
+            if not name:
+                raise ConfigError("project group names cannot be empty")
+            if name == "ungrouped":
+                raise ConfigError("ungrouped is reserved for projects without a group")
+            if (
+                not isinstance(raw_projects, list)
+                or not raw_projects
+                or not all(isinstance(item, str) and item.strip() for item in raw_projects)
+            ):
+                raise ConfigError(f"project group {name} needs at least one project")
+
+            projects = tuple(normalize_path(item) for item in raw_projects)
+            for project in projects:
+                if "*" not in project:
+                    if project in exact_projects:
+                        raise ConfigError(f"project appears in multiple groups: {project}")
+                    exact_projects.add(project)
+            groups.append(ProjectGroup(name, projects))
+
         raw_sources = value.get("sources", {})
         if not isinstance(raw_sources, dict):
             raise ConfigError("sources must be a table")
@@ -116,6 +150,7 @@ class Config:
 
         return cls(
             aliases=tuple(aliases),
+            groups=tuple(groups),
             claude_sources=sources("claude"),
             codex_sources=sources("codex"),
         )
@@ -130,3 +165,14 @@ class Config:
         if len(matches) > 1:
             raise ConfigError(f"project {project} matches multiple aliases: {', '.join(matches)}")
         return matches[0] if matches else project
+
+    def resolve_group(self, project: str) -> str:
+        normalized = normalize_path(project)
+        matches = [
+            group.name
+            for group in self.groups
+            if any(match_path(normalized, pattern) for pattern in group.projects)
+        ]
+        if len(matches) > 1:
+            raise ConfigError(f"project {project} matches multiple groups: {', '.join(matches)}")
+        return matches[0] if matches else "ungrouped"

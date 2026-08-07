@@ -78,6 +78,50 @@ def test_config_resolves_exact_and_wildcard_paths(tmp_path: Path):
     assert config.resolve_project("/other") == "/other"
 
 
+def test_config_resolves_project_groups_after_aliases(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[aliases]\napp = ["~/Code/app"]\n[groups]\nwork = ["app", "~/Code/work/**"]\n',
+        encoding="utf-8",
+    )
+
+    config = Config.load(path)
+    alias = config.resolve_project(str(Path.home() / "Code" / "app"))
+    assert config.resolve_group(alias) == "work"
+    assert config.resolve_group(str(Path.home() / "Code" / "work" / "api")) == "work"
+    assert config.resolve_group("personal") == "ungrouped"
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ('groups = ["app"]\n', "groups must be a table"),
+        ("[groups]\nwork = []\n", "needs at least one project"),
+        ('[groups]\nungrouped = ["app"]\n', "ungrouped is reserved"),
+        (
+            '[groups]\none = ["app"]\ntwo = ["app"]\n',
+            "project appears in multiple groups",
+        ),
+    ],
+)
+def test_config_rejects_invalid_project_groups(tmp_path: Path, content: str, message: str):
+    path = tmp_path / "config.toml"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ConfigError, match=message):
+        Config.load(path)
+
+
+def test_group_resolution_rejects_ambiguous_patterns(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[groups]\none = ["project-*"]\ntwo = ["*-api"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="multiple groups"):
+        Config.load(path).resolve_group("project-api")
+
+
 @pytest.mark.parametrize(
     ("pattern", "path", "matches"),
     [

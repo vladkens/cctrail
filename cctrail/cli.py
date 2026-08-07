@@ -406,6 +406,78 @@ def cmd_projects(args: argparse.Namespace) -> None:
         Console().print(table)
 
 
+def cmd_groups(args: argparse.Namespace) -> None:
+    since, until = date_range(args)
+    sessions = list(filtered_sessions(args))
+    projects = by_project(
+        sessions,
+        since=since,
+        until=until,
+        project_resolver=args.config.resolve_project,
+    )
+
+    def resolve_group(project: str) -> str:
+        return args.config.resolve_group(args.config.resolve_project(project))
+
+    groups = sorted(
+        by_project(
+            sessions,
+            since=since,
+            until=until,
+            project_resolver=resolve_group,
+        ).values(),
+        key=lambda group: (-group.usage.total, group.project),
+    )
+    project_counts = Counter(args.config.resolve_group(project) for project in projects)
+
+    if args.json:
+        print_json(
+            {
+                "schema_version": 1,
+                "command": "groups",
+                "query": query_json(args, since, until),
+                "groups": [
+                    {
+                        "group": group.project,
+                        "projects": project_counts[group.project],
+                        "sessions": group.session_count,
+                        "usage": usage_json(group.usage),
+                        "cost_usd": group.cost,
+                        "active_seconds": int(group.active_time.total_seconds()),
+                        "first_activity": group.first_activity.isoformat()
+                        if group.first_activity
+                        else None,
+                        "last_activity": group.last_activity.isoformat()
+                        if group.last_activity
+                        else None,
+                    }
+                    for group in groups
+                ],
+            }
+        )
+        return
+
+    table = Table(box=None, header_style="bold", pad_edge=False, collapse_padding=True)
+    table.add_column("Group", style="cyan")
+    table.add_column("Projects", justify="right")
+    table.add_column("Sessions", justify="right")
+    table.add_column("Tokens", justify="right")
+    table.add_column("Last active", style="dim")
+    table.add_column("Cost", justify="right", style="green")
+    table.add_column("Time", justify="right", style="yellow")
+    for group in groups:
+        table.add_row(
+            group.project,
+            str(project_counts[group.project]),
+            str(group.session_count),
+            human(group.usage.total),
+            format_local_date(group.last_activity) if group.last_activity else "-",
+            money(group.cost),
+            duration(group.active_time),
+        )
+    Console().print(table)
+
+
 def cmd_audit(args: argparse.Namespace) -> None:
     sessions = list(filtered_sessions(args))
     messages = usage_messages(sessions)
@@ -586,6 +658,12 @@ def main(argv: list[str] | None = None) -> int:
     add_output_arguments(projects_parser)
     projects_parser.add_argument("--full", action="store_true", help="Show full project paths")
     projects_parser.set_defaults(func=cmd_projects)
+
+    groups_parser = subparsers.add_parser("groups", help="Usage aggregated by project group")
+    add_date_arguments(groups_parser)
+    add_provider_argument(groups_parser)
+    add_output_arguments(groups_parser)
+    groups_parser.set_defaults(func=cmd_groups)
 
     audit_parser = subparsers.add_parser("audit", help="Check pricing coverage")
     add_provider_argument(audit_parser)

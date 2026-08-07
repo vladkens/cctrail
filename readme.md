@@ -53,6 +53,16 @@ uvx cctrail projects this-month
 Projects accept the same named periods and arbitrary date ranges as usage reports.
 Paths inside your home directory are shortened to `~/…`; pass `--full` to show absolute paths.
 
+Show usage aggregated across configured project groups:
+
+```sh
+uvx cctrail groups this-month
+uvx cctrail groups --provider codex
+uvx cctrail groups --json
+```
+
+Groups accept the same periods, date ranges, and provider filter as project reports. Projects that do not match a configured group are included under `ungrouped`.
+
 ### Configuration
 
 Project aliases can combine a project's main checkout and worktrees into a single project in the report. This is optional: without an alias, `cctrail` reports each path separately.
@@ -60,9 +70,15 @@ Project aliases can combine a project's main checkout and worktrees into a singl
 ```toml
 [aliases]
 cctrail = ["~/Code/vibe/cctrail", "~/.worktrees/cctrail--*"]
+
+[groups]
+personal = ["cctrail", "~/Code/dotfiles"]
+opensource = ["~/Code/pub/**"]
 ```
 
 Alias paths support `~` and glob patterns. `*` matches within one path segment, while `**` can match across directories. A trailing `/**` includes both the named directory and everything below it. For example, `~/.worktrees/cctrail--*` matches sibling worktrees and `~/Code/**/cctrail/**` matches the project at any depth below `~/Code` together with all of its checkouts.
+
+Groups are resolved after aliases, so a group can contain an alias such as `cctrail`, an exact project path, or a glob pattern. A project can match only one group.
 
 Use `--config` to select a file for one command, or `--no-config` to ignore every TOML configuration:
 
