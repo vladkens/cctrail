@@ -51,6 +51,7 @@ uvx cctrail projects this-month
 ```
 
 Projects accept the same named periods and arbitrary date ranges as usage reports.
+Paths inside your home directory are shortened to `~/…`; pass `--full` to show absolute paths.
 
 ### Configuration
 
@@ -61,7 +62,7 @@ Project aliases can combine a project's main checkout and worktrees into a singl
 cctrail = ["~/Code/vibe/cctrail", "~/.worktrees/cctrail--*"]
 ```
 
-Alias paths support `~` and glob patterns. `*` matches within one path segment, while `**` can match across directories. For example, `~/.worktrees/cctrail--*` matches sibling worktrees and `~/Code/**/cctrail` matches the project at any depth below `~/Code`.
+Alias paths support `~` and glob patterns. `*` matches within one path segment, while `**` can match across directories. A trailing `/**` includes both the named directory and everything below it. For example, `~/.worktrees/cctrail--*` matches sibling worktrees and `~/Code/**/cctrail/**` matches the project at any depth below `~/Code` together with all of its checkouts.
 
 `cctrail` looks for configuration in this order:
 

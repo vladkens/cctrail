@@ -1,5 +1,6 @@
+__pycache__/
+.coverage
+*.pyc
 /3rd
 /samples
-.coverage
-__pycache__/
-*.pyc
+cctrail.toml

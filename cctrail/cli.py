@@ -4,6 +4,7 @@ import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 from rich.console import Console
 from rich.measure import Measurement
@@ -36,6 +37,9 @@ def parse_date(value: str) -> date:
 
 
 def human(n: int) -> str:
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.2f}B"
+
     if n >= 1_000_000:
         return f"{n / 1_000_000:.2f}M"
 
@@ -60,6 +64,17 @@ def format_local_date(value: datetime) -> str:
         value = value.astimezone()
 
     return value.date().isoformat()
+
+
+def project_label(project: str, *, full: bool) -> str:
+    if full:
+        return project
+
+    try:
+        relative = Path(project).relative_to(Path.home())
+    except ValueError:
+        return project
+    return "~" if not relative.parts else f"~/{relative}"
 
 
 def week_start(value: date, first_weekday: int) -> date:
@@ -376,7 +391,7 @@ def cmd_projects(args: argparse.Namespace) -> None:
     table.add_column("Time", justify="right", style="yellow")
     for project in projects:
         table.add_row(
-            project.project,
+            project_label(project.project, full=args.full),
             str(project.session_count),
             human(project.usage.total),
             format_local_date(project.last_activity) if project.last_activity else "-",

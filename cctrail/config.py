@@ -30,7 +30,10 @@ def match_path(path: str, pattern: str) -> bool:
     expression = ""
     index = 0
     while index < len(pattern):
-        if pattern[index : index + 2] == "**":
+        if pattern[index:] == "/**":
+            expression += "(?:/.*)?"
+            index += 3
+        elif pattern[index : index + 2] == "**":
             if index + 2 < len(pattern) and pattern[index + 2] == "/":
                 expression += "(?:.*/)?"
                 index += 3

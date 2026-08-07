@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from cctrail import ModelSummary, ProjectSummary
-from cctrail.cli import main, model_label, period_label, period_range
+from cctrail.cli import human, main, model_label, period_label, period_range
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
 
@@ -52,6 +52,10 @@ def test_usage_command_runs(capsys, monkeypatch):
     assert "$" in out
     # 2026-01-02 has only a zero-usage API-error turn; must not print as a row.
     assert "2026-01-02" not in out
+
+
+def test_human_formats_billions():
+    assert human(2_538_770_000) == "2.54B"
 
 
 def test_usage_full_shows_detailed_token_columns(capsys, monkeypatch):
@@ -133,6 +137,21 @@ def test_projects_full_controls_long_path_truncation(capsys, monkeypatch):
 
     assert main(["projects"]) == 0
     assert project not in capsys.readouterr().out
+
+    assert main(["projects", "--full"]) == 0
+    assert project in capsys.readouterr().out
+
+
+def test_projects_compacts_home_paths_unless_full(capsys, monkeypatch):
+    project = str(Path.home() / "Code" / "example")
+    summary = ProjectSummary(project=project)
+    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda: [])
+    monkeypatch.setattr("cctrail.cli.by_project", lambda *args, **kwargs: {project: summary})
+
+    assert main(["projects"]) == 0
+    output = capsys.readouterr().out
+    assert "~/Code/example" in output
+    assert project not in output
 
     assert main(["projects", "--full"]) == 0
     assert project in capsys.readouterr().out
