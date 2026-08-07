@@ -548,6 +548,19 @@ def filtered_sessions(args: argparse.Namespace):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cctrail")
+    config_group = parser.add_mutually_exclusive_group()
+    config_group.add_argument(
+        "--config",
+        dest="config_path",
+        type=Path,
+        metavar="PATH",
+        help="Use a specific configuration file",
+    )
+    config_group.add_argument(
+        "--no-config",
+        action="store_true",
+        help="Run without loading a configuration file",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     usage_parser = subparsers.add_parser("usage", help="Token usage over time")
@@ -588,7 +601,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--since must not be later than --until")
 
     try:
-        args.config = Config.load()
+        if args.no_config:
+            args.config = Config()
+        elif args.config_path is not None:
+            args.config = Config.load(args.config_path.expanduser(), required=True)
+        else:
+            args.config = Config.load()
         args.func(args)
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)

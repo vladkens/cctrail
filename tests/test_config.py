@@ -21,13 +21,14 @@ def test_config_path_prefers_local_file_then_global_config(tmp_path: Path, monke
     local.touch()
     assert config_path() == local
 
-    custom = tmp_path / "custom.toml"
-    monkeypatch.setenv("CCTRAIL_CONFIG", str(custom))
-    assert config_path() == custom
-
 
 def test_missing_config_has_no_aliases(tmp_path: Path):
     assert Config.load(tmp_path / "missing.toml") == Config()
+
+
+def test_required_config_must_exist(tmp_path: Path):
+    with pytest.raises(ConfigError, match="config file not found"):
+        Config.load(tmp_path / "missing.toml", required=True)
 
 
 def test_config_loads_provider_sources(tmp_path: Path):

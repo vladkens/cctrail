@@ -170,9 +170,8 @@ def test_projects_uses_configured_aliases(tmp_path, capsys, monkeypatch):
     set_data_dirs(monkeypatch, FIXTURES)
     config = tmp_path / "config.toml"
     config.write_text('[aliases]\napplication = ["/repo"]\n', encoding="utf-8")
-    monkeypatch.setenv("CCTRAIL_CONFIG", str(config))
 
-    assert main(["projects", "--json"]) == 0
+    assert main(["--config", str(config), "projects", "--json"]) == 0
     projects = json.loads(capsys.readouterr().out)["projects"]
     assert [project["project"] for project in projects] == ["application"]
 
@@ -181,10 +180,41 @@ def test_projects_reports_invalid_config(tmp_path, capsys, monkeypatch):
     set_data_dirs(monkeypatch, FIXTURES)
     config = tmp_path / "config.toml"
     config.write_text("invalid = [", encoding="utf-8")
-    monkeypatch.setenv("CCTRAIL_CONFIG", str(config))
 
-    assert main(["projects"]) == 2
+    assert main(["--config", str(config), "projects"]) == 2
     assert "config error:" in capsys.readouterr().err
+
+
+def test_config_flag_selects_a_specific_file(tmp_path, capsys, monkeypatch):
+    set_data_dirs(monkeypatch, FIXTURES)
+    selected = tmp_path / "selected.toml"
+    selected.write_text('[aliases]\nselected = ["/repo"]\n', encoding="utf-8")
+
+    assert main(["--config", str(selected), "projects", "--json"]) == 0
+    projects = json.loads(capsys.readouterr().out)["projects"]
+    assert [project["project"] for project in projects] == ["selected"]
+
+
+def test_explicit_config_must_exist(tmp_path, capsys):
+    assert main(["--config", str(tmp_path / "missing.toml"), "projects"]) == 2
+    assert "config file not found" in capsys.readouterr().err
+
+
+def test_no_config_ignores_discovered_config(tmp_path, capsys, monkeypatch):
+    set_data_dirs(monkeypatch, FIXTURES)
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / "cctrail.toml"
+    config.write_text('[aliases]\nconfigured = ["/repo"]\n', encoding="utf-8")
+
+    assert main(["--no-config", "projects", "--json"]) == 0
+    projects = json.loads(capsys.readouterr().out)["projects"]
+    assert [project["project"] for project in projects] == ["/repo"]
+
+
+def test_config_and_no_config_are_mutually_exclusive(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        main(["--config", str(tmp_path / "config.toml"), "--no-config", "projects"])
+    assert exc.value.code == 2
 
 
 def test_reports_read_provider_sources_from_config(tmp_path, capsys, monkeypatch):
@@ -194,13 +224,13 @@ def test_reports_read_provider_sources_from_config(tmp_path, capsys, monkeypatch
         f'[sources]\nclaude = ["{fixtures / "claude"}"]\ncodex = ["{fixtures / "codex"}"]\n',
         encoding="utf-8",
     )
-    monkeypatch.setenv("CCTRAIL_CONFIG", str(config))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
 
-    assert main(["usage", "--provider", "claude", "--json"]) == 0
+    prefix = ["--config", str(config)]
+    assert main([*prefix, "usage", "--provider", "claude", "--json"]) == 0
     claude = json.loads(capsys.readouterr().out)
-    assert main(["usage", "--provider", "codex", "--json"]) == 0
+    assert main([*prefix, "usage", "--provider", "codex", "--json"]) == 0
     codex = json.loads(capsys.readouterr().out)
     assert claude["total"]["usage"]["total"] > 0
     assert codex["total"]["usage"]["total"] > 0

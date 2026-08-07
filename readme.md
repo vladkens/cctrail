@@ -64,11 +64,21 @@ cctrail = ["~/Code/vibe/cctrail", "~/.worktrees/cctrail--*"]
 
 Alias paths support `~` and glob patterns. `*` matches within one path segment, while `**` can match across directories. A trailing `/**` includes both the named directory and everything below it. For example, `~/.worktrees/cctrail--*` matches sibling worktrees and `~/Code/**/cctrail/**` matches the project at any depth below `~/Code` together with all of its checkouts.
 
-`cctrail` looks for configuration in this order:
+Use `--config` to select a file for one command, or `--no-config` to ignore every TOML configuration:
 
-1. The file specified by `CCTRAIL_CONFIG`, if set
-2. `./cctrail.toml`
-3. `~/.config/cctrail.toml`
+```sh
+cctrail --config ~/configs/work.toml projects
+cctrail --no-config projects
+```
+
+Configuration is selected in this order:
+
+1. `--no-config` disables configuration
+2. `--config PATH` selects a specific file
+3. `./cctrail.toml`
+4. `~/.config/cctrail.toml`
+
+An explicitly selected file must exist. The automatic locations are optional.
 
 You can also configure every Claude Code and Codex history directory instead of setting `CLAUDE_CONFIG_DIR` or `CODEX_HOME` for each command:
 

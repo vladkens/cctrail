@@ -10,10 +10,6 @@ class ConfigError(ValueError):
 
 
 def config_path() -> Path:
-    override = os.environ.get("CCTRAIL_CONFIG")
-    if override:
-        return Path(override).expanduser()
-
     local = Path.cwd() / "cctrail.toml"
     if local.is_file():
         return local
@@ -62,12 +58,14 @@ class Config:
     codex_sources: tuple[str, ...] | None = None
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "Config":
+    def load(cls, path: Path | None = None, *, required: bool = False) -> "Config":
         path = config_path() if path is None else path
         try:
             with path.open("rb") as handle:
                 value = tomllib.load(handle)
         except FileNotFoundError:
+            if required:
+                raise ConfigError(f"config file not found: {path}") from None
             return cls()
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"cannot read {path}: {exc}") from exc
