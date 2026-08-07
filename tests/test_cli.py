@@ -147,6 +147,90 @@ def test_projects_command_combines_providers(capsys, monkeypatch):
     assert "962" in out
 
 
+@pytest.mark.parametrize("command", ["usage", "projects", "audit"])
+def test_reports_can_filter_by_provider(command, capsys, monkeypatch):
+    fixtures = Path(__file__).parent / "fixtures"
+    set_data_dirs(monkeypatch, fixtures, fixtures)
+
+    assert main([command, "--provider", "claude"]) == 0
+    claude = capsys.readouterr().out
+    assert main([command, "--provider", "codex"]) == 0
+    codex = capsys.readouterr().out
+
+    assert claude != codex
+
+
+@pytest.mark.parametrize("command", ["usage", "projects", "audit"])
+def test_report_commands_support_json(command, capsys, monkeypatch):
+    set_data_dirs(monkeypatch, FIXTURES)
+    assert main([command, "--json"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["schema_version"] == 1
+    assert payload["command"] == command
+    assert captured.out.endswith("\n")
+    assert captured.err == ""
+
+
+def test_usage_json_has_raw_values_and_optional_models(capsys, monkeypatch):
+    set_data_dirs(monkeypatch, FIXTURES)
+    assert main(["usage", "--models", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["query"]["granularity"] == "day"
+    assert payload["query"]["models"] is True
+    assert payload["periods"][0]["usage"]["total"] == 427
+    assert payload["periods"][0]["active_seconds"] == 310
+    assert payload["periods"][0]["models"][0]["provider"] == "claude"
+    assert payload["total"]["usage"]["total"] == 427
+
+
+def test_usage_json_keeps_stable_models_shape(capsys, monkeypatch):
+    set_data_dirs(monkeypatch, FIXTURES)
+    assert main(["usage", "--json"]) == 0
+    normal = json.loads(capsys.readouterr().out)
+    assert all(period["models"] == [] for period in normal["periods"])
+
+    assert main(["usage", "--full", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == normal
+
+
+def test_usage_json_clips_bucket_dates(capsys, monkeypatch):
+    set_data_dirs(monkeypatch, FIXTURES)
+    assert (
+        main(["usage", "--since", "2026-01-01", "--until", "2026-01-01", "--by", "week", "--json"])
+        == 0
+    )
+    period = json.loads(capsys.readouterr().out)["periods"][0]
+    assert period["start"] == "2026-01-01"
+    assert period["end"] == "2026-01-01"
+
+
+def test_projects_json_preserves_full_paths(capsys, monkeypatch):
+    project = "/" + "very-long-project-path/" * 10
+    summary = ProjectSummary(project=project)
+    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda: [])
+    monkeypatch.setattr("cctrail.cli.by_project", lambda *args, **kwargs: {project: summary})
+    assert main(["projects", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["projects"][0]["project"] == project
+
+
+def test_audit_json_contains_structured_issues(tmp_path: Path, capsys, monkeypatch):
+    write_claude_usage(tmp_path, "unknown-model")
+    set_data_dirs(monkeypatch, tmp_path)
+    assert main(["audit", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["unpriced_messages"] == 1
+    assert payload["issues"] == [
+        {
+            "issue": "missing pricing",
+            "provider": "claude",
+            "model": "unknown-model",
+            "messages": 1,
+            "tokens": 15,
+        }
+    ]
+
+
 def test_audit_command_reports_complete_pricing(capsys, monkeypatch):
     set_data_dirs(monkeypatch, FIXTURES)
     assert main(["audit"]) == 0

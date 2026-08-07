@@ -1,5 +1,6 @@
 import argparse
 import calendar
+import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
@@ -9,10 +10,13 @@ from rich.measure import Measurement
 from rich.table import Table
 from rich.text import Text
 
+from .claude import iter_sessions as iter_claude_sessions
+from .codex import iter_sessions as iter_codex_sessions
 from .history import iter_sessions
 from .metrics import ModelSummary, by_project, usage_by_period, usage_messages
 from .models import Usage
 from .pricing import get_pricing
+from .utils import json_dump
 from .week import first_weekday
 
 PERIODS = (
@@ -177,10 +181,51 @@ def print_table(table: Table) -> None:
     console.print(table)
 
 
+def usage_json(usage: Usage) -> dict[str, int]:
+    return {
+        "input": usage.input,
+        "cache_write_5m": usage.cache_write_5m,
+        "cache_write_1h": usage.cache_write_1h,
+        "cache_write": usage.cache_write,
+        "cache_read": usage.cache_read,
+        "output": usage.output,
+        "reasoning": usage.reasoning,
+        "total": usage.total,
+    }
+
+
+def print_json(value: object) -> None:
+    sys.stdout.write(json_dump(value) + "\n")
+
+
+def query_json(args: argparse.Namespace, since: date | None, until: date | None) -> dict:
+    return {
+        "period": args.period,
+        "since": since.isoformat() if since else None,
+        "until": until.isoformat() if until else None,
+        "provider": args.provider,
+    }
+
+
+def bucket_range(
+    value: date,
+    granularity: str,
+    since: date | None,
+    until: date | None,
+) -> tuple[date, date]:
+    if granularity == "day":
+        end = value
+    elif granularity == "week":
+        end = value + timedelta(days=6)
+    else:
+        end = next_month(value) - timedelta(days=1)
+    return max(value, since) if since else value, min(end, until) if until else end
+
+
 def cmd_usage(args: argparse.Namespace) -> None:
     since, until = date_range(args)
     buckets = usage_by_period(
-        iter_sessions(),
+        filtered_sessions(args),
         granularity=args.granularity,
         since=since,
         until=until,
@@ -198,12 +243,37 @@ def cmd_usage(args: argparse.Namespace) -> None:
     total = Usage()
     total_cost = 0.0
     total_active = timedelta()
+    periods = []
     for period in sorted(buckets):
         summary = buckets[period]
         usage = summary.usage
         total = total + usage
         total_cost += summary.cost
         total_active += summary.active_time
+        start, end = bucket_range(period, args.granularity, since, until)
+        periods.append(
+            {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "usage": usage_json(usage),
+                "cost_usd": summary.cost,
+                "active_seconds": int(summary.active_time.total_seconds()),
+                "models": [
+                    {
+                        "provider": model.provider,
+                        "model": model.model,
+                        "speed": model.speed,
+                        "usage": usage_json(model.usage),
+                        "cost_usd": model.cost,
+                    }
+                    for model in summary.models
+                ]
+                if args.models
+                else [],
+            }
+        )
+        if args.json:
+            continue
         table.add_row(
             *usage_row(
                 period_label(
@@ -230,6 +300,24 @@ def cmd_usage(args: argparse.Namespace) -> None:
                     )
                 )
 
+    if args.json:
+        query = query_json(args, since, until)
+        query.update({"granularity": args.granularity, "models": args.models})
+        print_json(
+            {
+                "schema_version": 1,
+                "command": "usage",
+                "query": query,
+                "periods": periods,
+                "total": {
+                    "usage": usage_json(total),
+                    "cost_usd": total_cost,
+                    "active_seconds": int(total_active.total_seconds()),
+                },
+            }
+        )
+        return
+
     table.add_section()
     table.add_row(
         *usage_row("total", total, total_cost, total_active, full=args.full),
@@ -241,10 +329,36 @@ def cmd_usage(args: argparse.Namespace) -> None:
 def cmd_projects(args: argparse.Namespace) -> None:
     since, until = date_range(args)
     projects = sorted(
-        by_project(iter_sessions(), since=since, until=until).values(),
+        by_project(filtered_sessions(args), since=since, until=until).values(),
         key=lambda p: p.usage.total,
         reverse=True,
     )
+
+    if args.json:
+        print_json(
+            {
+                "schema_version": 1,
+                "command": "projects",
+                "query": query_json(args, since, until),
+                "projects": [
+                    {
+                        "project": project.project,
+                        "sessions": project.session_count,
+                        "usage": usage_json(project.usage),
+                        "cost_usd": project.cost,
+                        "active_seconds": int(project.active_time.total_seconds()),
+                        "first_activity": project.first_activity.isoformat()
+                        if project.first_activity
+                        else None,
+                        "last_activity": project.last_activity.isoformat()
+                        if project.last_activity
+                        else None,
+                    }
+                    for project in projects
+                ],
+            }
+        )
+        return
 
     table = Table(box=None, header_style="bold", pad_edge=False, collapse_padding=True)
     table.add_column("Project", style="cyan")
@@ -270,7 +384,7 @@ def cmd_projects(args: argparse.Namespace) -> None:
 
 
 def cmd_audit(args: argparse.Namespace) -> None:
-    sessions = list(iter_sessions())
+    sessions = list(filtered_sessions(args))
     messages = usage_messages(sessions)
     issue_messages: Counter[tuple[str, str, str]] = Counter()
     issue_tokens: Counter[tuple[str, str, str]] = Counter()
@@ -295,6 +409,36 @@ def cmd_audit(args: argparse.Namespace) -> None:
         current_version = version("cctrail")
     except PackageNotFoundError:
         current_version = "unknown"
+
+    issue_rows = [
+        {
+            "issue": kind,
+            "provider": provider,
+            "model": model,
+            "messages": issue_messages[issue],
+            "tokens": issue_tokens[issue],
+        }
+        for issue in sorted(issue_messages)
+        for kind, provider, model in [issue]
+    ]
+    if args.json:
+        print_json(
+            {
+                "schema_version": 1,
+                "command": "audit",
+                "query": {"provider": args.provider},
+                "cctrail_version": current_version,
+                "summary": {
+                    "sessions": len(sessions),
+                    "billable_messages": len(messages),
+                    "billable_tokens": total_tokens,
+                    "unpriced_messages": unpriced_messages,
+                    "unpriced_tokens": unpriced_tokens,
+                },
+                "issues": issue_rows,
+            }
+        )
+        return
 
     summary = Table(title="Pricing audit", box=None, header_style="bold")
     summary.add_column("Metric")
@@ -354,12 +498,32 @@ def add_date_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_provider_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--provider", choices=("claude", "codex"), help="Only include one history provider"
+    )
+
+
+def add_output_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
+
+def filtered_sessions(args: argparse.Namespace):
+    if args.provider == "claude":
+        return iter_claude_sessions()
+    if args.provider == "codex":
+        return iter_codex_sessions()
+    return iter_sessions()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cctrail")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     usage_parser = subparsers.add_parser("usage", help="Token usage over time")
     add_date_arguments(usage_parser)
+    add_provider_argument(usage_parser)
+    add_output_arguments(usage_parser)
     usage_parser.add_argument(
         "--by",
         choices=("day", "week", "month"),
@@ -375,10 +539,14 @@ def main(argv: list[str] | None = None) -> int:
 
     projects_parser = subparsers.add_parser("projects", help="Token usage aggregated by project")
     add_date_arguments(projects_parser)
+    add_provider_argument(projects_parser)
+    add_output_arguments(projects_parser)
     projects_parser.add_argument("--full", action="store_true", help="Show full project paths")
     projects_parser.set_defaults(func=cmd_projects)
 
     audit_parser = subparsers.add_parser("audit", help="Check pricing coverage")
+    add_provider_argument(audit_parser)
+    add_output_arguments(audit_parser)
     audit_parser.set_defaults(func=cmd_audit)
 
     args = parser.parse_args(argv)
