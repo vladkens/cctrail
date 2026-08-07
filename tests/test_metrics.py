@@ -9,6 +9,7 @@ from cctrail import (
     iter_claude_sessions,
     iter_sessions,
     usage_by_day,
+    usage_by_period,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
@@ -128,3 +129,108 @@ def test_usage_by_day_splits_active_time_at_midnight_and_merges_parallel_session
 
     assert buckets[date(2026, 1, 1)].active_time == timedelta(minutes=2)
     assert buckets[date(2026, 1, 2)].active_time == timedelta(minutes=6)
+
+
+def test_usage_by_period_groups_weeks_from_the_requested_first_weekday():
+    session = Session(
+        id="session",
+        provider="codex",
+        messages=[
+            Message(
+                "assistant",
+                datetime(2026, 1, 4, tzinfo=UTC),
+                model="gpt-5.4",
+                usage=Usage(input=10),
+            ),
+            Message(
+                "assistant",
+                datetime(2026, 1, 5, tzinfo=UTC),
+                model="gpt-5.4",
+                usage=Usage(input=20),
+            ),
+        ],
+    )
+
+    sunday_first = usage_by_period([session], granularity="week", first_weekday=6)
+    monday_first = usage_by_period([session], granularity="week", first_weekday=0)
+
+    assert list(sunday_first) == [date(2026, 1, 4)]
+    assert sunday_first[date(2026, 1, 4)].usage.input == 30
+    assert list(monday_first) == [date(2025, 12, 29), date(2026, 1, 5)]
+
+
+def test_usage_by_period_keeps_provider_and_fast_model_usage_separate():
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    sessions = [
+        Session(
+            id="codex",
+            provider="codex",
+            messages=[
+                Message(
+                    "assistant",
+                    timestamp,
+                    model="gpt-5.4",
+                    usage=Usage(input=10),
+                ),
+                Message(
+                    "assistant",
+                    timestamp,
+                    model="gpt-5.4",
+                    usage=Usage(input=20),
+                    speed="fast",
+                ),
+            ],
+        ),
+        Session(
+            id="claude",
+            provider="claude",
+            messages=[
+                Message(
+                    "assistant",
+                    timestamp,
+                    model="gpt-5.4",
+                    usage=Usage(input=30),
+                )
+            ],
+        ),
+    ]
+
+    models = usage_by_day(sessions)[date(2026, 1, 1)].models
+
+    assert [(model.provider, model.model, model.speed, model.usage.input) for model in models] == [
+        ("claude", "gpt-5.4", None, 30),
+        ("codex", "gpt-5.4", "fast", 20),
+        ("codex", "gpt-5.4", None, 10),
+    ]
+
+
+def test_by_project_filters_every_metric_to_the_date_range():
+    session = Session(
+        id="session",
+        cwd="/repo",
+        messages=[
+            Message(
+                "assistant",
+                datetime(2026, 1, 1, tzinfo=UTC),
+                usage=Usage(input=10),
+            ),
+            Message(
+                "assistant",
+                datetime(2026, 1, 2, tzinfo=UTC),
+                usage=Usage(input=20),
+            ),
+        ],
+    )
+
+    summary = by_project(
+        [session],
+        since=date(2026, 1, 2),
+        until=date(2026, 1, 2),
+        timezone=UTC,
+    )["/repo"]
+
+    assert summary.usage.input == 20
+    assert summary.session_count == 1
+    assert summary.first_activity == datetime(2026, 1, 2, tzinfo=UTC)
+    assert summary.last_activity == datetime(2026, 1, 2, tzinfo=UTC)
+    assert summary.active_time == timedelta(minutes=5)

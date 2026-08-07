@@ -20,7 +20,25 @@ Show token usage by day:
 uvx cctrail usage
 ```
 
-Limit the report to a date range:
+Use named calendar periods and group longer reports by week or month:
+
+```sh
+uvx cctrail usage today
+uvx cctrail usage last-week
+uvx cctrail usage this-month --by week
+uvx cctrail usage all --by month
+```
+
+Available periods are `today`, `yesterday`, `this-week`, `last-week`, `this-month`, `last-month`, and `all`. Weeks follow the first weekday of the system locale.
+
+Show a per-model breakdown or the detailed reasoning and cache token columns:
+
+```sh
+uvx cctrail usage this-month --models
+uvx cctrail usage this-month --models --full
+```
+
+For an arbitrary date range, use `--since` and `--until`:
 
 ```sh
 uvx cctrail usage --since 2026-07-01 --until 2026-07-31
@@ -29,8 +47,10 @@ uvx cctrail usage --since 2026-07-01 --until 2026-07-31
 Show usage grouped by project directory:
 
 ```sh
-uvx cctrail projects
+uvx cctrail projects this-month
 ```
+
+Projects accept the same named periods and arbitrary date ranges as usage reports.
 
 Claude data is read from `~/.config/claude` and `~/.claude`, while Codex data is read from `~/.codex`. Set `CLAUDE_CONFIG_DIR` or `CODEX_HOME` to replace these defaults. Both variables accept comma-separated directories:
 
@@ -73,17 +93,17 @@ Provider-specific iterators are available as `iter_claude_sessions()` and `iter_
 The main data types are `Session`, `Message`, `ToolCall`, and `Usage`. Every model supports `.as_dict()` and `.as_json()`.
 
 ```python
-from cctrail import Usage, by_project, calculate_cost, get_pricing, iter_sessions, usage_by_day
+from cctrail import Usage, by_project, calculate_cost, get_pricing, iter_sessions, usage_by_period
 
 sessions = list(iter_sessions())
-daily = usage_by_day(sessions)
+weekly = usage_by_period(sessions, granularity="week")
 projects = by_project(sessions)
 
 pricing = get_pricing("claude-sonnet-5")
 cost = calculate_cost("claude-sonnet-5", Usage(input=1_000, output=100))
 ```
 
-Daily usage is grouped in the system timezone by default. Pass a `datetime.tzinfo` as the `timezone` argument to `usage_by_day()` to use another timezone. Daily `UsageSummary` values and `ProjectSummary` values expose `.cost` and `.active_time`.
+Usage is grouped in the system timezone by default. `usage_by_period()` accepts `day`, `week`, and `month` granularities, while `usage_by_day()` remains the daily shortcut. Pass a `datetime.tzinfo` as the `timezone` argument to use another timezone. `UsageSummary` values expose `.cost`, `.active_time`, and per-model `.models`; `ProjectSummary` values expose `.cost` and `.active_time`.
 
 ## Development
 

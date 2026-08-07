@@ -2,6 +2,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
+from typing import Literal
 
 from .models import JsonTrait, Message, Session, Usage
 from .pricing import calculate_cost
@@ -47,35 +48,92 @@ def usage_rank(message: Message) -> tuple[int, bool]:
 
 
 @dataclass
+class ModelSummary(JsonTrait):
+    provider: str
+    model: str
+    speed: Literal["fast"] | None = None
+    usage: Usage = field(default_factory=Usage)
+    cost: float = 0.0
+
+
+@dataclass
 class UsageSummary(JsonTrait):
     usage: Usage = field(default_factory=Usage)
     cost: float = 0.0
     active_time: timedelta = field(default_factory=timedelta)
+    models: list[ModelSummary] = field(default_factory=list)
 
 
 def usage_by_day(
     sessions: Iterable[Session], *, timezone: tzinfo | None = None
 ) -> dict[date, UsageSummary]:
     """Summarize usage and estimated activity per calendar day."""
+    return usage_by_period(sessions, timezone=timezone)
+
+
+def usage_by_period(
+    sessions: Iterable[Session],
+    *,
+    granularity: Literal["day", "week", "month"] = "day",
+    since: date | None = None,
+    until: date | None = None,
+    timezone: tzinfo | None = None,
+    first_weekday: int = 0,
+) -> dict[date, UsageSummary]:
+    """Summarize usage by calendar day, week, or month."""
     sessions = list(sessions)
     buckets: dict[date, UsageSummary] = {}
+    models: defaultdict[date, dict[tuple[str, str, str | None], ModelSummary]] = defaultdict(dict)
     for session, message in usage_messages(sessions):
         if message.timestamp is None or message.usage is None:
             continue
 
         day = calendar_date(message.timestamp, timezone)
-        summary = buckets.setdefault(day, UsageSummary())
+        if not date_in_range(day, since, until):
+            continue
+
+        bucket = period_start(day, granularity, first_weekday)
+        summary = buckets.setdefault(bucket, UsageSummary())
         summary.usage = summary.usage + message.usage
-        summary.cost += calculate_cost(
+        cost = calculate_cost(
             message.model or "",
             message.usage,
             provider=session.provider,
             speed=message.speed,
         )
+        summary.cost += cost
+
+        speed = "fast" if message.speed == "fast" else None
+        model_key = session.provider, message.model or "unknown", speed
+        model = models[bucket].setdefault(
+            model_key,
+            ModelSummary(
+                provider=session.provider,
+                model=message.model or "unknown",
+                speed=speed,
+            ),
+        )
+        model.usage = model.usage + message.usage
+        model.cost += cost
 
     events = activity_stamps(sessions)
     for day, duration in active_time_by_day(events, timezone=timezone).items():
-        buckets.setdefault(day, UsageSummary()).active_time = duration
+        if not date_in_range(day, since, until):
+            continue
+
+        bucket = period_start(day, granularity, first_weekday)
+        buckets.setdefault(bucket, UsageSummary()).active_time += duration
+
+    for bucket, summaries in models.items():
+        buckets[bucket].models = sorted(
+            summaries.values(),
+            key=lambda summary: (
+                -summary.usage.total,
+                summary.provider,
+                summary.model,
+                summary.speed or "",
+            ),
+        )
 
     return buckets
 
@@ -96,30 +154,50 @@ class ProjectSummary(JsonTrait):
     last_activity: datetime | None = None
 
 
-def by_project(sessions: Iterable[Session]) -> dict[str, ProjectSummary]:
+def by_project(
+    sessions: Iterable[Session],
+    *,
+    since: date | None = None,
+    until: date | None = None,
+    timezone: tzinfo | None = None,
+) -> dict[str, ProjectSummary]:
     """Group sessions by working directory, summing usage across each session's agent tree."""
     sessions = list(sessions)
     result: dict[str, ProjectSummary] = {}
     events: defaultdict[str, list[datetime]] = defaultdict(list)
     for session in sessions:
         project = session.cwd or "unknown"
-        summary = result.setdefault(project, ProjectSummary(project=project))
-        if session.kind == "main":
-            summary.session_count += 1
+        all_stamps = [stamp for nested in session.walk() for stamp in nested.activity_stamps()]
+        events[project].extend(all_stamps)
+        stamps = [
+            stamp
+            for stamp in all_stamps
+            if date_in_range(calendar_date(stamp, timezone), since, until)
+        ]
+        if stamps:
+            summary = result.setdefault(project, ProjectSummary(project=project))
+            if session.kind == "main":
+                summary.session_count += 1
 
-        for nested in session.walk():
-            events[project].extend(nested.activity_stamps())
-            started, ended = nested.started_at, nested.ended_at
-            if started and (summary.first_activity is None or started < summary.first_activity):
+            started, ended = min(stamps), max(stamps)
+            if summary.first_activity is None or started < summary.first_activity:
                 summary.first_activity = started
-            if ended and (summary.last_activity is None or ended > summary.last_activity):
+            if summary.last_activity is None or ended > summary.last_activity:
                 summary.last_activity = ended
 
     for session, message in usage_messages(sessions):
+        if message.timestamp is not None:
+            day = calendar_date(message.timestamp, timezone)
+            if not date_in_range(day, since, until):
+                continue
+        elif since is not None or until is not None:
+            continue
+
         project = session.cwd or "unknown"
         assert message.usage is not None
-        result[project].usage = result[project].usage + message.usage
-        result[project].cost += calculate_cost(
+        summary = result.setdefault(project, ProjectSummary(project=project))
+        summary.usage = summary.usage + message.usage
+        summary.cost += calculate_cost(
             message.model or "",
             message.usage,
             provider=session.provider,
@@ -127,9 +205,39 @@ def by_project(sessions: Iterable[Session]) -> dict[str, ProjectSummary]:
         )
 
     for project, project_events in events.items():
-        result[project].active_time = active_time(project_events)
+        duration = sum(
+            (
+                duration
+                for day, duration in active_time_by_day(
+                    project_events,
+                    timezone=timezone,
+                ).items()
+                if date_in_range(day, since, until)
+            ),
+            timedelta(),
+        )
+        if duration:
+            result.setdefault(project, ProjectSummary(project=project)).active_time = duration
 
     return result
+
+
+def date_in_range(value: date, since: date | None, until: date | None) -> bool:
+    return (since is None or value >= since) and (until is None or value <= until)
+
+
+def period_start(
+    value: date,
+    granularity: Literal["day", "week", "month"],
+    first_weekday: int = 0,
+) -> date:
+    if granularity == "day":
+        return value
+    if granularity == "week":
+        return value - timedelta(days=(value.weekday() - first_weekday) % 7)
+    if granularity == "month":
+        return value.replace(day=1)
+    raise ValueError(f"Unsupported granularity: {granularity}")
 
 
 def calendar_date(timestamp: datetime, timezone: tzinfo | None) -> date:
