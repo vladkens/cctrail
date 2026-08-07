@@ -1,5 +1,5 @@
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Literal
@@ -160,6 +160,7 @@ def by_project(
     since: date | None = None,
     until: date | None = None,
     timezone: tzinfo | None = None,
+    project_resolver: Callable[[str], str] | None = None,
 ) -> dict[str, ProjectSummary]:
     """Group sessions by working directory, summing usage across each session's agent tree."""
     sessions = list(sessions)
@@ -167,6 +168,8 @@ def by_project(
     events: defaultdict[str, list[datetime]] = defaultdict(list)
     for session in sessions:
         project = session.cwd or "unknown"
+        if project_resolver is not None:
+            project = project_resolver(project)
         all_stamps = [stamp for nested in session.walk() for stamp in nested.activity_stamps()]
         events[project].extend(all_stamps)
         stamps = [
@@ -194,6 +197,8 @@ def by_project(
             continue
 
         project = session.cwd or "unknown"
+        if project_resolver is not None:
+            project = project_resolver(project)
         assert message.usage is not None
         summary = result.setdefault(project, ProjectSummary(project=project))
         summary.usage = summary.usage + message.usage

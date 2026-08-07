@@ -12,6 +12,7 @@ from rich.text import Text
 
 from .claude import iter_sessions as iter_claude_sessions
 from .codex import iter_sessions as iter_codex_sessions
+from .config import Config, ConfigError
 from .history import iter_sessions
 from .metrics import ModelSummary, by_project, usage_by_period, usage_messages
 from .models import Usage
@@ -328,8 +329,14 @@ def cmd_usage(args: argparse.Namespace) -> None:
 
 def cmd_projects(args: argparse.Namespace) -> None:
     since, until = date_range(args)
+    config = Config.load()
     projects = sorted(
-        by_project(filtered_sessions(args), since=since, until=until).values(),
+        by_project(
+            filtered_sessions(args),
+            since=since,
+            until=until,
+            project_resolver=config.resolve_project,
+        ).values(),
         key=lambda p: p.usage.total,
         reverse=True,
     )
@@ -559,6 +566,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         args.func(args)
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
         return 130
 

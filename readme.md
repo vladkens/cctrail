@@ -52,6 +52,23 @@ uvx cctrail projects this-month
 
 Projects accept the same named periods and arbitrary date ranges as usage reports.
 
+### Configuration
+
+Project aliases can combine a project's main checkout and worktrees into a single project in the report. This is optional: without an alias, `cctrail` reports each path separately.
+
+```toml
+[aliases]
+cctrail = ["~/Code/vibe/cctrail", "~/.worktrees/cctrail--*"]
+```
+
+Alias paths support `~` and glob patterns. `*` matches within one path segment, while `**` can match across directories. For example, `~/.worktrees/cctrail--*` matches sibling worktrees and `~/Code/**/cctrail` matches the project at any depth below `~/Code`.
+
+`cctrail` looks for configuration in this order:
+
+1. The file specified by `CCTRAIL_CONFIG`, if set
+2. `./cctrail.toml`
+3. `~/.config/cctrail.toml`
+
 Claude data is read from `~/.config/claude` and `~/.claude`, while Codex data is read from `~/.codex`. Set `CLAUDE_CONFIG_DIR` or `CODEX_HOME` to replace these defaults. Both variables accept comma-separated directories:
 
 ```sh
