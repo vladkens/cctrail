@@ -160,6 +160,14 @@ CLAUDE_CONFIG_DIR="$HOME/.claude,$HOME/.claude-qh" uvx cctrail usage
 CODEX_HOME="$HOME/.codex,$HOME/.codex-work" uvx cctrail usage
 ```
 
+Claude Code deletes session files older than 30 days at startup by default. Because `cctrail` reads those local transcripts, deleted sessions also disappear from its reports. To preserve a long-term history, increase [`cleanupPeriodDays`](https://code.claude.com/docs/en/settings) in `~/.claude/settings.json` before the default cleanup removes it:
+
+```json
+{
+  "cleanupPeriodDays": 9999
+}
+```
+
 Usage reports count each provider message once, while parsed sessions retain their original message and sub-agent structure. Costs are estimates based on the pricing catalog embedded in the installed cctrail version.
 
 Active time is estimated by treating every activity event as a five-minute window. Overlapping sessions within a project are merged; when several projects are active at once, that time is divided evenly between them. This keeps the project and group totals equal to the overall active time.
