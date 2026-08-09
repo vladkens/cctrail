@@ -115,7 +115,7 @@ CODEX_HOME="$HOME/.codex,$HOME/.codex-work" uvx cctrail usage
 
 Usage reports count each provider message once, while parsed sessions retain their original message and sub-agent structure. Costs are estimates based on the pricing catalog embedded in the installed cctrail version.
 
-Active time is estimated by treating every activity event as a five-minute window and merging overlaps, including activity from concurrent sessions.
+Active time is estimated by treating every activity event as a five-minute window. Overlapping sessions within a project are merged; when several projects are active at once, that time is divided evenly between them. This keeps the project and group totals equal to the overall active time.
 
 ## Python library
 

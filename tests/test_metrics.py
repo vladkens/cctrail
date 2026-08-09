@@ -44,6 +44,34 @@ def test_by_project_groups_by_cwd_and_sums_agent_usage():
     assert summary.as_dict()["session_count"] == 1
 
 
+def test_by_project_splits_overlapping_time_between_projects():
+    start = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+    sessions = [
+        Session(id="app", cwd="/app", messages=[Message("user", start)]),
+        Session(
+            id="app-worktree",
+            cwd="/app-worktree",
+            messages=[Message("user", start)],
+        ),
+        Session(
+            id="other",
+            cwd="/other",
+            messages=[Message("user", start + timedelta(minutes=2))],
+        ),
+    ]
+
+    projects = by_project(
+        sessions,
+        project_resolver=lambda project: "app" if project.startswith("/app") else project,
+    )
+
+    assert projects["app"].active_time == timedelta(minutes=3, seconds=30)
+    assert projects["/other"].active_time == timedelta(minutes=3, seconds=30)
+    assert sum((project.active_time for project in projects.values()), timedelta()) == timedelta(
+        minutes=7
+    )
+
+
 def test_by_project_without_date_range_skips_calendar_conversion(monkeypatch):
     sessions = list(iter_claude_sessions(FIXTURES))
 

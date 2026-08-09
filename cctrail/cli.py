@@ -2,7 +2,7 @@ import argparse
 import calendar
 import os
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
@@ -17,7 +17,7 @@ from .claude import iter_sessions as iter_claude_sessions
 from .codex import iter_sessions as iter_codex_sessions
 from .config import Config, ConfigError
 from .history import iter_sessions
-from .metrics import ModelSummary, by_project, usage_by_period, usage_messages
+from .metrics import ModelSummary, ProjectSummary, by_project, usage_by_period, usage_messages
 from .models import Session, Usage
 from .pricing import get_pricing
 from .utils import WorkerConfigError, json_dump
@@ -212,6 +212,39 @@ def usage_json(usage: Usage) -> dict[str, int]:
     }
 
 
+def project_summary_json(summary: ProjectSummary) -> dict[str, object]:
+    return {
+        "sessions": summary.session_count,
+        "usage": usage_json(summary.usage),
+        "cost_usd": summary.cost,
+        "active_seconds": int(summary.active_time.total_seconds()),
+        "first_activity": summary.first_activity.isoformat() if summary.first_activity else None,
+        "last_activity": summary.last_activity.isoformat() if summary.last_activity else None,
+    }
+
+
+def combine_project_summaries(
+    summaries: list[ProjectSummary],
+    *,
+    name: str = "total",
+) -> ProjectSummary:
+    total = ProjectSummary(project=name)
+    for summary in summaries:
+        total.session_count += summary.session_count
+        total.usage = total.usage + summary.usage
+        total.cost += summary.cost
+        total.active_time += summary.active_time
+        if total.first_activity is None or (
+            summary.first_activity is not None and summary.first_activity < total.first_activity
+        ):
+            total.first_activity = summary.first_activity
+        if total.last_activity is None or (
+            summary.last_activity is not None and summary.last_activity > total.last_activity
+        ):
+            total.last_activity = summary.last_activity
+    return total
+
+
 def print_json(value: object) -> None:
     sys.stdout.write(json_dump(value) + "\n")
 
@@ -356,6 +389,7 @@ def cmd_projects(args: argparse.Namespace) -> None:
         key=lambda p: p.usage.total,
         reverse=True,
     )
+    total = combine_project_summaries(projects)
 
     if args.json:
         print_json(
@@ -366,19 +400,14 @@ def cmd_projects(args: argparse.Namespace) -> None:
                 "projects": [
                     {
                         "project": project.project,
-                        "sessions": project.session_count,
-                        "usage": usage_json(project.usage),
-                        "cost_usd": project.cost,
-                        "active_seconds": int(project.active_time.total_seconds()),
-                        "first_activity": project.first_activity.isoformat()
-                        if project.first_activity
-                        else None,
-                        "last_activity": project.last_activity.isoformat()
-                        if project.last_activity
-                        else None,
+                        **project_summary_json(project),
                     }
                     for project in projects
                 ],
+                "total": {
+                    "projects": len(projects),
+                    **project_summary_json(total),
+                },
             }
         )
         return
@@ -400,6 +429,17 @@ def cmd_projects(args: argparse.Namespace) -> None:
             duration(project.active_time),
         )
 
+    table.add_section()
+    table.add_row(
+        "total",
+        str(total.session_count),
+        human(total.usage.total),
+        format_local_date(total.last_activity) if total.last_activity else "-",
+        money(total.cost),
+        duration(total.active_time),
+        style="bold",
+    )
+
     if args.full:
         print_table(table)
     else:
@@ -416,19 +456,21 @@ def cmd_groups(args: argparse.Namespace) -> None:
         project_resolver=args.config.resolve_project,
     )
 
-    def resolve_group(project: str) -> str:
-        return args.config.resolve_group(args.config.resolve_project(project))
-
+    grouped_projects: defaultdict[str, list[ProjectSummary]] = defaultdict(list)
+    for project in projects.values():
+        grouped_projects[args.config.resolve_group(project.project)].append(project)
     groups = sorted(
-        by_project(
-            sessions,
-            since=since,
-            until=until,
-            project_resolver=resolve_group,
-        ).values(),
+        (
+            combine_project_summaries(group_projects, name=group)
+            for group, group_projects in grouped_projects.items()
+        ),
         key=lambda group: (-group.usage.total, group.project),
     )
-    project_counts = Counter(args.config.resolve_group(project) for project in projects)
+    project_counts = {
+        group: len(group_projects) for group, group_projects in grouped_projects.items()
+    }
+    total = combine_project_summaries(groups)
+    total_projects = sum(project_counts.values())
 
     if args.json:
         print_json(
@@ -440,19 +482,15 @@ def cmd_groups(args: argparse.Namespace) -> None:
                     {
                         "group": group.project,
                         "projects": project_counts[group.project],
-                        "sessions": group.session_count,
-                        "usage": usage_json(group.usage),
-                        "cost_usd": group.cost,
-                        "active_seconds": int(group.active_time.total_seconds()),
-                        "first_activity": group.first_activity.isoformat()
-                        if group.first_activity
-                        else None,
-                        "last_activity": group.last_activity.isoformat()
-                        if group.last_activity
-                        else None,
+                        **project_summary_json(group),
                     }
                     for group in groups
                 ],
+                "total": {
+                    "groups": len(groups),
+                    "projects": total_projects,
+                    **project_summary_json(total),
+                },
             }
         )
         return
@@ -475,6 +513,17 @@ def cmd_groups(args: argparse.Namespace) -> None:
             money(group.cost),
             duration(group.active_time),
         )
+    table.add_section()
+    table.add_row(
+        "total",
+        str(total_projects),
+        str(total.session_count),
+        human(total.usage.total),
+        format_local_date(total.last_activity) if total.last_activity else "-",
+        money(total.cost),
+        duration(total.active_time),
+        style="bold",
+    )
     Console().print(table)
 
 

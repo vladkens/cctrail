@@ -1,5 +1,5 @@
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Literal
@@ -215,24 +215,14 @@ def by_project(
             speed=message.speed,
         )
 
-    for project, project_events in events.items():
-        if filter_by_date:
-            duration = sum(
-                (
-                    duration
-                    for day, duration in active_time_by_day(
-                        project_events,
-                        timezone=timezone,
-                    ).items()
-                    if date_in_range(day, since, until)
-                ),
-                timedelta(),
-            )
-        else:
-            duration = active_time(project_events)
-
-        if duration:
-            result.setdefault(project, ProjectSummary(project=project)).active_time = duration
+    durations = active_time_by_project(
+        events,
+        since=since,
+        until=until,
+        timezone=timezone,
+    )
+    for project, duration in durations.items():
+        result.setdefault(project, ProjectSummary(project=project)).active_time = duration
 
     return result
 
@@ -301,6 +291,94 @@ def active_time(events: Iterable[datetime], window: timedelta = timedelta(minute
     return sum((end - start for start, end in activity_intervals(events, window)), timedelta())
 
 
+def active_time_by_project(
+    events: dict[str, list[datetime]],
+    *,
+    since: date | None = None,
+    until: date | None = None,
+    timezone: tzinfo | None = None,
+    window: timedelta = timedelta(minutes=5),
+) -> dict[str, timedelta]:
+    changes: defaultdict[datetime, dict[str, int]] = defaultdict(dict)
+    for project, project_events in events.items():
+        for start, end in activity_intervals(project_events, window):
+            changes[start][project] = changes[start].get(project, 0) + 1
+            changes[end][project] = changes[end].get(project, 0) - 1
+
+    result: defaultdict[str, timedelta] = defaultdict(timedelta)
+    active: set[str] = set()
+    previous: datetime | None = None
+    filter_by_date = since is not None or until is not None
+
+    for timestamp in sorted(changes):
+        if previous is not None and active:
+            if filter_by_date:
+                parts = interval_parts_by_day(previous, timestamp, timezone)
+                for day, part in parts:
+                    if date_in_range(day, since, until):
+                        distribute_time(result, active, part)
+            else:
+                distribute_time(result, active, timestamp - previous)
+
+        for project, change in changes[timestamp].items():
+            if change > 0:
+                active.add(project)
+            else:
+                active.discard(project)
+        previous = timestamp
+
+    return whole_second_durations(result)
+
+
+def distribute_time(
+    result: dict[str, timedelta],
+    projects: set[str],
+    duration: timedelta,
+) -> None:
+    ordered = sorted(projects)
+    microseconds = duration // timedelta(microseconds=1)
+    share, remainder = divmod(microseconds, len(ordered))
+    for index, project in enumerate(ordered):
+        extra_microsecond = int(index < remainder)
+        result[project] += timedelta(microseconds=share + extra_microsecond)
+
+
+def whole_second_durations(durations: dict[str, timedelta]) -> dict[str, timedelta]:
+    second = timedelta(seconds=1)
+    microsecond = timedelta(microseconds=1)
+    total_seconds = sum(durations.values(), timedelta()) // second
+    project_seconds = {project: duration // second for project, duration in durations.items()}
+    remainder = total_seconds - sum(project_seconds.values())
+    by_fraction = sorted(
+        durations,
+        key=lambda project: (-((durations[project] % second) // microsecond), project),
+    )
+    for project in by_fraction[:remainder]:
+        project_seconds[project] += 1
+    return {project: timedelta(seconds=seconds) for project, seconds in project_seconds.items()}
+
+
+def interval_parts_by_day(
+    start: datetime,
+    end: datetime,
+    timezone: tzinfo | None,
+) -> Iterator[tuple[date, timedelta]]:
+    cursor = start
+    while cursor < end:
+        local = cursor if cursor.tzinfo is None else cursor.astimezone(timezone)
+        boundary = (local + timedelta(days=1)).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        if cursor.tzinfo is not None:
+            boundary = boundary.astimezone(cursor.tzinfo)
+        part_end = min(end, boundary)
+        yield local.date(), part_end - cursor
+        cursor = part_end
+
+
 def active_time_by_day(
     events: Iterable[datetime],
     *,
@@ -309,19 +387,7 @@ def active_time_by_day(
 ) -> dict[date, timedelta]:
     result: defaultdict[date, timedelta] = defaultdict(timedelta)
     for start, end in activity_intervals(events, window):
-        cursor = start
-        while cursor < end:
-            local = cursor if cursor.tzinfo is None else cursor.astimezone(timezone)
-            boundary = (local + timedelta(days=1)).replace(
-                hour=0,
-                minute=0,
-                second=0,
-                microsecond=0,
-            )
-            if cursor.tzinfo is not None:
-                boundary = boundary.astimezone(cursor.tzinfo)
-            part_end = min(end, boundary)
-            result[local.date()] += part_end - cursor
-            cursor = part_end
+        for day, duration in interval_parts_by_day(start, end, timezone):
+            result[day] += duration
 
     return dict(result)

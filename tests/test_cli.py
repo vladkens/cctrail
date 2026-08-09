@@ -117,6 +117,7 @@ def test_projects_command_runs(capsys, monkeypatch):
     assert main(["projects"]) == 0
     out = capsys.readouterr().out
     assert "/repo" in out
+    assert "total" in out
     assert "Cost" in out
     assert "Time" in out
     assert "0h 05m" in out
@@ -193,20 +194,28 @@ def test_groups_aggregate_projects_without_double_counting_active_time(
     )
 
     assert main(["--config", str(config), "groups", "--json"]) == 0
-    groups = json.loads(capsys.readouterr().out)["groups"]
+    payload = json.loads(capsys.readouterr().out)
+    groups = payload["groups"]
     assert [(group["group"], group["projects"]) for group in groups] == [
         ("work", 1),
         ("ungrouped", 1),
     ]
     assert groups[0]["sessions"] == 2
     assert groups[0]["usage"]["total"] == 30
-    assert groups[0]["active_seconds"] == 300
+    assert groups[0]["active_seconds"] == 150
+    assert payload["total"]["groups"] == 2
+    assert payload["total"]["projects"] == 2
+    assert payload["total"]["sessions"] == sum(group["sessions"] for group in groups)
+    assert payload["total"]["usage"]["total"] == sum(group["usage"]["total"] for group in groups)
+    assert payload["total"]["active_seconds"] == 300
+    assert payload["total"]["active_seconds"] == sum(group["active_seconds"] for group in groups)
 
     assert main(["--config", str(config), "groups"]) == 0
     output = capsys.readouterr().out
     assert "Group" in output
     assert "work" in output
     assert "ungrouped" in output
+    assert "total" in output
 
 
 def test_projects_uses_configured_aliases(tmp_path, capsys, monkeypatch):
@@ -344,7 +353,9 @@ def test_projects_json_preserves_full_paths(capsys, monkeypatch):
     monkeypatch.setattr("cctrail.cli.iter_sessions", lambda **_kwargs: [])
     monkeypatch.setattr("cctrail.cli.by_project", lambda *args, **kwargs: {project: summary})
     assert main(["projects", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["projects"][0]["project"] == project
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["projects"][0]["project"] == project
+    assert payload["total"]["projects"] == 1
 
 
 def test_audit_json_contains_structured_issues(tmp_path: Path, capsys, monkeypatch):
