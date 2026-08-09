@@ -2,6 +2,8 @@ import json
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 import cctrail.codex as codex
 from cctrail import iter_codex_sessions, tool_call_counts
 
@@ -180,6 +182,55 @@ def test_parallel_parser_matches_sequential_parser(monkeypatch):
     sequential = list(iter_codex_sessions(FIXTURES))
 
     monkeypatch.setattr(codex, "PARALLEL_MIN_FILES", 0)
+    monkeypatch.setenv("CCTRAIL_WORKERS", "")
     parallel = list(iter_codex_sessions(FIXTURES))
 
     assert parallel == sequential
+
+
+def test_one_worker_uses_current_process(monkeypatch):
+    monkeypatch.setattr(codex, "PARALLEL_MIN_FILES", 0)
+    monkeypatch.setenv("CCTRAIL_WORKERS", "1")
+
+    def unexpected_pool(*_args, **_kwargs):
+        raise AssertionError("multiprocessing context must not be created")
+
+    monkeypatch.setattr("cctrail.utils.get_context", unexpected_pool)
+
+    assert list(iter_codex_sessions(FIXTURES))
+
+
+def test_worker_count_controls_pool_size(monkeypatch):
+    monkeypatch.setattr(codex, "PARALLEL_MIN_FILES", 0)
+    monkeypatch.setenv("CCTRAIL_WORKERS", "2")
+    pool_sizes = []
+
+    class Pool:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def imap(self, func, items, _chunksize):
+            return map(func, items)
+
+    class Context:
+        def Pool(self, workers, initializer):
+            pool_sizes.append(workers)
+            assert initializer is not None
+            return Pool()
+
+    monkeypatch.setattr("cctrail.utils.get_context", lambda _method: Context())
+
+    assert list(iter_codex_sessions(FIXTURES))
+    assert pool_sizes == [2, 2]
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nope"])
+def test_worker_count_rejects_invalid_values(monkeypatch, value):
+    monkeypatch.setattr(codex, "PARALLEL_MIN_FILES", 0)
+    monkeypatch.setenv("CCTRAIL_WORKERS", value)
+
+    with pytest.raises(ValueError, match="CCTRAIL_WORKERS must be a positive integer"):
+        list(iter_codex_sessions(FIXTURES))

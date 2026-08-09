@@ -13,6 +13,10 @@ T = TypeVar("T")
 R = TypeVar("R")
 
 
+class WorkerConfigError(ValueError):
+    pass
+
+
 def ignore_sigint() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
@@ -37,12 +41,22 @@ def imap(
     if not items:
         return
 
-    workers = min(workers or cpu_count(), len(items))
-    if workers == 1 or "fork" not in get_all_start_methods():
+    configured = os.environ.get("CCTRAIL_WORKERS", "").strip()
+    if configured:
+        try:
+            workers = int(configured)
+        except ValueError:
+            raise WorkerConfigError("CCTRAIL_WORKERS must be a positive integer") from None
+        if workers < 1:
+            raise WorkerConfigError("CCTRAIL_WORKERS must be a positive integer")
+
+    available_cpus = cpu_count()
+    worker_count = min(workers or available_cpus, available_cpus, len(items))
+    if worker_count == 1 or "fork" not in get_all_start_methods():
         yield from map(func, items)
         return
 
-    with get_context("fork").Pool(workers, initializer=ignore_sigint) as pool:
+    with get_context("fork").Pool(worker_count, initializer=ignore_sigint) as pool:
         yield from pool.imap(func, items, chunksize)
 
 

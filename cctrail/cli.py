@@ -20,7 +20,7 @@ from .history import iter_sessions
 from .metrics import ModelSummary, by_project, usage_by_period, usage_messages
 from .models import Usage
 from .pricing import get_pricing
-from .utils import json_dump
+from .utils import WorkerConfigError, json_dump
 from .week import first_weekday
 
 PERIODS = (
@@ -688,6 +688,9 @@ def main(argv: list[str] | None = None) -> int:
         args.func(args)
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
+        return 2
+    except WorkerConfigError as exc:
+        print(f"environment error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 130
