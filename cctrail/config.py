@@ -23,6 +23,27 @@ def normalize_path(value: str) -> str:
     return os.path.normpath(os.path.expanduser(value)).replace(os.sep, "/")
 
 
+def normalized_path_list(value: object, error: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError(error)
+
+    paths = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(error)
+        paths.append(normalize_path(item))
+    return tuple(paths)
+
+
+def register_exact_paths(paths: tuple[str, ...], seen: set[str], error: str) -> None:
+    for path in paths:
+        if "*" in path:
+            continue
+        if path in seen:
+            raise ConfigError(f"{error}: {path}")
+        seen.add(path)
+
+
 @lru_cache(maxsize=4096)
 def match_path(path: str, pattern: str) -> bool:
     expression = ""
@@ -89,19 +110,11 @@ class Config:
             name = str(raw_name).strip()
             if not name:
                 raise ConfigError("project alias names cannot be empty")
-            if (
-                not isinstance(raw_paths, list)
-                or not raw_paths
-                or not all(isinstance(item, str) and item.strip() for item in raw_paths)
-            ):
-                raise ConfigError(f"project alias {name} needs at least one path")
-
-            paths = tuple(normalize_path(item) for item in raw_paths)
-            for member in paths:
-                if "*" not in member:
-                    if member in exact_paths:
-                        raise ConfigError(f"project path appears in multiple aliases: {member}")
-                    exact_paths.add(member)
+            paths = normalized_path_list(
+                raw_paths,
+                f"project alias {name} needs at least one path",
+            )
+            register_exact_paths(paths, exact_paths, "project path appears in multiple aliases")
             aliases.append(ProjectAlias(name, paths))
 
         raw_groups = value.get("groups", {})
@@ -116,19 +129,11 @@ class Config:
                 raise ConfigError("project group names cannot be empty")
             if name == "ungrouped":
                 raise ConfigError("ungrouped is reserved for projects without a group")
-            if (
-                not isinstance(raw_projects, list)
-                or not raw_projects
-                or not all(isinstance(item, str) and item.strip() for item in raw_projects)
-            ):
-                raise ConfigError(f"project group {name} needs at least one project")
-
-            projects = tuple(normalize_path(item) for item in raw_projects)
-            for project in projects:
-                if "*" not in project:
-                    if project in exact_projects:
-                        raise ConfigError(f"project appears in multiple groups: {project}")
-                    exact_projects.add(project)
+            projects = normalized_path_list(
+                raw_projects,
+                f"project group {name} needs at least one project",
+            )
+            register_exact_paths(projects, exact_projects, "project appears in multiple groups")
             groups.append(ProjectGroup(name, projects))
 
         raw_sources = value.get("sources", {})
@@ -142,13 +147,10 @@ class Config:
             raw_paths = raw_sources.get(provider)
             if raw_paths is None:
                 return None
-            if (
-                not isinstance(raw_paths, list)
-                or not raw_paths
-                or not all(isinstance(item, str) and item.strip() for item in raw_paths)
-            ):
-                raise ConfigError(f"sources.{provider} needs at least one path")
-            return tuple(normalize_path(item) for item in raw_paths)
+            return normalized_path_list(
+                raw_paths,
+                f"sources.{provider} needs at least one path",
+            )
 
         return cls(
             aliases=tuple(aliases),

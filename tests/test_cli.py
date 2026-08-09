@@ -254,10 +254,11 @@ def test_no_config_ignores_discovered_config(tmp_path, capsys, monkeypatch):
     assert [project["project"] for project in projects] == ["/repo"]
 
 
-def test_config_and_no_config_are_mutually_exclusive(tmp_path):
+def test_config_and_no_config_are_mutually_exclusive(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         main(["--config", str(tmp_path / "config.toml"), "--no-config", "projects"])
     assert exc.value.code == 2
+    assert "not allowed with argument --config" in capsys.readouterr().err
 
 
 def test_reports_read_provider_sources_from_config(tmp_path, capsys, monkeypatch):
@@ -468,6 +469,7 @@ def test_period_label_shows_only_the_selected_range(
     )
 
 
-def test_named_period_cannot_be_combined_with_manual_dates():
+def test_named_period_cannot_be_combined_with_manual_dates(capsys):
     with pytest.raises(SystemExit):
         main(["usage", "today", "--since", "2026-01-01"])
+    assert "PERIOD cannot be combined with --since or --until" in capsys.readouterr().err

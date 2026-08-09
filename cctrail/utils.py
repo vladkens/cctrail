@@ -3,7 +3,7 @@ import os
 import signal
 from collections.abc import Callable, Collection, Iterable, Iterator
 from datetime import datetime
-from multiprocessing import cpu_count, get_all_start_methods, get_context
+from multiprocessing import cpu_count, get_context
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -29,6 +29,20 @@ def data_paths(variable: str, defaults: Iterable[Path]) -> list[Path]:
     else:
         paths = [Path(item.strip()).expanduser() for item in value.split(",") if item.strip()]
     return list(dict.fromkeys(paths))
+
+
+def history_roots(
+    root: str | Path | None,
+    roots: Iterable[str | Path] | None,
+    defaults: Iterable[Path],
+) -> list[Path]:
+    if root is not None and roots is not None:
+        raise ValueError("root and roots cannot be combined")
+    if roots is not None:
+        return [Path(item).expanduser() for item in roots]
+    if root is not None:
+        return [Path(root).expanduser()]
+    return list(defaults)
 
 
 class WorkerPool:
@@ -70,16 +84,12 @@ class WorkerPool:
         if not items:
             return []
 
-        if (
-            self._workers == 1
-            or "fork" not in get_all_start_methods()
-            or (not self._explicit and len(items) < PARALLEL_MIN_ITEMS)
-        ):
+        if self._workers == 1 or (not self._explicit and len(items) < PARALLEL_MIN_ITEMS):
             return list(map(func, items))
 
         if self._pool is None:
-            self._pool = get_context("fork").Pool(
-                min(self._workers, len(items)),
+            self._pool = get_context("spawn").Pool(
+                self._workers,
                 initializer=ignore_sigint,
             )
         return list(self._pool.imap(func, items, chunksize))

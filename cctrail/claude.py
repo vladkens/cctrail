@@ -1,6 +1,6 @@
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -9,6 +9,7 @@ from .utils import (
     WorkerPool,
     data_paths,
     extract_text,
+    history_roots,
     int_or_zero,
     json_lines,
     json_load,
@@ -54,15 +55,7 @@ def iter_sessions_with_pool(
     root: str | Path | None = None,
     roots: Iterable[str | Path] | None = None,
 ) -> Iterator[Session]:
-    if root is not None and roots is not None:
-        raise ValueError("root and roots cannot be combined")
-    search_roots = (
-        [Path(item).expanduser() for item in roots]
-        if roots is not None
-        else [Path(root).expanduser()]
-        if root is not None
-        else default_roots()
-    )
+    search_roots = history_roots(root, roots, default_roots())
     paths = sorted({path for search_root in search_roots for path in search_root.rglob("*.jsonl")})
     agent_paths = subagent_paths(paths)
     jobs = [
@@ -193,214 +186,223 @@ def parse_file(
     *,
     session_id: str | None = None,
     kind: Literal["main", "agent"] = "main",
-    subagent_paths: dict[tuple[Path, str], Path] | None = None,
-    linked_subagents: set[Path] | None = None,
-    session_dir: Path | None = None,
 ) -> Session:
-    session = Session(id=session_id or path.stem, kind=kind)
-    if kind == "agent":
-        metadata = read_object(path.with_suffix(".meta.json"))
-        session.agent_type = string_or_none(metadata.get("agentType"))
-        session.title = string_or_none(metadata.get("description")) or session.agent_type
+    return ClaudeFileParser(path, session_id=session_id, kind=kind).parse()
 
-    pending_tools: dict[str, ToolCall] = {}
-    open_turns: dict[str | tuple[str, str | None], Message] = {}
-    last_user_message: Message | None = None
-    ai_titles: dict[str, str] = {}
-    custom_titles: dict[str, str] = {}
 
-    for item in json_lines(path):
+class ClaudeFileParser:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        session_id: str | None,
+        kind: Literal["main", "agent"],
+    ) -> None:
+        self.path = path
+        self.kind = kind
+        self.session = Session(id=session_id or path.stem, kind=kind)
+        self.pending_tools: dict[str, ToolCall] = {}
+        self.open_turns: dict[str | tuple[str, str | None], Message] = {}
+        self.last_user_message: Message | None = None
+        self.ai_titles: dict[str, str] = {}
+        self.custom_titles: dict[str, str] = {}
+
+        if kind == "agent":
+            metadata = read_object(path.with_suffix(".meta.json"))
+            self.session.agent_type = string_or_none(metadata.get("agentType"))
+            self.session.title = (
+                string_or_none(metadata.get("description")) or self.session.agent_type
+            )
+
+    def parse(self) -> Session:
+        for item in json_lines(self.path):
+            self.parse_item(item)
+
+        if self.kind == "main":
+            self.session.title = self.custom_titles.get(
+                self.session.id,
+                self.ai_titles.get(self.session.id),
+            )
+        return self.session
+
+    def parse_item(self, item: dict[str, Any]) -> None:
         cwd = string_or_none(item.get("cwd"))
-        if cwd and session.cwd is None:
-            session.cwd = cwd
+        if cwd and self.session.cwd is None:
+            self.session.cwd = cwd
 
         branch = string_or_none(item.get("gitBranch"))
-        if branch and session.git_branch is None:
-            session.git_branch = branch
+        if branch and self.session.git_branch is None:
+            self.session.git_branch = branch
 
         # Sub-agent transcripts carry the *parent* sessionId on every line, so
         # only trust this field to identify main sessions (which may resume
         # under a new id after a compaction).
-        if kind == "main":
+        if self.kind == "main":
             sid = string_or_none(item.get("sessionId"))
             if sid:
-                session.id = sid
+                self.session.id = sid
 
         item_type = item.get("type")
-
         if item_type in ("ai-title", "custom-title"):
-            sid = string_or_none(item.get("sessionId"))
-            field = "aiTitle" if item_type == "ai-title" else "customTitle"
-            title = string_or_none(item.get(field))
-            if sid and title:
-                (ai_titles if item_type == "ai-title" else custom_titles)[sid] = title
-            continue
+            self.parse_title(item, item_type)
+        elif item_type == "system":
+            self.parse_system(item)
+        elif item_type == "assistant":
+            self.parse_assistant(item)
+        elif item_type == "user":
+            self.parse_user(item)
 
-        if item_type == "system":
-            if item.get("subtype") == "turn_duration" and last_user_message is not None:
-                duration_ms = item.get("durationMs")
-                if isinstance(duration_ms, (int, float)):
-                    last_user_message.turn_duration = timedelta(milliseconds=duration_ms)
-            continue
-
-        if item_type == "assistant":
-            message = item.get("message")
-            if not isinstance(message, dict):
-                continue
-
-            content = message.get("content")
-            if not isinstance(content, list):
-                content = []
-            timestamp = parse_timestamp(item.get("timestamp"))
-            # Claude Code writes one JSONL line per content block but repeats
-            # the same message id/usage on each, so blocks are merged back
-            # into a single logical turn here.
-            message_id = string_or_none(message.get("id"))
-            request_id = string_or_none(item.get("requestId"))
-
-            uuid = string_or_none(item.get("uuid"))
-            msg_key = (message_id, request_id) if message_id else request_id or uuid
-            turn = open_turns.get(msg_key) if msg_key is not None else None
-            if turn is None:
-                turn = Message(
-                    role="assistant",
-                    timestamp=timestamp,
-                    id=message_id,
-                    request_id=request_id,
-                    is_sidechain=item.get("isSidechain") is True,
-                )
-                if msg_key is not None:
-                    open_turns[msg_key] = turn
-                session.messages.append(turn)
-
-            turn.model = turn.model or string_or_none(message.get("model"))
-            turn.is_api_error = turn.is_api_error or item.get("isApiErrorMessage") is True
-            raw_usage = message.get("usage")
-            usage = usage_from_raw(raw_usage)
-            if turn.usage is None or usage.total > turn.usage.total:
-                turn.usage = usage
-            turn.speed = speed_from_raw(raw_usage) or turn.speed
-
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-
-                block_type = block.get("type")
-                if block_type == "text":
-                    turn.text += string_or_none(block.get("text")) or ""
-                elif block_type == "tool_use":
-                    call_id = string_or_none(block.get("id"))
-                    name = string_or_none(block.get("name"))
-                    if call_id is None or name is None:
-                        continue
-
-                    call_input = block.get("input")
-                    call = ToolCall(
-                        id=call_id,
-                        name=name,
-                        input=call_input if isinstance(call_input, dict) else {},
-                        started_at=timestamp,
-                    )
-                    turn.tool_calls.append(call)
-                    pending_tools[call.id] = call
-            continue
-
-        if item_type == "user":
-            message = item.get("message")
-            if not isinstance(message, dict):
-                continue
-
-            content = message.get("content")
-            timestamp = parse_timestamp(item.get("timestamp"))
-            blocks = content if isinstance(content, list) else []
-            tool_results = [
-                b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"
-            ]
-
-            if tool_results:
-                for block in tool_results:
-                    tool_id = string_or_none(block.get("tool_use_id"))
-                    if tool_id is None:
-                        continue
-
-                    call = pending_tools.pop(tool_id, None)
-                    if call is None:
-                        continue
-
-                    call.ended_at = timestamp
-                    call.is_error = block.get("is_error") is True
-                    call.output_text = extract_text(block.get("content"), ("text", "input_text"))
-                    call.raw_result = item.get("toolUseResult")
-                    if call.name in ("Agent", "Task"):
-                        call.agent = build_agent_session(
-                            call.raw_result,
-                            call,
-                            session,
-                            subagent_paths,
-                            linked_subagents,
-                            session_dir,
-                        )
-                continue
-
-            # Synthetic prompts injected by the harness itself (hook output,
-            # local-command caveats, skill listings) aren't user input.
-            if item.get("isMeta"):
-                continue
-
-            text = extract_text(content, ("text", "input_text")).strip()
-            if not text:
-                continue
-
-            message_obj = Message(role="user", timestamp=timestamp, text=text)
-            session.messages.append(message_obj)
-            last_user_message = message_obj
-            continue
-
-    if kind == "main":
-        if session.id in custom_titles:
-            session.title = custom_titles[session.id]
+    def parse_title(self, item: dict[str, Any], item_type: str) -> None:
+        sid = string_or_none(item.get("sessionId"))
+        if item_type == "ai-title":
+            title = string_or_none(item.get("aiTitle"))
+            titles = self.ai_titles
         else:
-            session.title = ai_titles.get(session.id)
+            title = string_or_none(item.get("customTitle"))
+            titles = self.custom_titles
+        if sid and title:
+            titles[sid] = title
 
-    return session
+    def parse_system(self, item: dict[str, Any]) -> None:
+        if item.get("subtype") != "turn_duration" or self.last_user_message is None:
+            return
+        duration_ms = item.get("durationMs")
+        if isinstance(duration_ms, (int, float)):
+            self.last_user_message.turn_duration = timedelta(milliseconds=duration_ms)
+
+    def parse_assistant(self, item: dict[str, Any]) -> None:
+        message = item.get("message")
+        if not isinstance(message, dict):
+            return
+
+        timestamp = parse_timestamp(item.get("timestamp"))
+        message_id = string_or_none(message.get("id"))
+        request_id = string_or_none(item.get("requestId"))
+        message_key: str | tuple[str, str | None] | None
+        if message_id is not None:
+            message_key = message_id, request_id
+        else:
+            message_key = request_id or string_or_none(item.get("uuid"))
+
+        turn = self.open_turns.get(message_key) if message_key is not None else None
+        if turn is None:
+            turn = Message(
+                role="assistant",
+                timestamp=timestamp,
+                id=message_id,
+                request_id=request_id,
+                is_sidechain=item.get("isSidechain") is True,
+            )
+            if message_key is not None:
+                self.open_turns[message_key] = turn
+            self.session.messages.append(turn)
+
+        turn.model = turn.model or string_or_none(message.get("model"))
+        turn.is_api_error = turn.is_api_error or item.get("isApiErrorMessage") is True
+        raw_usage = message.get("usage")
+        usage = usage_from_raw(raw_usage)
+        if turn.usage is None or usage.total > turn.usage.total:
+            turn.usage = usage
+        turn.speed = speed_from_raw(raw_usage) or turn.speed
+
+        content = message.get("content")
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if isinstance(block, dict):
+                self.parse_assistant_block(block, turn, timestamp)
+
+    def parse_assistant_block(
+        self,
+        block: dict[str, Any],
+        turn: Message,
+        timestamp: datetime | None,
+    ) -> None:
+        block_type = block.get("type")
+        if block_type == "text":
+            turn.text += string_or_none(block.get("text")) or ""
+            return
+        if block_type != "tool_use":
+            return
+
+        call_id = string_or_none(block.get("id"))
+        name = string_or_none(block.get("name"))
+        if call_id is None or name is None:
+            return
+
+        call_input = block.get("input")
+        call = ToolCall(
+            id=call_id,
+            name=name,
+            input=call_input if isinstance(call_input, dict) else {},
+            started_at=timestamp,
+        )
+        turn.tool_calls.append(call)
+        self.pending_tools[call.id] = call
+
+    def parse_user(self, item: dict[str, Any]) -> None:
+        message = item.get("message")
+        if not isinstance(message, dict):
+            return
+
+        content = message.get("content")
+        timestamp = parse_timestamp(item.get("timestamp"))
+        blocks = content if isinstance(content, list) else []
+        tool_results = [
+            block
+            for block in blocks
+            if isinstance(block, dict) and block.get("type") == "tool_result"
+        ]
+        if tool_results:
+            for block in tool_results:
+                self.parse_tool_result(block, item, timestamp)
+            return
+
+        # Synthetic prompts injected by the harness itself (hook output,
+        # local-command caveats, skill listings) aren't user input.
+        if item.get("isMeta"):
+            return
+
+        text = extract_text(content, ("text", "input_text")).strip()
+        if not text:
+            return
+
+        user_message = Message(role="user", timestamp=timestamp, text=text)
+        self.session.messages.append(user_message)
+        self.last_user_message = user_message
+
+    def parse_tool_result(
+        self,
+        block: dict[str, Any],
+        item: dict[str, Any],
+        timestamp: datetime | None,
+    ) -> None:
+        tool_id = string_or_none(block.get("tool_use_id"))
+        if tool_id is None:
+            return
+        call = self.pending_tools.pop(tool_id, None)
+        if call is None:
+            return
+
+        call.ended_at = timestamp
+        call.is_error = block.get("is_error") is True
+        call.output_text = extract_text(block.get("content"), ("text", "input_text"))
+        call.raw_result = item.get("toolUseResult")
+        if call.name in ("Agent", "Task"):
+            call.agent = build_agent_session(call.raw_result, call, self.session)
 
 
 def build_agent_session(
     raw: Any,
     call: ToolCall,
     parent: Session,
-    subagent_paths: dict[tuple[Path, str], Path] | None,
-    linked_subagents: set[Path] | None,
-    session_dir: Path | None,
 ) -> Session | None:
     raw = raw if isinstance(raw, dict) else {}
     agent_id = string_or_none(raw.get("agentId"))
-
-    sub_path = (
-        subagent_paths.get((session_dir, agent_id or call.id))
-        if subagent_paths and session_dir
-        else None
-    )
-    if agent_id is None and sub_path is not None:
-        agent_id = sub_path.stem.removeprefix("agent-")
-
     if agent_id is None:
         return None
 
-    if sub_path is not None:
-        if linked_subagents is not None:
-            linked_subagents.add(sub_path)
-        agent = parse_file(
-            sub_path,
-            session_id=agent_id,
-            kind="agent",
-            subagent_paths=subagent_paths,
-            linked_subagents=linked_subagents,
-            session_dir=session_dir,
-        )
-    else:
-        agent = Session(id=agent_id, kind="agent")
-
+    agent = Session(id=agent_id, kind="agent")
     return apply_agent_metadata(agent, raw, call, parent)
 
 

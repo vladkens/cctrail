@@ -20,3 +20,9 @@ update:
 
 install:
 	uv sync
+
+perf:
+	CCTRAIL_WORKERS=1 /usr/bin/time uv run cctrail groups --provider claude
+	CCTRAIL_WORKERS=4 /usr/bin/time uv run cctrail groups --provider claude
+	CCTRAIL_WORKERS=1 /usr/bin/time uv run cctrail groups --provider codex
+	CCTRAIL_WORKERS=4 /usr/bin/time uv run cctrail groups --provider codex

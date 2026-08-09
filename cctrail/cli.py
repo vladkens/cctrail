@@ -3,6 +3,7 @@ import calendar
 import os
 import sys
 from collections import Counter
+from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -17,7 +18,7 @@ from .codex import iter_sessions as iter_codex_sessions
 from .config import Config, ConfigError
 from .history import iter_sessions
 from .metrics import ModelSummary, by_project, usage_by_period, usage_messages
-from .models import Usage
+from .models import Session, Usage
 from .pricing import get_pricing
 from .utils import WorkerConfigError, json_dump
 from .week import first_weekday
@@ -504,17 +505,18 @@ def cmd_audit(args: argparse.Namespace) -> None:
     except PackageNotFoundError:
         current_version = "unknown"
 
-    issue_rows = [
-        {
-            "issue": kind,
-            "provider": provider,
-            "model": model,
-            "messages": issue_messages[issue],
-            "tokens": issue_tokens[issue],
-        }
-        for issue in sorted(issue_messages)
-        for kind, provider, model in [issue]
-    ]
+    issue_rows = []
+    for kind, provider, model in sorted(issue_messages):
+        issue = kind, provider, model
+        issue_rows.append(
+            {
+                "issue": kind,
+                "provider": provider,
+                "model": model,
+                "messages": issue_messages[issue],
+                "tokens": issue_tokens[issue],
+            }
+        )
     if args.json:
         print_json(
             {
@@ -602,7 +604,7 @@ def add_output_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
 
-def filtered_sessions(args: argparse.Namespace):
+def filtered_sessions(args: argparse.Namespace) -> Iterator[Session]:
     claude_roots = None if "CLAUDE_CONFIG_DIR" in os.environ else args.config.claude_sources
     codex_roots = None if "CODEX_HOME" in os.environ else args.config.codex_sources
     if args.provider == "claude":

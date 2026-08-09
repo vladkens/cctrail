@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
+import cctrail.metrics as metrics
 from cctrail import (
     Message,
     Session,
@@ -41,6 +42,17 @@ def test_by_project_groups_by_cwd_and_sums_agent_usage():
     assert summary.first_activity is not None
     assert summary.last_activity is not None
     assert summary.as_dict()["session_count"] == 1
+
+
+def test_by_project_without_date_range_skips_calendar_conversion(monkeypatch):
+    sessions = list(iter_claude_sessions(FIXTURES))
+
+    def unexpected_conversion(*_args, **_kwargs):
+        raise AssertionError("calendar conversion is unnecessary without a date range")
+
+    monkeypatch.setattr(metrics, "calendar_date", unexpected_conversion)
+
+    assert by_project(sessions)["/repo"].usage.total == (135 + 57 + 161) + (31 + 43)
 
 
 def test_metrics_combine_claude_and_codex_sessions():

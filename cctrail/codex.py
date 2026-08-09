@@ -9,6 +9,7 @@ from .utils import (
     WorkerPool,
     data_paths,
     extract_text,
+    history_roots,
     int_or_zero,
     json_dump,
     json_lines,
@@ -30,6 +31,13 @@ class Rollout:
     agent_name: str | None
     cwd: str | None
     git_branch: str | None
+
+
+@dataclass(frozen=True)
+class ParseJob:
+    rollout: Rollout
+    title: str | None
+    replay_end: int
 
 
 def default_roots() -> list[Path]:
@@ -56,26 +64,18 @@ def iter_sessions_with_pool(
     root: str | Path | None = None,
     roots: Iterable[str | Path] | None = None,
 ) -> Iterator[Session]:
-    if root is not None and roots is not None:
-        raise ValueError("root and roots cannot be combined")
-    search_roots = (
-        [Path(item).expanduser() for item in roots]
-        if roots is not None
-        else [Path(root).expanduser()]
-        if root is not None
-        else default_roots()
-    )
+    search_roots = history_roots(root, roots, default_roots())
     titles = {
         session_id: title
         for search_root in search_roots
         for session_id, title in load_titles(search_root).items()
     }
-    rollouts = [
-        rollout
-        for search_root in search_roots
-        for path in history_files(search_root)
-        if (rollout := read_meta(path))
-    ]
+    rollouts = []
+    for search_root in search_roots:
+        for path in history_files(search_root):
+            rollout = read_meta(path)
+            if rollout is not None:
+                rollouts.append(rollout)
     by_id = {rollout.id: rollout for rollout in rollouts}
     rollouts = list(by_id.values())
     paths = replay_paths(rollouts, by_id)
@@ -88,7 +88,9 @@ def iter_sessions_with_pool(
 
     attached: set[str] = set()
     for rollout in by_id.values():
-        parent = sessions.get(rollout.parent_id or "")
+        if rollout.parent_id is None:
+            continue
+        parent = sessions.get(rollout.parent_id)
         if parent is not None and attach_agent(parent, sessions[rollout.id]):
             attached.add(rollout.id)
 
@@ -102,15 +104,19 @@ def parse_jobs(
     by_id: dict[str, Rollout],
     titles: dict[str, str],
     replay_events: dict[Path, list[tuple[int, tuple[int, ...]]]],
-) -> list[tuple[Rollout, str | None, int]]:
+) -> list[ParseJob]:
     return [
-        (rollout, titles.get(rollout.id), replay_end(rollout, by_id, replay_events))
+        ParseJob(
+            rollout=rollout,
+            title=titles.get(rollout.id),
+            replay_end=replay_end(rollout, by_id, replay_events),
+        )
         for rollout in rollouts
     ]
 
 
-def parse_job(job: tuple[Rollout, str | None, int]) -> Session:
-    return parse_file(*job)
+def parse_job(job: ParseJob) -> Session:
+    return parse_file(job.rollout, job.title, job.replay_end)
 
 
 def history_files(root: Path) -> list[Path]:
@@ -157,147 +163,160 @@ def read_meta(path: Path) -> Rollout | None:
 
 
 def parse_file(rollout: Rollout, title: str | None, replay_end: int) -> Session:
-    session = Session(
-        id=rollout.id,
-        kind="agent" if rollout.parent_id else "main",
-        provider="codex",
-        agent_type=rollout.agent_type,
-        title=title or rollout.agent_name or rollout.agent_type,
-        cwd=rollout.cwd,
-        git_branch=rollout.git_branch,
-    )
-    pending_tools: dict[str, ToolCall] = {}
-    current_assistant: Message | None = None
-    current_user: Message | None = None
-    current_model: str | None = None
-    current_speed: Literal["standard", "fast"] | None = None
-    turn_started_at: datetime | None = None
-    last_cumulative: tuple[int, ...] | None = None
+    return CodexFileParser(rollout, title=title, replay_end=replay_end).parse()
 
-    def assistant(timestamp: datetime | None) -> Message:
-        nonlocal current_assistant
-        if current_assistant is None:
-            current_assistant = Message(
+
+class CodexFileParser:
+    def __init__(self, rollout: Rollout, *, title: str | None, replay_end: int) -> None:
+        self.rollout = rollout
+        self.replay_end = replay_end
+        self.session = Session(
+            id=rollout.id,
+            kind="agent" if rollout.parent_id else "main",
+            provider="codex",
+            agent_type=rollout.agent_type,
+            title=title or rollout.agent_name or rollout.agent_type,
+            cwd=rollout.cwd,
+            git_branch=rollout.git_branch,
+        )
+        self.pending_tools: dict[str, ToolCall] = {}
+        self.current_assistant: Message | None = None
+        self.current_user: Message | None = None
+        self.current_model: str | None = None
+        self.current_speed: Literal["standard", "fast"] | None = None
+        self.turn_started_at: datetime | None = None
+        self.last_cumulative: tuple[int, ...] | None = None
+
+    def parse(self) -> Session:
+        for line_number, item in enumerate(json_lines(self.rollout.path)):
+            self.parse_item(line_number, item)
+        return self.session
+
+    def assistant(self, timestamp: datetime | None) -> Message:
+        if self.current_assistant is None:
+            self.current_assistant = Message(
                 role="assistant",
                 timestamp=timestamp,
-                model=current_model,
-                speed=current_speed,
+                model=self.current_model,
+                speed=self.current_speed,
             )
-            session.messages.append(current_assistant)
-        elif current_assistant.model is None:
-            current_assistant.model = current_model
+            self.session.messages.append(self.current_assistant)
+        elif self.current_assistant.model is None:
+            self.current_assistant.model = self.current_model
+        return self.current_assistant
 
-        return current_assistant
-
-    for line_number, item in enumerate(json_lines(rollout.path)):
+    def parse_item(self, line_number: int, item: dict[str, Any]) -> None:
         payload = item.get("payload")
         if not isinstance(payload, dict):
-            continue
+            return
 
         timestamp = parse_timestamp(item.get("timestamp"))
         item_type = item.get("type")
-
         if item_type == "session_meta":
-            continue
+            return
 
         ordinal = integer(item.get("ordinal"))
-        inherited = line_number <= replay_end or (
-            rollout.own_start_ordinal is not None
+        inherited = line_number <= self.replay_end or (
+            self.rollout.own_start_ordinal is not None
             and ordinal is not None
-            and ordinal < rollout.own_start_ordinal
+            and ordinal < self.rollout.own_start_ordinal
         )
         if inherited:
-            if item_type == "turn_context":
-                current_model = string_or_none(payload.get("model")) or current_model
-            elif item_type == "event_msg" and payload.get("type") == "thread_settings_applied":
-                has_speed, speed = speed_from_payload(payload)
-                if has_speed:
-                    current_speed = speed
-            if item_type == "event_msg" and payload.get("type") == "token_count":
-                info = payload.get("info")
-                if isinstance(info, dict):
-                    cumulative = usage_signature(info.get("total_token_usage"))
-                    if cumulative is not None:
-                        last_cumulative = cumulative
-
-            continue
+            self.parse_inherited(item_type, payload)
+            return
 
         if item_type == "turn_context":
-            current_model = string_or_none(payload.get("model")) or current_model
-            has_speed, speed = speed_from_payload(payload)
-            if has_speed:
-                current_speed = speed
-            session.cwd = string_or_none(payload.get("cwd")) or session.cwd
-            continue
+            self.parse_turn_context(payload)
+        elif item_type == "event_msg":
+            self.parse_event(payload, timestamp)
+        elif item_type == "response_item":
+            self.parse_response(payload, timestamp)
 
-        if item_type == "event_msg":
-            subtype = payload.get("type")
-            if subtype == "task_started":
-                current_user = None
-                turn_started_at = parse_timestamp(payload.get("started_at")) or timestamp
-            elif subtype == "user_message":
-                text = string_or_none(payload.get("message"))
-                if text:
-                    current_user = Message(role="user", timestamp=timestamp, text=text)
-                    session.messages.append(current_user)
+    def parse_inherited(self, item_type: Any, payload: dict[str, Any]) -> None:
+        if item_type == "turn_context":
+            self.current_model = string_or_none(payload.get("model")) or self.current_model
+            return
+        if item_type != "event_msg":
+            return
 
-                current_assistant = None
-            elif subtype == "task_complete":
-                if current_user and turn_started_at and timestamp:
-                    current_user.turn_duration = timestamp - turn_started_at
-
-                current_assistant = None
-                turn_started_at = None
-            elif subtype == "thread_settings_applied":
-                has_speed, speed = speed_from_payload(payload)
-                if has_speed:
-                    current_speed = speed
-            elif subtype == "token_count":
-                info = payload.get("info")
-                if not isinstance(info, dict):
-                    continue
-
+        subtype = payload.get("type")
+        if subtype == "thread_settings_applied":
+            self.update_speed(payload)
+        elif subtype == "token_count":
+            info = payload.get("info")
+            if isinstance(info, dict):
                 cumulative = usage_signature(info.get("total_token_usage"))
-                if cumulative is not None and cumulative == last_cumulative:
-                    continue
+                if cumulative is not None:
+                    self.last_cumulative = cumulative
 
-                last_cumulative = cumulative
-                message_usage = usage_from_raw(info.get("last_token_usage"))
-                if message_usage is not None:
-                    message = assistant(timestamp)
-                    message.usage = message_usage
-                    message.timestamp = timestamp or message.timestamp
-                    message.speed = current_speed
+    def parse_turn_context(self, payload: dict[str, Any]) -> None:
+        self.current_model = string_or_none(payload.get("model")) or self.current_model
+        self.update_speed(payload)
+        self.session.cwd = string_or_none(payload.get("cwd")) or self.session.cwd
 
-                current_assistant = None
-            continue
+    def update_speed(self, payload: dict[str, Any]) -> None:
+        has_speed, speed = speed_from_payload(payload)
+        if has_speed:
+            self.current_speed = speed
 
-        if item_type != "response_item":
-            continue
+    def parse_event(self, payload: dict[str, Any], timestamp: datetime | None) -> None:
+        subtype = payload.get("type")
+        if subtype == "task_started":
+            self.current_user = None
+            self.turn_started_at = parse_timestamp(payload.get("started_at")) or timestamp
+        elif subtype == "user_message":
+            text = string_or_none(payload.get("message"))
+            if text:
+                self.current_user = Message(role="user", timestamp=timestamp, text=text)
+                self.session.messages.append(self.current_user)
+            self.current_assistant = None
+        elif subtype == "task_complete":
+            if self.current_user and self.turn_started_at and timestamp:
+                self.current_user.turn_duration = timestamp - self.turn_started_at
+            self.current_assistant = None
+            self.turn_started_at = None
+        elif subtype == "thread_settings_applied":
+            self.update_speed(payload)
+        elif subtype == "token_count":
+            self.parse_usage(payload, timestamp)
 
+    def parse_usage(self, payload: dict[str, Any], timestamp: datetime | None) -> None:
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            return
+
+        cumulative = usage_signature(info.get("total_token_usage"))
+        if cumulative is not None and cumulative == self.last_cumulative:
+            return
+
+        self.last_cumulative = cumulative
+        message_usage = usage_from_raw(info.get("last_token_usage"))
+        if message_usage is not None:
+            message = self.assistant(timestamp)
+            message.usage = message_usage
+            message.timestamp = timestamp or message.timestamp
+            message.speed = self.current_speed
+        self.current_assistant = None
+
+    def parse_response(self, payload: dict[str, Any], timestamp: datetime | None) -> None:
         subtype = payload.get("type")
         if subtype == "message" and payload.get("role") == "assistant":
             text = extract_text(payload.get("content"), ("output_text", "text"))
             if text:
-                message = assistant(timestamp)
+                message = self.assistant(timestamp)
                 message.text = "\n".join(filter(None, (message.text, text)))
         elif subtype in {"function_call", "custom_tool_call", "tool_search_call"}:
-            call_id = (
-                string_or_none(payload.get("call_id")) or string_or_none(payload.get("id")) or ""
-            )
+            call_id = tool_call_id(payload)
             call = ToolCall(
                 id=call_id,
                 name=string_or_none(payload.get("name")) or subtype.removesuffix("_call"),
                 input=tool_input(payload),
                 started_at=timestamp,
             )
-            assistant(timestamp).tool_calls.append(call)
-            pending_tools[call_id] = call
+            self.assistant(timestamp).tool_calls.append(call)
+            self.pending_tools[call_id] = call
         elif subtype in {"function_call_output", "custom_tool_call_output", "tool_search_output"}:
-            call_id = (
-                string_or_none(payload.get("call_id")) or string_or_none(payload.get("id")) or ""
-            )
-            call = pending_tools.get(call_id)
+            call = self.pending_tools.get(tool_call_id(payload))
             if call is not None:
                 output = payload.get("output")
                 call.ended_at = timestamp
@@ -306,11 +325,9 @@ def parse_file(rollout: Rollout, title: str | None, replay_end: int) -> Session:
                 call.is_error = is_error(call.raw_result)
         elif subtype in {"web_search_call", "image_generation_call"}:
             status = payload.get("status")
-            assistant(timestamp).tool_calls.append(
+            self.assistant(timestamp).tool_calls.append(
                 ToolCall(
-                    id=string_or_none(payload.get("call_id"))
-                    or string_or_none(payload.get("id"))
-                    or "",
+                    id=tool_call_id(payload),
                     name=subtype.removesuffix("_call"),
                     input=tool_input(payload),
                     started_at=timestamp,
@@ -320,7 +337,9 @@ def parse_file(rollout: Rollout, title: str | None, replay_end: int) -> Session:
                 )
             )
 
-    return session
+
+def tool_call_id(payload: dict[str, Any]) -> str:
+    return string_or_none(payload.get("call_id")) or string_or_none(payload.get("id")) or ""
 
 
 def parent_id(payload: dict[str, Any]) -> str | None:

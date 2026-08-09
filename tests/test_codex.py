@@ -201,6 +201,7 @@ def test_one_worker_uses_current_process(monkeypatch):
 def test_all_providers_share_one_pool(monkeypatch):
     monkeypatch.setenv("CCTRAIL_WORKERS", "2")
     pool_sizes = []
+    start_methods = []
 
     class Pool:
         def imap(self, func, items, _chunksize):
@@ -221,10 +222,15 @@ def test_all_providers_share_one_pool(monkeypatch):
             assert initializer is not None
             return Pool()
 
-    monkeypatch.setattr("cctrail.utils.get_context", lambda _method: Context())
+    def context(method):
+        start_methods.append(method)
+        return Context()
+
+    monkeypatch.setattr("cctrail.utils.get_context", context)
 
     assert list(iter_sessions(Path(__file__).parent / "fixtures"))
     assert pool_sizes == [2]
+    assert start_methods == ["spawn"]
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nope"])

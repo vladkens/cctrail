@@ -164,19 +164,27 @@ def by_project(
 ) -> dict[str, ProjectSummary]:
     """Group sessions by working directory, summing usage across each session's agent tree."""
     sessions = list(sessions)
+    filter_by_date = since is not None or until is not None
     result: dict[str, ProjectSummary] = {}
     events: defaultdict[str, list[datetime]] = defaultdict(list)
-    for session in sessions:
+
+    def project_name(session: Session) -> str:
         project = session.cwd or "unknown"
-        if project_resolver is not None:
-            project = project_resolver(project)
+        return project_resolver(project) if project_resolver is not None else project
+
+    for session in sessions:
+        project = project_name(session)
         all_stamps = [stamp for nested in session.walk() for stamp in nested.activity_stamps()]
         events[project].extend(all_stamps)
-        stamps = [
-            stamp
-            for stamp in all_stamps
-            if date_in_range(calendar_date(stamp, timezone), since, until)
-        ]
+        if filter_by_date:
+            stamps = [
+                stamp
+                for stamp in all_stamps
+                if date_in_range(calendar_date(stamp, timezone), since, until)
+            ]
+        else:
+            stamps = all_stamps
+
         if stamps:
             summary = result.setdefault(project, ProjectSummary(project=project))
             if session.kind == "main":
@@ -189,16 +197,14 @@ def by_project(
                 summary.last_activity = ended
 
     for session, message in usage_messages(sessions):
-        if message.timestamp is not None:
+        if filter_by_date:
+            if message.timestamp is None:
+                continue
             day = calendar_date(message.timestamp, timezone)
             if not date_in_range(day, since, until):
                 continue
-        elif since is not None or until is not None:
-            continue
 
-        project = session.cwd or "unknown"
-        if project_resolver is not None:
-            project = project_resolver(project)
+        project = project_name(session)
         assert message.usage is not None
         summary = result.setdefault(project, ProjectSummary(project=project))
         summary.usage = summary.usage + message.usage
@@ -210,17 +216,21 @@ def by_project(
         )
 
     for project, project_events in events.items():
-        duration = sum(
-            (
-                duration
-                for day, duration in active_time_by_day(
-                    project_events,
-                    timezone=timezone,
-                ).items()
-                if date_in_range(day, since, until)
-            ),
-            timedelta(),
-        )
+        if filter_by_date:
+            duration = sum(
+                (
+                    duration
+                    for day, duration in active_time_by_day(
+                        project_events,
+                        timezone=timezone,
+                    ).items()
+                    if date_in_range(day, since, until)
+                ),
+                timedelta(),
+            )
+        else:
+            duration = active_time(project_events)
+
         if duration:
             result.setdefault(project, ProjectSummary(project=project)).active_time = duration
 
