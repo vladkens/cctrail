@@ -1,15 +1,48 @@
 [project]
 name = "cctrail"
 version = "0.1.0"
-description = "Parser and analytics toolkit for Claude Code and Codex history"
+description = "CLI for analyzing local Claude Code and Codex history by token usage, cost, active time, projects, and groups"
 readme = "readme.md"
 requires-python = ">=3.11"
 authors = [{ name = "vladkens" }]
 license = { text = "MIT" }
+keywords = [
+    "analytics",
+    "claude-code",
+    "codex",
+    "cost-tracking",
+    "developer-tools",
+    "llm",
+    "time-tracking",
+    "token-usage",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
 dependencies = [
     "orjson>=3.10.0",
     "rich>=15.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/vladkens/cctrail"
+Repository = "https://github.com/vladkens/cctrail"
+Issues = "https://github.com/vladkens/cctrail/issues"
+Changelog = "https://github.com/vladkens/cctrail/blob/main/changelog.md"
 
 [project.scripts]
 cctrail = "cctrail.cli:main"
@@ -20,6 +53,9 @@ dev = ["pytest>=8.0.0", "pytest-cov>=5.0.0", "ruff>=0.6.0", "ty>=0.0.1"]
 [build-system]
 requires = ["hatchling>=1.9.1"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build]
+exclude = ["/.claude"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["cctrail"]
