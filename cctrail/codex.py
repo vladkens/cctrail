@@ -6,9 +6,9 @@ from typing import Any, Literal
 
 from .models import Message, Session, ToolCall, Usage
 from .utils import (
+    WorkerPool,
     data_paths,
     extract_text,
-    imap,
     int_or_zero,
     json_dump,
     json_lines,
@@ -16,8 +16,6 @@ from .utils import (
     parse_timestamp,
     string_or_none,
 )
-
-PARALLEL_MIN_FILES = 32
 
 
 @dataclass(frozen=True)
@@ -48,6 +46,16 @@ def iter_sessions(
     Without an explicit root, `CODEX_HOME` accepts comma-separated directories
     and replaces the default `~/.codex` lookup.
     """
+    with WorkerPool() as pool:
+        yield from iter_sessions_with_pool(pool, root=root, roots=roots)
+
+
+def iter_sessions_with_pool(
+    pool: WorkerPool,
+    *,
+    root: str | Path | None = None,
+    roots: Iterable[str | Path] | None = None,
+) -> Iterator[Session]:
     if root is not None and roots is not None:
         raise ValueError("root and roots cannot be combined")
     search_roots = (
@@ -72,10 +80,9 @@ def iter_sessions(
     rollouts = list(by_id.values())
     paths = replay_paths(rollouts, by_id)
 
-    workers = None if len(rollouts) >= PARALLEL_MIN_FILES else 1
-    replay_events = dict(zip(paths, imap(usage_events, paths, workers=workers)))
+    replay_events = dict(zip(paths, pool.map(usage_events, paths)))
     jobs = parse_jobs(rollouts, by_id, titles, replay_events)
-    parsed = list(imap(parse_job, jobs, workers=workers))
+    parsed = pool.map(parse_job, jobs)
 
     sessions = {session.id: session for session in parsed}
 

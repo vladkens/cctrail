@@ -2,11 +2,22 @@ import json
 from datetime import date, timedelta
 from pathlib import Path
 
+import cctrail.claude as claude
 from cctrail import Usage, iter_claude_sessions, tool_call_counts
 from cctrail.metrics import active_time, usage_by_day
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude" / "projects"
 DEDUPE_FIXTURES = Path(__file__).parent / "fixtures" / "claude_dedupe" / "projects"
+
+
+def test_parallel_parser_matches_sequential_parser(monkeypatch):
+    monkeypatch.setenv("CCTRAIL_WORKERS", "1")
+    sequential = list(claude.iter_sessions(FIXTURES))
+
+    monkeypatch.setenv("CCTRAIL_WORKERS", "2")
+    parallel = list(claude.iter_sessions(FIXTURES))
+
+    assert parallel == sequential
 
 
 def test_iter_sessions_parses_single_session():

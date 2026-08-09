@@ -5,7 +5,6 @@ import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
-from itertools import chain
 from pathlib import Path
 
 from rich.console import Console
@@ -610,12 +609,7 @@ def filtered_sessions(args: argparse.Namespace):
         return iter_claude_sessions(roots=claude_roots)
     if args.provider == "codex":
         return iter_codex_sessions(roots=codex_roots)
-    if claude_roots is None and codex_roots is None:
-        return iter_sessions()
-    return chain(
-        iter_claude_sessions(roots=claude_roots),
-        iter_codex_sessions(roots=codex_roots),
-    )
+    return iter_sessions(claude_roots=claude_roots, codex_roots=codex_roots)
 
 
 def main(argv: list[str] | None = None) -> int:

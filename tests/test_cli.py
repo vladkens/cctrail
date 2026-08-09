@@ -132,7 +132,7 @@ def test_projects_accepts_the_shared_date_filter(capsys, monkeypatch):
 def test_projects_full_controls_long_path_truncation(capsys, monkeypatch):
     project = "/" + "very-long-project-path/" * 10
     summary = ProjectSummary(project=project)
-    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda: [])
+    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda **_kwargs: [])
     monkeypatch.setattr("cctrail.cli.by_project", lambda *args, **kwargs: {project: summary})
 
     assert main(["projects"]) == 0
@@ -145,7 +145,7 @@ def test_projects_full_controls_long_path_truncation(capsys, monkeypatch):
 def test_projects_compacts_home_paths_unless_full(capsys, monkeypatch):
     project = str(Path.home() / "Code" / "example")
     summary = ProjectSummary(project=project)
-    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda: [])
+    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda **_kwargs: [])
     monkeypatch.setattr("cctrail.cli.by_project", lambda *args, **kwargs: {project: summary})
 
     assert main(["projects"]) == 0
@@ -185,7 +185,7 @@ def test_groups_aggregate_projects_without_double_counting_active_time(
         )
         for project, usage in (("/repo", 10), ("/worktree", 20), ("/personal", 5))
     ]
-    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda: iter(sessions))
+    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda **_kwargs: iter(sessions))
     config = tmp_path / "config.toml"
     config.write_text(
         '[aliases]\napp = ["/repo", "/worktree"]\n[groups]\nwork = ["app"]\n',
@@ -340,7 +340,7 @@ def test_usage_json_clips_bucket_dates(capsys, monkeypatch):
 def test_projects_json_preserves_full_paths(capsys, monkeypatch):
     project = "/" + "very-long-project-path/" * 10
     summary = ProjectSummary(project=project)
-    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda: [])
+    monkeypatch.setattr("cctrail.cli.iter_sessions", lambda **_kwargs: [])
     monkeypatch.setattr("cctrail.cli.by_project", lambda *args, **kwargs: {project: summary})
     assert main(["projects", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["projects"][0]["project"] == project
@@ -398,7 +398,7 @@ def test_audit_command_combines_comma_separated_data_dirs(tmp_path: Path, capsys
 
 
 def test_keyboard_interrupt_exits_without_a_traceback(monkeypatch):
-    def interrupted():
+    def interrupted(**_kwargs):
         raise KeyboardInterrupt
 
     monkeypatch.setattr("cctrail.cli.iter_sessions", interrupted)

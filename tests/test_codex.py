@@ -4,8 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import cctrail.codex as codex
-from cctrail import iter_codex_sessions, tool_call_counts
+from cctrail import iter_codex_sessions, iter_sessions, tool_call_counts
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex"
 
@@ -179,17 +178,16 @@ def test_codex_home_combines_comma_separated_directories(tmp_path: Path, monkeyp
 
 
 def test_parallel_parser_matches_sequential_parser(monkeypatch):
+    monkeypatch.setenv("CCTRAIL_WORKERS", "1")
     sequential = list(iter_codex_sessions(FIXTURES))
 
-    monkeypatch.setattr(codex, "PARALLEL_MIN_FILES", 0)
-    monkeypatch.setenv("CCTRAIL_WORKERS", "")
+    monkeypatch.setenv("CCTRAIL_WORKERS", "2")
     parallel = list(iter_codex_sessions(FIXTURES))
 
     assert parallel == sequential
 
 
 def test_one_worker_uses_current_process(monkeypatch):
-    monkeypatch.setattr(codex, "PARALLEL_MIN_FILES", 0)
     monkeypatch.setenv("CCTRAIL_WORKERS", "1")
 
     def unexpected_pool(*_args, **_kwargs):
@@ -200,20 +198,22 @@ def test_one_worker_uses_current_process(monkeypatch):
     assert list(iter_codex_sessions(FIXTURES))
 
 
-def test_worker_count_controls_pool_size(monkeypatch):
-    monkeypatch.setattr(codex, "PARALLEL_MIN_FILES", 0)
+def test_all_providers_share_one_pool(monkeypatch):
     monkeypatch.setenv("CCTRAIL_WORKERS", "2")
     pool_sizes = []
 
     class Pool:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
         def imap(self, func, items, _chunksize):
             return map(func, items)
+
+        def close(self):
+            pass
+
+        def terminate(self):
+            pass
+
+        def join(self):
+            pass
 
     class Context:
         def Pool(self, workers, initializer):
@@ -223,13 +223,12 @@ def test_worker_count_controls_pool_size(monkeypatch):
 
     monkeypatch.setattr("cctrail.utils.get_context", lambda _method: Context())
 
-    assert list(iter_codex_sessions(FIXTURES))
-    assert pool_sizes == [2, 2]
+    assert list(iter_sessions(Path(__file__).parent / "fixtures"))
+    assert pool_sizes == [2]
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nope"])
 def test_worker_count_rejects_invalid_values(monkeypatch, value):
-    monkeypatch.setattr(codex, "PARALLEL_MIN_FILES", 0)
     monkeypatch.setenv("CCTRAIL_WORKERS", value)
 
     with pytest.raises(ValueError, match="CCTRAIL_WORKERS must be a positive integer"):

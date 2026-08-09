@@ -11,6 +11,7 @@ import orjson
 
 T = TypeVar("T")
 R = TypeVar("R")
+PARALLEL_MIN_ITEMS = 32
 
 
 class WorkerConfigError(ValueError):
@@ -30,34 +31,58 @@ def data_paths(variable: str, defaults: Iterable[Path]) -> list[Path]:
     return list(dict.fromkeys(paths))
 
 
-def imap(
-    func: Callable[[T], R],
-    iterable: Iterable[T],
-    *,
-    workers: int | None = None,
-    chunksize: int = 1,
-) -> Iterator[R]:
-    items = list(iterable)
-    if not items:
-        return
+class WorkerPool:
+    def __init__(self) -> None:
+        configured = os.environ.get("CCTRAIL_WORKERS", "").strip()
+        self._explicit = bool(configured)
+        workers = cpu_count()
+        if configured:
+            try:
+                workers = int(configured)
+            except ValueError:
+                raise WorkerConfigError("CCTRAIL_WORKERS must be a positive integer") from None
+            if workers < 1:
+                raise WorkerConfigError("CCTRAIL_WORKERS must be a positive integer")
 
-    configured = os.environ.get("CCTRAIL_WORKERS", "").strip()
-    if configured:
-        try:
-            workers = int(configured)
-        except ValueError:
-            raise WorkerConfigError("CCTRAIL_WORKERS must be a positive integer") from None
-        if workers < 1:
-            raise WorkerConfigError("CCTRAIL_WORKERS must be a positive integer")
+        self._workers = min(workers, cpu_count())
+        self._pool = None
 
-    available_cpus = cpu_count()
-    worker_count = min(workers or available_cpus, available_cpus, len(items))
-    if worker_count == 1 or "fork" not in get_all_start_methods():
-        yield from map(func, items)
-        return
+    def __enter__(self) -> "WorkerPool":
+        return self
 
-    with get_context("fork").Pool(worker_count, initializer=ignore_sigint) as pool:
-        yield from pool.imap(func, items, chunksize)
+    def __exit__(self, exc_type, _exc, _traceback) -> None:
+        if self._pool is None:
+            return
+        if exc_type is None:
+            self._pool.close()
+        else:
+            self._pool.terminate()
+        self._pool.join()
+
+    def map(
+        self,
+        func: Callable[[T], R],
+        iterable: Iterable[T],
+        *,
+        chunksize: int = 1,
+    ) -> list[R]:
+        items = list(iterable)
+        if not items:
+            return []
+
+        if (
+            self._workers == 1
+            or "fork" not in get_all_start_methods()
+            or (not self._explicit and len(items) < PARALLEL_MIN_ITEMS)
+        ):
+            return list(map(func, items))
+
+        if self._pool is None:
+            self._pool = get_context("fork").Pool(
+                min(self._workers, len(items)),
+                initializer=ignore_sigint,
+            )
+        return list(self._pool.imap(func, items, chunksize))
 
 
 def json_load(value: str | bytes, default: Any = None) -> Any:

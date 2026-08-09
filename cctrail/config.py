@@ -2,6 +2,7 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -22,6 +23,7 @@ def normalize_path(value: str) -> str:
     return os.path.normpath(os.path.expanduser(value)).replace(os.sep, "/")
 
 
+@lru_cache(maxsize=4096)
 def match_path(path: str, pattern: str) -> bool:
     expression = ""
     index = 0
@@ -155,6 +157,7 @@ class Config:
             codex_sources=sources("codex"),
         )
 
+    @lru_cache(maxsize=256)
     def resolve_project(self, project: str) -> str:
         normalized = normalize_path(project)
         matches = [
@@ -166,6 +169,7 @@ class Config:
             raise ConfigError(f"project {project} matches multiple aliases: {', '.join(matches)}")
         return matches[0] if matches else project
 
+    @lru_cache(maxsize=256)
     def resolve_group(self, project: str) -> str:
         normalized = normalize_path(project)
         matches = [

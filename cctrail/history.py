@@ -1,12 +1,18 @@
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-from .claude import iter_sessions as iter_claude_sessions
-from .codex import iter_sessions as iter_codex_sessions
+from .claude import iter_sessions_with_pool as iter_claude_sessions_with_pool
+from .codex import iter_sessions_with_pool as iter_codex_sessions_with_pool
 from .models import Session
+from .utils import WorkerPool
 
 
-def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
+def iter_sessions(
+    root: str | Path | None = None,
+    *,
+    claude_roots: Iterable[str | Path] | None = None,
+    codex_roots: Iterable[str | Path] | None = None,
+) -> Iterator[Session]:
     """Stream Claude Code and Codex sessions.
 
     Without a root, provider directories come from `CLAUDE_CONFIG_DIR` and
@@ -14,10 +20,14 @@ def iter_sessions(root: str | Path | None = None) -> Iterator[Session]:
     provided, both parsers inspect that tree and ignore files that belong to
     the other provider.
     """
-    if root is None:
-        yield from iter_claude_sessions()
-        yield from iter_codex_sessions()
-        return
+    if root is not None and (claude_roots is not None or codex_roots is not None):
+        raise ValueError("root cannot be combined with provider roots")
 
-    yield from iter_claude_sessions(root)
-    yield from iter_codex_sessions(root)
+    with WorkerPool() as pool:
+        if root is not None:
+            yield from iter_claude_sessions_with_pool(pool, root=root)
+            yield from iter_codex_sessions_with_pool(pool, root=root)
+            return
+
+        yield from iter_claude_sessions_with_pool(pool, roots=claude_roots)
+        yield from iter_codex_sessions_with_pool(pool, roots=codex_roots)

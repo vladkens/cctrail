@@ -1,10 +1,12 @@
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from .models import Message, Session, ToolCall, Usage
 from .utils import (
+    WorkerPool,
     data_paths,
     extract_text,
     int_or_zero,
@@ -13,6 +15,13 @@ from .utils import (
     parse_timestamp,
     string_or_none,
 )
+
+
+@dataclass(frozen=True)
+class ParseJob:
+    path: Path
+    session_id: str
+    kind: Literal["main", "agent"]
 
 
 def default_roots() -> list[Path]:
@@ -35,6 +44,16 @@ def iter_sessions(
     lookup. Sub-agent transcripts are attached to the tool call that launched
     them, so a fully parsed `Session` already contains its whole agent tree.
     """
+    with WorkerPool() as pool:
+        yield from iter_sessions_with_pool(pool, root=root, roots=roots)
+
+
+def iter_sessions_with_pool(
+    pool: WorkerPool,
+    *,
+    root: str | Path | None = None,
+    roots: Iterable[str | Path] | None = None,
+) -> Iterator[Session]:
     if root is not None and roots is not None:
         raise ValueError("root and roots cannot be combined")
     search_roots = (
@@ -46,16 +65,27 @@ def iter_sessions(
     )
     paths = sorted({path for search_root in search_roots for path in search_root.rglob("*.jsonl")})
     agent_paths = subagent_paths(paths)
+    jobs = [
+        ParseJob(
+            path=path,
+            session_id=path.stem.removeprefix("agent-"),
+            kind="agent" if "subagents" in path.parts else "main",
+        )
+        for path in paths
+    ]
+    parsed = dict(pool.map(parse_job, jobs))
     linked_subagents: set[Path] = set()
     for path in paths:
         if "subagents" in path.parts:
             continue
 
-        session = parse_file(
-            path,
-            subagent_paths=agent_paths,
-            linked_subagents=linked_subagents,
-            session_dir=path.parent / path.stem,
+        session = parsed[path]
+        link_subagents(
+            session,
+            path.parent / path.stem,
+            agent_paths,
+            parsed,
+            linked_subagents,
         )
         if session.messages:
             yield session
@@ -64,16 +94,39 @@ def iter_sessions(
         if "subagents" not in path.parts or path in linked_subagents:
             continue
 
-        session = parse_file(
-            path,
-            session_id=path.stem.removeprefix("agent-"),
-            kind="agent",
-            subagent_paths=agent_paths,
-            linked_subagents=linked_subagents,
-            session_dir=session_dir(path),
-        )
+        session = parsed[path]
+        link_subagents(session, session_dir(path), agent_paths, parsed, linked_subagents)
         if session.messages:
             yield session
+
+
+def parse_job(job: ParseJob) -> tuple[Path, Session]:
+    return job.path, parse_file(job.path, session_id=job.session_id, kind=job.kind)
+
+
+def link_subagents(
+    session: Session,
+    parent_dir: Path,
+    agent_paths: dict[tuple[Path, str], Path],
+    parsed: dict[Path, Session],
+    linked: set[Path],
+) -> None:
+    for call in session.iter_tool_calls():
+        if call.name not in ("Agent", "Task"):
+            continue
+
+        raw = call.raw_result if isinstance(call.raw_result, dict) else {}
+        agent_id = string_or_none(raw.get("agentId"))
+        sub_path = agent_paths.get((parent_dir, agent_id or call.id))
+        if sub_path is None or sub_path not in parsed:
+            continue
+
+        agent = parsed[sub_path]
+        call.agent = apply_agent_metadata(agent, raw, call, session)
+        if sub_path in linked:
+            continue
+        linked.add(sub_path)
+        link_subagents(agent, parent_dir, agent_paths, parsed, linked)
 
 
 def subagent_paths(paths: list[Path]) -> dict[tuple[Path, str], Path]:
@@ -348,6 +401,15 @@ def build_agent_session(
     else:
         agent = Session(id=agent_id, kind="agent")
 
+    return apply_agent_metadata(agent, raw, call, parent)
+
+
+def apply_agent_metadata(
+    agent: Session,
+    raw: dict[str, Any],
+    call: ToolCall,
+    parent: Session,
+) -> Session:
     agent.cwd = agent.cwd or parent.cwd
     agent.git_branch = agent.git_branch or parent.git_branch
     agent.agent_type = (
