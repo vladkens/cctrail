@@ -1,0 +1,8 @@
+{
+  "files.exclude": {
+    "**/3rd": true,
+    "**/target": true,
+    "**/Cargo.lock": true,
+    "**/LICENSE": true,
+  }
+}

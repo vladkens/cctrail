@@ -47,16 +47,26 @@ def test_by_project_groups_by_cwd_and_sums_agent_usage():
 def test_by_project_splits_overlapping_time_between_projects():
     start = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
     sessions = [
-        Session(id="app", cwd="/app", messages=[Message("user", start)]),
+        Session(
+            id="app",
+            cwd="/app",
+            messages=[Message("assistant", start, usage=Usage(input=1))],
+        ),
         Session(
             id="app-worktree",
             cwd="/app-worktree",
-            messages=[Message("user", start)],
+            messages=[Message("assistant", start, usage=Usage(input=1))],
         ),
         Session(
             id="other",
             cwd="/other",
-            messages=[Message("user", start + timedelta(minutes=2))],
+            messages=[
+                Message(
+                    "assistant",
+                    start + timedelta(minutes=2),
+                    usage=Usage(input=1),
+                )
+            ],
         ),
     ]
 
@@ -155,13 +165,27 @@ def test_usage_by_day_splits_active_time_at_midnight_and_merges_parallel_session
         Session(
             id="first",
             messages=[
-                Message("user", datetime(2026, 1, 1, 23, 58, tzinfo=UTC)),
-                Message("assistant", datetime(2026, 1, 2, 0, 0, tzinfo=UTC)),
+                Message(
+                    "assistant",
+                    datetime(2026, 1, 1, 23, 58, tzinfo=UTC),
+                    usage=Usage(input=1),
+                ),
+                Message(
+                    "assistant",
+                    datetime(2026, 1, 2, 0, 0, tzinfo=UTC),
+                    usage=Usage(input=1),
+                ),
             ],
         ),
         Session(
             id="second",
-            messages=[Message("assistant", datetime(2026, 1, 2, 0, 1, tzinfo=UTC))],
+            messages=[
+                Message(
+                    "assistant",
+                    datetime(2026, 1, 2, 0, 1, tzinfo=UTC),
+                    usage=Usage(input=1),
+                )
+            ],
         ),
     ]
 
@@ -169,6 +193,45 @@ def test_usage_by_day_splits_active_time_at_midnight_and_merges_parallel_session
 
     assert buckets[date(2026, 1, 1)].active_time == timedelta(minutes=2)
     assert buckets[date(2026, 1, 2)].active_time == timedelta(minutes=6)
+
+
+def test_metrics_ignore_sessions_without_usage_and_previous_day_activity():
+    previous = datetime(2026, 1, 1, 23, 58, tzinfo=UTC)
+    current = datetime(2026, 1, 2, 0, 10, tzinfo=UTC)
+    sessions = [
+        Session(
+            id="previous",
+            cwd="/previous",
+            messages=[Message("assistant", previous, usage=Usage(input=1))],
+        ),
+        Session(
+            id="current",
+            cwd="/current",
+            messages=[Message("assistant", current, usage=Usage(input=1))],
+        ),
+        Session(
+            id="failed",
+            cwd="/failed",
+            messages=[Message("user", current + timedelta(minutes=4))],
+        ),
+    ]
+
+    projects = by_project(
+        sessions,
+        since=date(2026, 1, 2),
+        until=date(2026, 1, 2),
+        timezone=UTC,
+    )
+    buckets = usage_by_period(
+        sessions,
+        since=date(2026, 1, 2),
+        until=date(2026, 1, 2),
+        timezone=UTC,
+    )
+
+    assert list(projects) == ["/current"]
+    assert projects["/current"].active_time == timedelta(minutes=5)
+    assert buckets[date(2026, 1, 2)].active_time == timedelta(minutes=5)
 
 
 def test_usage_by_period_groups_weeks_from_the_requested_first_weekday():

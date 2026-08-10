@@ -82,9 +82,11 @@ def usage_by_period(
 ) -> dict[date, UsageSummary]:
     """Summarize usage by calendar day, week, or month."""
     sessions = list(sessions)
+    messages = usage_messages(sessions)
     buckets: dict[date, UsageSummary] = {}
     models: defaultdict[date, dict[tuple[str, str, str | None], ModelSummary]] = defaultdict(dict)
-    for session, message in usage_messages(sessions):
+    billable_buckets: defaultdict[int, set[date]] = defaultdict(set)
+    for session, message in messages:
         if message.timestamp is None or message.usage is None:
             continue
 
@@ -93,6 +95,7 @@ def usage_by_period(
             continue
 
         bucket = period_start(day, granularity, first_weekday)
+        billable_buckets[id(session)].add(bucket)
         summary = buckets.setdefault(bucket, UsageSummary())
         summary.usage = summary.usage + message.usage
         cost = calculate_cost(
@@ -116,13 +119,27 @@ def usage_by_period(
         model.usage = model.usage + message.usage
         model.cost += cost
 
-    events = activity_stamps(sessions)
+    events: list[datetime] = []
+    for session in sessions:
+        session_buckets = billable_buckets.get(id(session))
+        if not session_buckets:
+            continue
+
+        for nested in session.walk():
+            for stamp in nested.activity_stamps():
+                day = calendar_date(stamp, timezone)
+                if (
+                    date_in_range(day, since, until)
+                    and period_start(day, granularity, first_weekday) in session_buckets
+                ):
+                    events.append(stamp)
     for day, duration in active_time_by_day(events, timezone=timezone).items():
         if not date_in_range(day, since, until):
             continue
 
         bucket = period_start(day, granularity, first_weekday)
-        buckets.setdefault(bucket, UsageSummary()).active_time += duration
+        if bucket in buckets:
+            buckets[bucket].active_time += duration
 
     for bucket, summaries in models.items():
         buckets[bucket].models = sorted(
@@ -164,6 +181,7 @@ def by_project(
 ) -> dict[str, ProjectSummary]:
     """Group sessions by working directory, summing usage across each session's agent tree."""
     sessions = list(sessions)
+    messages = usage_messages(sessions)
     filter_by_date = since is not None or until is not None
     result: dict[str, ProjectSummary] = {}
     events: defaultdict[str, list[datetime]] = defaultdict(list)
@@ -172,10 +190,22 @@ def by_project(
         project = session.cwd or "unknown"
         return project_resolver(project) if project_resolver is not None else project
 
+    billable_sessions = {
+        id(session)
+        for session, message in messages
+        if not filter_by_date
+        or (
+            message.timestamp is not None
+            and date_in_range(calendar_date(message.timestamp, timezone), since, until)
+        )
+    }
+
     for session in sessions:
+        if id(session) not in billable_sessions:
+            continue
+
         project = project_name(session)
         all_stamps = [stamp for nested in session.walk() for stamp in nested.activity_stamps()]
-        events[project].extend(all_stamps)
         if filter_by_date:
             stamps = [
                 stamp
@@ -184,6 +214,7 @@ def by_project(
             ]
         else:
             stamps = all_stamps
+        events[project].extend(stamps)
 
         if stamps:
             summary = result.setdefault(project, ProjectSummary(project=project))
@@ -196,7 +227,7 @@ def by_project(
             if summary.last_activity is None or ended > summary.last_activity:
                 summary.last_activity = ended
 
-    for session, message in usage_messages(sessions):
+    for session, message in messages:
         if filter_by_date:
             if message.timestamp is None:
                 continue

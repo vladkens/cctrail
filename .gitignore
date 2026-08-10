@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 /3rd
 /samples
+/target
 cctrail.toml
