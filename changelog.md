@@ -1,3 +1,17 @@
+## v0.1.1 – 2026-08-10
+
+### Fixes
+
+- Fixed active-time inflation caused by sessions without token usage
+
+### Maintenance
+
+- Completed PyPI package metadata with project links, classifiers, and discovery keywords
+
+**Full Changelog**: https://github.com/vladkens/cctrail/compare/v0.1.0...v0.1.1
+
+---
+
 ## v0.1.0 – 2026-08-09
 
 ### Features
