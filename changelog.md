@@ -1,18 +1,22 @@
 ## v0.2.0 – 2026-08-29
 
+### Breaking Changes
+
+- Replaced the `projects`, `groups`, and `audit` commands with the unified `stats` command and removed configurable history sources, project aliases, legacy command options, and the Python library API
+
 ### Features
 
-- Reworked history parsing around deduplicated usage and activity events, including Claude subagents and Codex spawned or forked rollouts
-- Added the unified `stats` command with project, group, and working-directory views
-- Added strict project mapping through optional `<group>/<project>` configuration
-- Added `--no-config`, model breakdowns, compact JSON reports, Monday-based weeks, and clipped custom date ranges
+- Added project, group, and working-directory statistics with strict `<group>/<project>` mapping and a separate `@unmapped` section
+- Added compact JSON reports, model breakdowns, Monday-based weeks, clipped custom date ranges, and the global `--no-config` option
+- Added `update-pricing` to download current model prices into a persistent user cache
 
-### Changes
+### Improvements
 
-- Simplified the CLI to `usage` and `stats`; removed the old project, group, audit, source, alias, and Python library interfaces
-- Kept distribution as a regular Python package for `uvx`, `uv tool install`, and PyPI
+- Improved Claude usage deduplication and subagent handling, including fallback usage from tool results
+- Improved Codex spawned-agent and forked-rollout handling to avoid replayed token usage and preserve project attribution
+- Excluded failed events from billing and active-time calculations
 
-**[Full Changelog](https://github.com/vladkens/cctrail/compare/v0.1.1...v0.2.0)**
+**Full Changelog**: https://github.com/vladkens/cctrail/compare/v0.1.1...v0.2.0
 
 ---
 
@@ -20,11 +24,15 @@
 
 ### Fixes
 
-- Fixed active-time inflation caused by sessions without token usage
+- Fixed active-time inflation caused by sessions without usage
 
 ### Maintenance
 
 - Completed PyPI package metadata with project links, classifiers, and discovery keywords
+
+### Docs
+
+- Documented how Claude Code transcript retention affects historical reports
 
 **Full Changelog**: https://github.com/vladkens/cctrail/compare/v0.1.0...v0.1.1
 
@@ -34,15 +42,14 @@
 
 ### Features
 
-- Added parsing for local Claude Code and Codex histories, including messages, tool calls, and nested agents
+- Added Claude Code and Codex history parsing with nested agent support
 - Added usage, project, group, and pricing audit reports with calendar periods, provider filters, model breakdowns, and JSON output
-- Added estimated costs and active time, with overlapping activity distributed across projects and groups
-- Added optional TOML configuration for project aliases, project groups, and history source directories
-- Added configuration selection and opt-out options for individual commands
-- Added a Python API for parsed sessions, metrics, pricing, and model serialization
+- Added estimated costs and active time with overlapping activity distributed across projects and groups
+- Added project aliases, configurable groups, history source directories, and config selection options
+- Added a Python API for parsed sessions, metrics, pricing, and serialization
 
 ### Improvements
 
-- Improved performance through parallel history parsing and cached project matching
+- Improved history parsing performance with parallel processing and cached project matching
 
 **Full Changelog**: https://github.com/vladkens/cctrail/commits/v0.1.0

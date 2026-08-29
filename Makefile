@@ -1,4 +1,4 @@
-.PHONY: prepare lint check test update build install
+.PHONY: prepare lint check test update
 
 prepare: lint check
 
@@ -16,10 +16,4 @@ test:
 
 update:
 	uv sync --upgrade --all-groups
-	uv run cctrail update-pricing
-
-build:
-	uv build
-
-install:
-	uv sync
+	uv run cctrail update-pricing --output cctrail/pricing.json

@@ -78,24 +78,11 @@ Tables use color when stdout is a terminal. JSON always contains unabridged path
 
 Claude history is read from `~/.claude/projects` and Codex history from `~/.codex/sessions` plus `~/.codex/archived_sessions`. `CLAUDE_CONFIG_DIR` and `CODEX_HOME` override those roots.
 
-Claude Code deletes session files older than 30 days at startup by default. To preserve a long-term history, increase [`cleanupPeriodDays`](https://code.claude.com/docs/en/settings) before the default cleanup removes those transcripts.
+Claude Code deletes session files older than 30 days at startup by default. To preserve a long-term history, increase [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically) before the default cleanup removes those transcripts.
 
 Active time treats every user or assistant event as a five-minute window. Overlapping windows are merged, and simultaneous activity is divided between the names selected by `stats --by`.
 
-Costs are estimates based on the pricing catalog included in the installed package.
-
-## Development
-
-The project requires Python 3.11 or newer and uses [uv](https://docs.astral.sh/uv/).
-
-```sh
-uv sync
-make check
-make test
-make build
-```
-
-Refresh dependencies and the generated pricing catalog with `make update`.
+Costs are estimates based on the pricing catalog included in the installed package. Run `cctrail update-pricing` to download the latest catalog to `~/.cache/cctrail/pricing.json`; the downloaded catalog takes precedence over the bundled one.
 
 ## License
 
