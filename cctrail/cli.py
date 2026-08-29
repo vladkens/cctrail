@@ -19,7 +19,7 @@ def parser() -> argparse.ArgumentParser:
         prog="cctrail",
         description="Report token usage and active time from local Claude Code and Codex history.",
     )
-    root.add_argument("--version", action="version", version=f"%(prog)s {version('cctrail')}")
+    root.add_argument("-V", "--version", action="version", version=f"%(prog)s {version('cctrail')}")
     add_no_config(root)
     commands = root.add_subparsers(dest="command", required=True)
 
@@ -48,6 +48,11 @@ def parser() -> argparse.ArgumentParser:
         type=StatsBy,
         default=StatsBy.PROJECT,
         help="Group statistics.",
+    )
+    stats.add_argument(
+        "--show-unmapped",
+        action="store_true",
+        help="List unmapped working directories below the table.",
     )
 
     update = commands.add_parser("update-pricing", help="Download the latest pricing catalog.")
@@ -171,6 +176,9 @@ def run_usage(args: argparse.Namespace) -> None:
 def run_stats(args: argparse.Namespace) -> None:
     date_range = DateRange.resolve(args.period, args.since, args.until)
     by = StatsBy.WORKDIR if getattr(args, "no_config", False) else args.by
+    if args.show_unmapped and by is not StatsBy.PROJECT:
+        raise ValueError("--show-unmapped requires --by project")
+
     config = Config() if by is StatsBy.WORKDIR else Config.load()
     sessions = parse_history(args.provider)
     stats = metrics.stats_by(sessions, date_range, config, by)
@@ -194,9 +202,7 @@ def run_stats(args: argparse.Namespace) -> None:
         )
         return
 
-    rows = output.stats_rows(stats, by)
-    rows.append(output.stats_row(total, by))
-    output.stats_table(by, rows)
+    output.stats_table(by, stats, total, show_unmapped=args.show_unmapped)
 
 
 def update_pricing(path: Path | None = None) -> None:

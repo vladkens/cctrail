@@ -18,14 +18,41 @@ def usage_table(label: str, rows: list[list[str]]) -> None:
     print_table(headers, rows)
 
 
-def stats_table(by: StatsBy, rows: list[list[str]]) -> None:
+def stats_table(
+    by: StatsBy,
+    stats: list[Stat],
+    total: Stat,
+    *,
+    show_unmapped: bool = False,
+) -> None:
     label = {
         StatsBy.PROJECT: "Project",
         StatsBy.GROUP: "Group",
         StatsBy.WORKDIR: "Workdir",
     }[by]
     headers = [label, "Sessions", "Total tokens", "Last active", "Cost", "Time"]
+    rows = stats_rows(stats, by)
+    rows.append(stats_row(total, by))
     print_table(headers, rows, dim_column=3, max_first_column=60)
+
+    if by is not StatsBy.PROJECT:
+        return
+
+    unmapped = [x for x in stats if split_project(x.name) is None]
+    if not unmapped:
+        return
+
+    if not show_unmapped:
+        label = "workdir" if len(unmapped) == 1 else "workdirs"
+        Console(highlight=False).print(
+            f"\n[dim]{len(unmapped)} unmapped {label} · run[/dim] "
+            "[cyan]cctrail stats --show-unmapped[/cyan] [dim]to list them[/dim]"
+        )
+        return
+
+    print()
+    rows = [[workdir_label(x.name), format_duration(x.active_time)] for x in unmapped]
+    print_table([f"Unmapped workdirs ({len(rows)})", "Time"], rows, max_first_column=60)
 
 
 def print_table(
@@ -157,19 +184,16 @@ def stats_rows(stats: list[Stat], by: StatsBy) -> list[list[str]]:
         total = combine_stats(unmapped)
         total.name = "@unmapped"
         rows.append(stats_row(total, by))
-        rows.extend(stats_row(x, by, nested=True) for x in unmapped)
     return rows
 
 
-def stats_row(stat: Stat, by: StatsBy, nested: bool = False) -> list[str]:
+def stats_row(stat: Stat, by: StatsBy) -> list[str]:
     if by is StatsBy.PROJECT:
         label = stat.name if split_project(stat.name) else workdir_label(stat.name)
     elif by is StatsBy.GROUP:
         label = stat.name
     else:
         label = workdir_label(stat.name)
-    if nested:
-        label = f"  {label}"
     return [
         label,
         str(stat.sessions),

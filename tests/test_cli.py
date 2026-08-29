@@ -96,7 +96,32 @@ def test_reports_unmapped_section_total():
 
     assert result.returncode == 0
     assert any(x.startswith("@unmapped") and "427" in x for x in result.stdout.splitlines())
-    assert any(x.startswith("  /repo") and "427" in x for x in result.stdout.splitlines())
+    assert "1 unmapped workdir · run cctrail stats --show-unmapped to list them" in result.stdout
+    assert not any(x.startswith("/repo") for x in result.stdout.splitlines())
+
+
+def test_shows_unmapped_workdirs_on_request():
+    result = run(
+        "claude/projects",
+        "missing",
+        "stats",
+        "--provider",
+        "claude",
+        "--show-unmapped",
+    )
+
+    assert result.returncode == 0
+    assert "Unmapped workdirs (1)" in result.stdout
+    assert any(x.startswith("/repo") and "0h 05m" in x for x in result.stdout.splitlines())
+
+
+def test_unmapped_json_is_always_complete():
+    value = json(run("claude/projects", "missing", "stats", "--provider", "claude", "--json"))
+
+    assert value["groups"][0]["group"] == "@unmapped"
+    assert value["groups"][0]["project"] == "/repo"
+    assert value["groups"][0]["usage"]["total"] == 427
+    assert value["groups"][0]["active_seconds"] == 310
 
 
 def test_rejects_reversed_date_range():
@@ -227,8 +252,9 @@ def test_weeks_start_on_monday():
     assert value["periods"][0]["end"] == "2026-01-04"
 
 
-def test_version():
-    result = run("missing", "missing", "--version")
+@pytest.mark.parametrize("flag", ["-V", "--version"])
+def test_version(flag: str):
+    result = run("missing", "missing", flag)
 
     assert result.returncode == 0
     assert result.stdout == "cctrail 0.2.0\n"
