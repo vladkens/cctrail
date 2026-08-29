@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Console
-from rich.measure import Measurement
 from rich.table import Table
 from rich.text import Text
 
@@ -60,10 +59,7 @@ def print_table(
             values.append(Text(value, style=style) if style else value)
         table.add_row(*values, style="bold" if bold else None)
 
-    console = Console(highlight=False)
-    width = Measurement.get(console, console.options.update_width(1000), table).maximum
-    console.width = max(console.width, width)
-    console.print(table)
+    Console(highlight=False).print(table)
 
 
 def usage_json(usage: Usage) -> dict[str, int]:
