@@ -21,7 +21,7 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--version", action="version", version=f"%(prog)s {version('cctrail')}")
     add_no_config(root)
-    commands = root.add_subparsers(dest="command", required=True, metavar="{usage,stats}")
+    commands = root.add_subparsers(dest="command", required=True)
 
     usage = commands.add_parser("usage", help="Show token usage over time.")
     add_no_config(usage)
@@ -50,8 +50,9 @@ def parser() -> argparse.ArgumentParser:
         help="Group statistics.",
     )
 
-    update = commands.add_parser("update-pricing")
+    update = commands.add_parser("update-pricing", help="Download the latest pricing catalog.")
     add_no_config(update)
+    update.add_argument("--output", type=Path, help=argparse.SUPPRESS)
     return root
 
 
@@ -83,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "stats":
             run_stats(args)
         else:
-            update_pricing()
+            update_pricing(args.output)
     except (OSError, ValueError) as e:
         print(e, file=sys.stderr)
         return 2
@@ -198,8 +199,8 @@ def run_stats(args: argparse.Namespace) -> None:
     output.stats_table(by, rows)
 
 
-def update_pricing() -> None:
-    path = Path(__file__).with_name("pricing.json")
+def update_pricing(path: Path | None = None) -> None:
+    path = path or pricing.cache_path()
     pricing.update_catalog(path)
     print(f"Updated {path}")
 

@@ -1,3 +1,4 @@
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -28,12 +29,38 @@ class Price:
 Catalog = dict[str, dict[str, Price]]
 
 
-def load_catalog(path: Path = CATALOG_PATH) -> Catalog:
+def cache_path() -> Path:
+    root = os.environ.get("XDG_CACHE_HOME")
+    if root:
+        return Path(root) / "cctrail/pricing.json"
+
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    if not home:
+        raise ValueError("cannot find pricing cache without HOME")
+    return Path(home) / ".cache/cctrail/pricing.json"
+
+
+def load_catalog(path: Path | None = None) -> Catalog:
+    if path is None:
+        try:
+            cached = cache_path()
+        except ValueError:
+            cached = None
+        if cached and cached.is_file():
+            try:
+                return load_catalog(cached)
+            except (OSError, ValueError):
+                pass
+        path = CATALOG_PATH
+
     raw = orjson.loads(path.read_bytes())
-    return {
-        provider: {model: Price(**price) for model, price in models.items()}
-        for provider, models in raw.items()
-    }
+    try:
+        return {
+            provider: {model: Price(**price) for model, price in models.items()}
+            for provider, models in raw.items()
+        }
+    except (AttributeError, TypeError) as e:
+        raise ValueError(f"invalid pricing catalog: {path}") from e
 
 
 CATALOG = load_catalog()
@@ -80,7 +107,7 @@ def cost(
     return dollars * multiplier / 1_000_000
 
 
-def update_catalog(path: Path = CATALOG_PATH) -> None:
+def update_catalog(path: Path) -> None:
     catalog = download_catalog()
     value = {
         provider: {
@@ -89,7 +116,14 @@ def update_catalog(path: Path = CATALOG_PATH) -> None:
         }
         for provider, models in catalog.items()
     }
-    path.write_bytes(orjson.dumps(value, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS) + b"\n")
+    data = orjson.dumps(value, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS) + b"\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def download_catalog() -> Catalog:

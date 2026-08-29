@@ -4,8 +4,9 @@ from pathlib import Path
 import orjson
 import pytest
 
+from cctrail import pricing
 from cctrail.model import Provider, Speed, Usage
-from cctrail.pricing import Price, catalog_from_models_dev, cost, update_catalog
+from cctrail.pricing import Price, catalog_from_models_dev, cost, load_catalog, update_catalog
 
 
 def test_cost_prices_reasoning_fast_and_long_context():
@@ -74,7 +75,7 @@ def test_update_catalog_writes_package_schema(
         "openai": {},
     }
     monkeypatch.setattr("cctrail.pricing.download_catalog", lambda: catalog)
-    path = tmp_path / "pricing.json"
+    path = tmp_path / "cache/pricing.json"
 
     update_catalog(path)
 
@@ -82,3 +83,25 @@ def test_update_catalog_writes_package_schema(
         "anthropic": {"model": {"input": 2, "output": 10, "cache_read": 0.2}},
         "openai": {},
     }
+    assert not path.with_name(".pricing.json.tmp").exists()
+
+
+def test_prefers_cached_catalog(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    path = tmp_path / "cctrail/pricing.json"
+    path.parent.mkdir()
+    path.write_bytes(orjson.dumps({"openai": {"model": {"input": 2, "output": 10}}}))
+
+    assert load_catalog()["openai"]["model"] == Price(input=2, output=10)
+
+
+def test_falls_back_from_invalid_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    package = tmp_path / "pricing.json"
+    package.write_bytes(orjson.dumps({"openai": {"model": {"input": 2, "output": 10}}}))
+    cached = tmp_path / "cache/cctrail/pricing.json"
+    cached.parent.mkdir(parents=True)
+    cached.write_text("invalid")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(pricing, "CATALOG_PATH", package)
+
+    assert load_catalog()["openai"]["model"] == Price(input=2, output=10)

@@ -232,3 +232,10 @@ def test_version():
 
     assert result.returncode == 0
     assert result.stdout == "cctrail 0.2.0\n"
+
+
+def test_help_lists_pricing_update():
+    result = run("missing", "missing", "--help")
+
+    assert result.returncode == 0
+    assert "update-pricing" in result.stdout
