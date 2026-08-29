@@ -5,3 +5,4 @@ __pycache__/
 /samples
 /target
 cctrail.toml
+/dist

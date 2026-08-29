@@ -1,7 +1,7 @@
 [project]
 name = "cctrail"
-version = "0.1.1"
-description = "CLI for analyzing local Claude Code and Codex history by token usage, cost, active time, projects, and groups"
+version = "0.2.0"
+description = "Report token usage and active time from local Claude Code and Codex history"
 readme = "readme.md"
 requires-python = ">=3.11"
 authors = [{ name = "vladkens" }]
@@ -29,7 +29,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development",
-    "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Utilities",
     "Typing :: Typed",
 ]

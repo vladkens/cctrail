@@ -233,16 +233,16 @@
       "output": 180
     },
     "gpt-5.6": {
-      "cache_read": 0.5,
-      "cache_write": 6.25,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
       "fast_multiplier": 2.0,
-      "input": 5,
-      "long_context_cache_read": 1,
-      "long_context_cache_write": 12.5,
-      "long_context_input": 10,
-      "long_context_output": 45,
+      "input": 4.0,
+      "long_context_cache_read": 0.8,
+      "long_context_cache_write": 10.0,
+      "long_context_input": 8.0,
+      "long_context_output": 30.0,
       "long_context_threshold": 272000,
-      "output": 30
+      "output": 20.0
     },
     "gpt-5.6-luna": {
       "cache_read": 0.02,
@@ -257,16 +257,16 @@
       "output": 1.2
     },
     "gpt-5.6-sol": {
-      "cache_read": 0.5,
-      "cache_write": 6.25,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
       "fast_multiplier": 2.0,
-      "input": 5,
-      "long_context_cache_read": 1,
-      "long_context_cache_write": 12.5,
-      "long_context_input": 10,
-      "long_context_output": 45,
+      "input": 4.0,
+      "long_context_cache_read": 0.8,
+      "long_context_cache_write": 10.0,
+      "long_context_input": 8.0,
+      "long_context_output": 30.0,
       "long_context_threshold": 272000,
-      "output": 30
+      "output": 20.0
     },
     "gpt-5.6-terra": {
       "cache_read": 0.2,

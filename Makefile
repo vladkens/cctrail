@@ -1,4 +1,4 @@
-.PHONY: prepare lint check test update install
+.PHONY: prepare lint check test update build install
 
 prepare: lint check
 
@@ -16,13 +16,10 @@ test:
 
 update:
 	uv sync --upgrade --all-groups
-	uv run --script scripts/update-pricing.py
+	uv run cctrail update-pricing
+
+build:
+	uv build
 
 install:
 	uv sync
-
-perf:
-	CCTRAIL_WORKERS=1 /usr/bin/time uv run cctrail groups --provider claude
-	CCTRAIL_WORKERS=4 /usr/bin/time uv run cctrail groups --provider claude
-	CCTRAIL_WORKERS=1 /usr/bin/time uv run cctrail groups --provider codex
-	CCTRAIL_WORKERS=4 /usr/bin/time uv run cctrail groups --provider codex

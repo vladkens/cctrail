@@ -1,424 +1,424 @@
-from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Iterator
+from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, tzinfo
-from typing import Literal
+from datetime import UTC, date, datetime, time, timedelta
+from enum import StrEnum
 
-from .models import JsonTrait, Message, Session, Usage
-from .pricing import calculate_cost
+from . import pricing
+from .config import Config, StatsBy
+from .model import Event, Provider, Session, Speed, Usage
 
-
-def usage_messages(sessions: Iterable[Session]) -> list[tuple[Session, Message]]:
-    """Return billable messages using Claude's response and sidechain identity rules."""
-    anonymous: list[tuple[Session, Message]] = []
-    direct: dict[tuple[str, str, str | None], tuple[Session, Message]] = {}
-    sidechains: dict[tuple[str, str], tuple[Session, Message]] = {}
-    for session in sessions:
-        for nested in session.walk():
-            for message in nested.messages:
-                if message.usage is None or message.usage.total == 0 or message.is_api_error:
-                    continue
-
-                if message.id is None:
-                    anonymous.append((session, message))
-                    continue
-
-                message_key = session.provider, message.id
-                if message.is_sidechain:
-                    existing = sidechains.get(message_key)
-                    if existing is None or usage_rank(message) > usage_rank(existing[1]):
-                        sidechains[message_key] = session, message
-                else:
-                    key = *message_key, message.request_id
-                    existing = direct.get(key)
-                    if existing is None or usage_rank(message) > usage_rank(existing[1]):
-                        direct[key] = session, message
-
-    direct_message_ids = {(provider, message_id) for provider, message_id, _ in direct}
-    return (
-        anonymous
-        + list(direct.values())
-        + [candidate for key, candidate in sidechains.items() if key not in direct_message_ids]
-    )
+ACTIVITY_WINDOW = timedelta(minutes=5)
+MICROS_PER_SECOND = 1_000_000
+RootKey = tuple[Provider, str]
 
 
-def usage_rank(message: Message) -> tuple[int, bool]:
-    assert message.usage is not None
-    return message.usage.total, message.speed is not None
+class Period(StrEnum):
+    TODAY = "today"
+    YESTERDAY = "yesterday"
+    THIS_WEEK = "this-week"
+    LAST_WEEK = "last-week"
+    THIS_MONTH = "this-month"
+    LAST_MONTH = "last-month"
+    ALL = "all"
+
+
+class Granularity(StrEnum):
+    DAY = "day"
+    WEEK = "week"
+    MONTH = "month"
+
+    def bucket(self, value: date) -> date:
+        if self is Granularity.DAY:
+            return value
+
+        if self is Granularity.WEEK:
+            return value - timedelta(days=value.weekday())
+
+        return value.replace(day=1)
+
+    def bounds(self, start: date, query: "DateRange") -> tuple[date, date]:
+        end = self.bucket_end(start)
+        return (
+            max(start, query.since) if query.since else start,
+            min(end, query.until) if query.until else end,
+        )
+
+    def label(self, start: date, query: "DateRange") -> str:
+        if self is Granularity.DAY:
+            return str(start)
+        first = max(start, query.since) if query.since else start
+        end = self.bucket_end(start)
+        last = min(end, query.until) if query.until else end
+        if self is Granularity.MONTH and first == start and last == end:
+            return start.strftime("%Y-%m")
+        return str(first) if first == last else f"{first} – {last:%m-%d}"
+
+    def bucket_end(self, start: date) -> date:
+        if self is Granularity.DAY:
+            return start
+        if self is Granularity.WEEK:
+            return start + timedelta(days=6)
+        return next_month(start) - timedelta(days=1)
+
+
+@dataclass(frozen=True)
+class DateRange:
+    since: date | None = None
+    until: date | None = None
+
+    @classmethod
+    def resolve(
+        cls,
+        period: Period | None = None,
+        since: date | None = None,
+        until: date | None = None,
+    ) -> "DateRange":
+        if since and until and since > until:
+            raise ValueError("--since must not be later than --until")
+        if period is None:
+            return cls(since, until)
+
+        today = datetime.now().astimezone().date()
+        day = timedelta(days=1)
+        if period is Period.ALL:
+            return cls()
+        if period is Period.TODAY:
+            return cls(today, today)
+        if period is Period.YESTERDAY:
+            return cls(today - day, today - day)
+        if period is Period.THIS_WEEK:
+            start = Granularity.WEEK.bucket(today)
+            return cls(start, start + timedelta(days=6))
+        if period is Period.LAST_WEEK:
+            end = Granularity.WEEK.bucket(today) - day
+            return cls(end - timedelta(days=6), end)
+        if period is Period.THIS_MONTH:
+            start = month_start(today)
+            return cls(start, next_month(start) - day)
+        end = month_start(today) - day
+        return cls(month_start(end), end)
+
+    def contains(self, timestamp: datetime) -> bool:
+        return self.contains_day(local_date(timestamp))
+
+    def contains_day(self, day: date) -> bool:
+        return (self.since is None or day >= self.since) and (
+            self.until is None or day <= self.until
+        )
 
 
 @dataclass
-class ModelSummary(JsonTrait):
-    provider: str
+class ModelSummary:
+    provider: Provider
     model: str
-    speed: Literal["fast"] | None = None
+    fast: bool
     usage: Usage = field(default_factory=Usage)
     cost: float = 0.0
 
 
 @dataclass
-class UsageSummary(JsonTrait):
+class UsageSummary:
     usage: Usage = field(default_factory=Usage)
     cost: float = 0.0
     active_time: timedelta = field(default_factory=timedelta)
     models: list[ModelSummary] = field(default_factory=list)
 
 
-def usage_by_day(
-    sessions: Iterable[Session], *, timezone: tzinfo | None = None
-) -> dict[date, UsageSummary]:
-    """Summarize usage and estimated activity per calendar day."""
-    return usage_by_period(sessions, timezone=timezone)
-
-
-def usage_by_period(
-    sessions: Iterable[Session],
-    *,
-    granularity: Literal["day", "week", "month"] = "day",
-    since: date | None = None,
-    until: date | None = None,
-    timezone: tzinfo | None = None,
-    first_weekday: int = 0,
-) -> dict[date, UsageSummary]:
-    """Summarize usage by calendar day, week, or month."""
-    sessions = list(sessions)
-    messages = usage_messages(sessions)
-    buckets: dict[date, UsageSummary] = {}
-    models: defaultdict[date, dict[tuple[str, str, str | None], ModelSummary]] = defaultdict(dict)
-    billable_buckets: defaultdict[int, set[date]] = defaultdict(set)
-    for session, message in messages:
-        if message.timestamp is None or message.usage is None:
-            continue
-
-        day = calendar_date(message.timestamp, timezone)
-        if not date_in_range(day, since, until):
-            continue
-
-        bucket = period_start(day, granularity, first_weekday)
-        billable_buckets[id(session)].add(bucket)
-        summary = buckets.setdefault(bucket, UsageSummary())
-        summary.usage = summary.usage + message.usage
-        cost = calculate_cost(
-            message.model or "",
-            message.usage,
-            provider=session.provider,
-            speed=message.speed,
-        )
-        summary.cost += cost
-
-        speed = "fast" if message.speed == "fast" else None
-        model_key = session.provider, message.model or "unknown", speed
-        model = models[bucket].setdefault(
-            model_key,
-            ModelSummary(
-                provider=session.provider,
-                model=message.model or "unknown",
-                speed=speed,
-            ),
-        )
-        model.usage = model.usage + message.usage
-        model.cost += cost
-
-    events: list[datetime] = []
-    for session in sessions:
-        session_buckets = billable_buckets.get(id(session))
-        if not session_buckets:
-            continue
-
-        for nested in session.walk():
-            for stamp in nested.activity_stamps():
-                day = calendar_date(stamp, timezone)
-                if (
-                    date_in_range(day, since, until)
-                    and period_start(day, granularity, first_weekday) in session_buckets
-                ):
-                    events.append(stamp)
-    for day, duration in active_time_by_day(events, timezone=timezone).items():
-        if not date_in_range(day, since, until):
-            continue
-
-        bucket = period_start(day, granularity, first_weekday)
-        if bucket in buckets:
-            buckets[bucket].active_time += duration
-
-    for bucket, summaries in models.items():
-        buckets[bucket].models = sorted(
-            summaries.values(),
-            key=lambda summary: (
-                -summary.usage.total,
-                summary.provider,
-                summary.model,
-                summary.speed or "",
-            ),
-        )
-
-    return buckets
-
-
-def tool_call_counts(session: Session) -> Counter[str]:
-    """Count tool calls in one session, excluding nested agent sessions."""
-    return Counter(call.name for call in session.iter_tool_calls())
-
-
 @dataclass
-class ProjectSummary(JsonTrait):
-    project: str
+class Stat:
+    name: str = ""
+    sessions: int = 0
     usage: Usage = field(default_factory=Usage)
     cost: float = 0.0
     active_time: timedelta = field(default_factory=timedelta)
-    session_count: int = 0
     first_activity: datetime | None = None
     last_activity: datetime | None = None
 
 
-def by_project(
-    sessions: Iterable[Session],
-    *,
-    since: date | None = None,
-    until: date | None = None,
-    timezone: tzinfo | None = None,
-    project_resolver: Callable[[str], str] | None = None,
-) -> dict[str, ProjectSummary]:
-    """Group sessions by working directory, summing usage across each session's agent tree."""
-    sessions = list(sessions)
-    messages = usage_messages(sessions)
-    filter_by_date = since is not None or until is not None
-    result: dict[str, ProjectSummary] = {}
-    events: defaultdict[str, list[datetime]] = defaultdict(list)
+def usage_by_period(
+    sessions: list[Session],
+    granularity: Granularity,
+    date_range: DateRange,
+) -> dict[date, UsageSummary]:
+    summaries: dict[date, UsageSummary] = {}
+    models: defaultdict[date, dict[tuple[Provider, str, bool], ModelSummary]] = defaultdict(dict)
+    billable_buckets: set[tuple[RootKey, date]] = set()
 
-    def project_name(session: Session) -> str:
-        project = session.cwd or "unknown"
-        return project_resolver(project) if project_resolver is not None else project
+    for session, event in billable_events(sessions):
+        timestamp = event.timestamp
+        if timestamp is None or not date_range.contains(timestamp):
+            continue
+        bucket = granularity.bucket(local_date(timestamp))
+        usage = event.usage
+        assert usage is not None
+        event_cost = pricing.cost(session.provider, event.model, usage, event.speed)
+        summary = summaries.setdefault(bucket, UsageSummary())
+        summary.usage += usage
+        summary.cost += event_cost
+        billable_buckets.add((root(session), bucket))
 
-    billable_sessions = {
-        id(session)
-        for session, message in messages
-        if not filter_by_date
-        or (
-            message.timestamp is not None
-            and date_in_range(calendar_date(message.timestamp, timezone), since, until)
+        fast = event.speed is Speed.FAST
+        model = event.model or "unknown"
+        key = session.provider, model, fast
+        model_summary = models[bucket].setdefault(key, ModelSummary(session.provider, model, fast))
+        model_summary.usage += usage
+        model_summary.cost += event_cost
+
+    stamps = [
+        event.timestamp
+        for session in sessions
+        for event in session.events
+        if not event.failed
+        and event.timestamp is not None
+        and date_range.contains(event.timestamp)
+        and (
+            root(session),
+            granularity.bucket(local_date(event.timestamp)),
         )
+        in billable_buckets
+    ]
+    for day, duration in active_by_day(stamps).items():
+        bucket = granularity.bucket(day)
+        if date_range.contains_day(day) and bucket in summaries:
+            summaries[bucket].active_time += duration
+
+    for bucket, values in models.items():
+        summaries[bucket].models = sorted(
+            values.values(),
+            key=lambda x: (-x.usage.total, x.provider, x.model, x.fast),
+        )
+    return dict(sorted(summaries.items()))
+
+
+def stats_by(
+    sessions: list[Session],
+    date_range: DateRange,
+    config: Config,
+    by: StatsBy,
+) -> list[Stat]:
+    events = billable_events(sessions)
+    bounded = date_range.since is not None or date_range.until is not None
+    billable_roots = {
+        root(session)
+        for session, event in events
+        if not bounded or event.timestamp is not None and date_range.contains(event.timestamp)
     }
+    main_roots = {root(x) for x in sessions if x.is_main}
+    stats: dict[str, Stat] = {}
+    sessions_by_name: defaultdict[str, set[RootKey]] = defaultdict(set)
+    stamps_by_name: defaultdict[str, list[datetime]] = defaultdict(list)
 
     for session in sessions:
-        if id(session) not in billable_sessions:
+        session_root = root(session)
+        if session_root not in billable_roots:
             continue
+        stamps = [
+            x.timestamp
+            for x in session.events
+            if not x.failed
+            and x.timestamp is not None
+            and (not bounded or date_range.contains(x.timestamp))
+        ]
+        if not stamps:
+            continue
+        name = config.map_workdir(session.workdir, by)
+        stamps_by_name[name].extend(stamps)
+        stat = stats.setdefault(name, Stat(name))
+        first, last = min(stamps), max(stamps)
+        stat.first_activity = min(stat.first_activity, first) if stat.first_activity else first
+        stat.last_activity = max(stat.last_activity, last) if stat.last_activity else last
+        if session_root in main_roots:
+            sessions_by_name[name].add(session_root)
 
-        project = project_name(session)
-        all_stamps = [stamp for nested in session.walk() for stamp in nested.activity_stamps()]
-        if filter_by_date:
-            stamps = [
-                stamp
-                for stamp in all_stamps
-                if date_in_range(calendar_date(stamp, timezone), since, until)
-            ]
-        else:
-            stamps = all_stamps
-        events[project].extend(stamps)
+    for session, event in events:
+        if bounded and (event.timestamp is None or not date_range.contains(event.timestamp)):
+            continue
+        usage = event.usage
+        assert usage is not None
+        name = config.map_workdir(session.workdir, by)
+        stat = stats.setdefault(name, Stat(name))
+        stat.usage += usage
+        stat.cost += pricing.cost(session.provider, event.model, usage, event.speed)
 
-        if stamps:
-            summary = result.setdefault(project, ProjectSummary(project=project))
-            if session.kind == "main":
-                summary.session_count += 1
+    for name, duration in active_by_name(stamps_by_name, date_range).items():
+        if name in stats:
+            stats[name].active_time = duration
+    for name, roots in sessions_by_name.items():
+        if name in stats:
+            stats[name].sessions = len(roots)
+    return sorted(stats.values(), key=lambda x: (-x.active_time, -x.usage.total, x.name))
 
-            started, ended = min(stamps), max(stamps)
-            if summary.first_activity is None or started < summary.first_activity:
-                summary.first_activity = started
-            if summary.last_activity is None or ended > summary.last_activity:
-                summary.last_activity = ended
 
-    for session, message in messages:
-        if filter_by_date:
-            if message.timestamp is None:
+def combine_stats(stats: Iterable[Stat]) -> Stat:
+    total = Stat("total")
+    for stat in stats:
+        total.sessions += stat.sessions
+        total.usage += stat.usage
+        total.cost += stat.cost
+        total.active_time += stat.active_time
+        if stat.first_activity is not None:
+            total.first_activity = (
+                min(total.first_activity, stat.first_activity)
+                if total.first_activity
+                else stat.first_activity
+            )
+        if stat.last_activity is not None:
+            total.last_activity = (
+                max(total.last_activity, stat.last_activity)
+                if total.last_activity
+                else stat.last_activity
+            )
+    return total
+
+
+def billable_events(sessions: list[Session]) -> list[tuple[Session, Event]]:
+    Candidate = tuple[int, int]
+    anonymous: list[Candidate] = []
+    direct: dict[tuple[Provider, str, str | None], Candidate] = {}
+    sidechains: dict[tuple[Provider, str], Candidate] = {}
+
+    for si, session in enumerate(sessions):
+        for ei, event in enumerate(session.events):
+            if event.failed or event.usage is None or event.usage.total == 0:
                 continue
-            day = calendar_date(message.timestamp, timezone)
-            if not date_in_range(day, since, until):
+            candidate = si, ei
+            if event.identity is None:
+                anonymous.append(candidate)
                 continue
+            id, request = event.identity
+            if event.sidechain:
+                keep_best(sidechains, (session.provider, id), candidate, sessions)
+            else:
+                keep_best(direct, (session.provider, id, request), candidate, sessions)
 
-        project = project_name(session)
-        assert message.usage is not None
-        summary = result.setdefault(project, ProjectSummary(project=project))
-        summary.usage = summary.usage + message.usage
-        summary.cost += calculate_cost(
-            message.model or "",
-            message.usage,
-            provider=session.provider,
-            speed=message.speed,
-        )
-
-    durations = active_time_by_project(
-        events,
-        since=since,
-        until=until,
-        timezone=timezone,
+    direct_ids = {(provider, id) for provider, id, _ in direct}
+    candidates = (
+        anonymous
+        + list(direct.values())
+        + [x for key, x in sidechains.items() if key not in direct_ids]
     )
-    for project, duration in durations.items():
-        result.setdefault(project, ProjectSummary(project=project)).active_time = duration
+    return [(sessions[si], sessions[si].events[ei]) for si, ei in sorted(candidates)]
 
+
+def keep_best(
+    candidates: dict,
+    key: tuple,
+    candidate: tuple[int, int],
+    sessions: list[Session],
+) -> None:
+    def rank(value: tuple[int, int]) -> tuple[int, bool]:
+        event = sessions[value[0]].events[value[1]]
+        return event.usage.total if event.usage else 0, event.speed is not None
+
+    if key not in candidates or rank(candidate) > rank(candidates[key]):
+        candidates[key] = candidate
+
+
+def root(session: Session) -> RootKey:
+    return session.provider, session.root_id
+
+
+def local_date(timestamp: datetime) -> date:
+    return timestamp.astimezone().date()
+
+
+def month_start(value: date) -> date:
+    return value.replace(day=1)
+
+
+def next_month(value: date) -> date:
+    year, month = (value.year + 1, 1) if value.month == 12 else (value.year, value.month + 1)
+    return date(year, month, 1)
+
+
+def activity_windows(stamps: Iterable[datetime]) -> list[tuple[datetime, datetime]]:
+    ordered = sorted(set(stamps))
+    if not ordered:
+        return []
+    start = ordered[0]
+    end = start + ACTIVITY_WINDOW
+    result = []
+    for stamp in ordered[1:]:
+        if stamp <= end:
+            end = max(end, stamp + ACTIVITY_WINDOW)
+        else:
+            result.append((start, end))
+            start, end = stamp, stamp + ACTIVITY_WINDOW
+    result.append((start, end))
     return result
 
 
-def date_in_range(value: date, since: date | None, until: date | None) -> bool:
-    return (since is None or value >= since) and (until is None or value <= until)
+def active_by_day(stamps: Iterable[datetime]) -> dict[date, timedelta]:
+    result: defaultdict[date, timedelta] = defaultdict(timedelta)
+    for start, end in activity_windows(stamps):
+        for day, duration in split_by_day(start, end):
+            result[day] += duration
+    return dict(sorted(result.items()))
 
 
-def period_start(
-    value: date,
-    granularity: Literal["day", "week", "month"],
-    first_weekday: int = 0,
-) -> date:
-    if granularity == "day":
-        return value
-    if granularity == "week":
-        return value - timedelta(days=(value.weekday() - first_weekday) % 7)
-    if granularity == "month":
-        return value.replace(day=1)
-    raise ValueError(f"Unsupported granularity: {granularity}")
-
-
-def calendar_date(timestamp: datetime, timezone: tzinfo | None) -> date:
-    if timestamp.tzinfo is None:
-        return timestamp.date()
-
-    return timestamp.astimezone(timezone).date()
-
-
-def activity_stamps(sessions: Iterable[Session]) -> list[datetime]:
-    return [
-        stamp
-        for session in sessions
-        for nested in session.walk()
-        for stamp in nested.activity_stamps()
-    ]
-
-
-def activity_intervals(
-    events: Iterable[datetime], window: timedelta = timedelta(minutes=5)
-) -> list[tuple[datetime, datetime]]:
-    ordered = sorted(set(events))
-    if not ordered:
-        return []
-
-    start = ordered[0]
-    end = start + window
-    intervals: list[tuple[datetime, datetime]] = []
-    for stamp in ordered[1:]:
-        interval_end = stamp + window
-        if stamp <= end:
-            end = max(end, interval_end)
-        else:
-            intervals.append((start, end))
-            start, end = stamp, interval_end
-    intervals.append((start, end))
-    return intervals
-
-
-def active_time(events: Iterable[datetime], window: timedelta = timedelta(minutes=5)) -> timedelta:
-    """Total wall-clock time covered by `events`, each active for `window` after it fires.
-
-    Overlapping windows are merged, so idle gaps between bursts of activity
-    (and between parallel sessions on the same project) aren't counted twice.
-    """
-    return sum((end - start for start, end in activity_intervals(events, window)), timedelta())
-
-
-def active_time_by_project(
-    events: dict[str, list[datetime]],
-    *,
-    since: date | None = None,
-    until: date | None = None,
-    timezone: tzinfo | None = None,
-    window: timedelta = timedelta(minutes=5),
+def active_by_name(
+    stamps_by_name: dict[str, list[datetime]],
+    date_range: DateRange,
 ) -> dict[str, timedelta]:
-    changes: defaultdict[datetime, dict[str, int]] = defaultdict(dict)
-    for project, project_events in events.items():
-        for start, end in activity_intervals(project_events, window):
-            changes[start][project] = changes[start].get(project, 0) + 1
-            changes[end][project] = changes[end].get(project, 0) - 1
+    changes: defaultdict[datetime, list[tuple[str, bool]]] = defaultdict(list)
+    for name, stamps in stamps_by_name.items():
+        for start, end in activity_windows(stamps):
+            changes[start].append((name, True))
+            changes[end].append((name, False))
 
-    result: defaultdict[str, timedelta] = defaultdict(timedelta)
+    bounded = date_range.since is not None or date_range.until is not None
     active: set[str] = set()
-    previous: datetime | None = None
-    filter_by_date = since is not None or until is not None
-
+    durations: defaultdict[str, int] = defaultdict(int)
+    previous = None
     for timestamp in sorted(changes):
         if previous is not None and active:
-            if filter_by_date:
-                parts = interval_parts_by_day(previous, timestamp, timezone)
-                for day, part in parts:
-                    if date_in_range(day, since, until):
-                        distribute_time(result, active, part)
+            if bounded:
+                for day, duration in split_by_day(previous, timestamp):
+                    if date_range.contains_day(day):
+                        distribute(durations, active, micros(duration))
             else:
-                distribute_time(result, active, timestamp - previous)
-
-        for project, change in changes[timestamp].items():
-            if change > 0:
-                active.add(project)
+                distribute(durations, active, micros(timestamp - previous))
+        for name, begins in changes[timestamp]:
+            if begins:
+                active.add(name)
             else:
-                active.discard(project)
+                active.discard(name)
         previous = timestamp
-
-    return whole_second_durations(result)
-
-
-def distribute_time(
-    result: dict[str, timedelta],
-    projects: set[str],
-    duration: timedelta,
-) -> None:
-    ordered = sorted(projects)
-    microseconds = duration // timedelta(microseconds=1)
-    share, remainder = divmod(microseconds, len(ordered))
-    for index, project in enumerate(ordered):
-        extra_microsecond = int(index < remainder)
-        result[project] += timedelta(microseconds=share + extra_microsecond)
+    return {name: timedelta(seconds=value) for name, value in whole_seconds(durations).items()}
 
 
-def whole_second_durations(durations: dict[str, timedelta]) -> dict[str, timedelta]:
-    second = timedelta(seconds=1)
-    microsecond = timedelta(microseconds=1)
-    total_seconds = sum(durations.values(), timedelta()) // second
-    project_seconds = {project: duration // second for project, duration in durations.items()}
-    remainder = total_seconds - sum(project_seconds.values())
-    by_fraction = sorted(
-        durations,
-        key=lambda project: (-((durations[project] % second) // microsecond), project),
-    )
-    for project in by_fraction[:remainder]:
-        project_seconds[project] += 1
-    return {project: timedelta(seconds=seconds) for project, seconds in project_seconds.items()}
-
-
-def interval_parts_by_day(
-    start: datetime,
-    end: datetime,
-    timezone: tzinfo | None,
-) -> Iterator[tuple[date, timedelta]]:
+def split_by_day(start: datetime, end: datetime) -> list[tuple[date, timedelta]]:
+    result = []
     cursor = start
     while cursor < end:
-        local = cursor if cursor.tzinfo is None else cursor.astimezone(timezone)
-        boundary = (local + timedelta(days=1)).replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-        if cursor.tzinfo is not None:
-            boundary = boundary.astimezone(cursor.tzinfo)
-        part_end = min(end, boundary)
-        yield local.date(), part_end - cursor
-        cursor = part_end
+        local = cursor.astimezone()
+        next_day = local.date() + timedelta(days=1)
+        boundary = datetime.combine(next_day, time.min).astimezone(UTC)
+        boundary = min(boundary, end)
+        result.append((local.date(), boundary - cursor))
+        cursor = boundary
+    return result
 
 
-def active_time_by_day(
-    events: Iterable[datetime],
-    *,
-    timezone: tzinfo | None = None,
-    window: timedelta = timedelta(minutes=5),
-) -> dict[date, timedelta]:
-    result: defaultdict[date, timedelta] = defaultdict(timedelta)
-    for start, end in activity_intervals(events, window):
-        for day, duration in interval_parts_by_day(start, end, timezone):
-            result[day] += duration
+def micros(duration: timedelta) -> int:
+    return duration // timedelta(microseconds=1)
 
-    return dict(result)
+
+def distribute(result: dict[str, int], names: set[str], duration: int) -> None:
+    share, remainder = divmod(duration, len(names))
+    for i, name in enumerate(sorted(names)):
+        result[name] = result.get(name, 0) + share + (i < remainder)
+
+
+def whole_seconds(durations: dict[str, int]) -> dict[str, int]:
+    total = sum(durations.values()) // MICROS_PER_SECOND
+    seconds = {name: value // MICROS_PER_SECOND for name, value in durations.items()}
+    remainder = total - sum(seconds.values())
+    fractions = sorted(
+        durations.items(),
+        key=lambda x: (-(x[1] % MICROS_PER_SECOND), x[0]),
+    )
+    for name, _ in fractions[:remainder]:
+        seconds[name] += 1
+    return seconds

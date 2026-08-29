@@ -1,3 +1,21 @@
+## v0.2.0 – 2026-08-29
+
+### Features
+
+- Reworked history parsing around deduplicated usage and activity events, including Claude subagents and Codex spawned or forked rollouts
+- Added the unified `stats` command with project, group, and working-directory views
+- Added strict project mapping through optional `<group>/<project>` configuration
+- Added `--no-config`, model breakdowns, compact JSON reports, Monday-based weeks, and clipped custom date ranges
+
+### Changes
+
+- Simplified the CLI to `usage` and `stats`; removed the old project, group, audit, source, alias, and Python library interfaces
+- Kept distribution as a regular Python package for `uvx`, `uv tool install`, and PyPI
+
+**[Full Changelog](https://github.com/vladkens/cctrail/compare/v0.1.1...v0.2.0)**
+
+---
+
 ## v0.1.1 – 2026-08-10
 
 ### Fixes

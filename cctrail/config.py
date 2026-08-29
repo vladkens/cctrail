@@ -1,184 +1,134 @@
 import os
-import re
 import tomllib
-from dataclasses import dataclass
-from functools import lru_cache
+from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 
 
-class ConfigError(ValueError):
-    pass
+class StatsBy(StrEnum):
+    PROJECT = "project"
+    GROUP = "group"
+    WORKDIR = "workdir"
 
 
-def config_path() -> Path:
-    local = Path.cwd() / "cctrail.toml"
-    if local.is_file():
-        return local
-
-    root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")).expanduser()
-    return root / "cctrail.toml"
-
-
-def normalize_path(value: str) -> str:
-    return os.path.normpath(os.path.expanduser(value)).replace(os.sep, "/")
-
-
-def normalized_path_list(value: object, error: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        raise ConfigError(error)
-
-    paths = []
-    for item in value:
-        if not isinstance(item, str) or not item.strip():
-            raise ConfigError(error)
-        paths.append(normalize_path(item))
-    return tuple(paths)
-
-
-def register_exact_paths(paths: tuple[str, ...], seen: set[str], error: str) -> None:
-    for path in paths:
-        if "*" in path:
-            continue
-        if path in seen:
-            raise ConfigError(f"{error}: {path}")
-        seen.add(path)
-
-
-@lru_cache(maxsize=4096)
-def match_path(path: str, pattern: str) -> bool:
-    expression = ""
-    index = 0
-    while index < len(pattern):
-        if pattern[index:] == "/**":
-            expression += "(?:/.*)?"
-            index += 3
-        elif pattern[index : index + 2] == "**":
-            if index + 2 < len(pattern) and pattern[index + 2] == "/":
-                expression += "(?:.*/)?"
-                index += 3
-            else:
-                expression += ".*"
-                index += 2
-        elif pattern[index] == "*":
-            expression += "[^/]*"
-            index += 1
-        else:
-            expression += re.escape(pattern[index])
-            index += 1
-    return re.fullmatch(expression, path) is not None
-
-
-@dataclass(frozen=True)
-class ProjectAlias:
+@dataclass
+class Project:
+    group: str
     name: str
-    paths: tuple[str, ...]
+    roots: list[Path]
 
 
-@dataclass(frozen=True)
-class ProjectGroup:
-    name: str
-    projects: tuple[str, ...]
-
-
-@dataclass(frozen=True)
+@dataclass
 class Config:
-    aliases: tuple[ProjectAlias, ...] = ()
-    groups: tuple[ProjectGroup, ...] = ()
-    claude_sources: tuple[str, ...] | None = None
-    codex_sources: tuple[str, ...] | None = None
+    projects: list[Project] = field(default_factory=list)
+    _cache: dict[str, Project | None] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
-    def load(cls, path: Path | None = None, *, required: bool = False) -> "Config":
-        path = config_path() if path is None else path
+    def load(cls) -> "Config":
+        home = home_dir()
+        if "CCTRAIL_CONFIG" in os.environ:
+            return cls.read(Path(os.environ["CCTRAIL_CONFIG"]), home)
+
+        root = os.environ.get("XDG_CONFIG_HOME")
+        path = Path(root) if root is not None else home / ".config" if home else None
+        path = path / "cctrail/config.toml" if path else None
+        return cls.read(path, home) if path and path.is_file() else cls()
+
+    @classmethod
+    def read(cls, path: Path, home: Path | None = None) -> "Config":
         try:
-            with path.open("rb") as handle:
-                value = tomllib.load(handle)
-        except FileNotFoundError:
-            if required:
-                raise ConfigError(f"config file not found: {path}") from None
-            return cls()
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            raise ConfigError(f"cannot read {path}: {exc}") from exc
+            text = path.read_text()
+        except OSError as e:
+            raise ValueError(f"failed to read {path}: {e}") from e
+        try:
+            return cls.parse(text, home)
+        except (ValueError, tomllib.TOMLDecodeError) as e:
+            raise ValueError(f"failed to parse {path}: {e}") from e
 
-        raw_aliases = value.get("aliases", {})
-        if not isinstance(raw_aliases, dict):
-            raise ConfigError("aliases must be a table")
+    @classmethod
+    def parse(cls, text: str, home: Path | None = None) -> "Config":
+        data = tomllib.loads(text)
+        if set(data) - {"projects"}:
+            key = next(iter(set(data) - {"projects"}))
+            raise ValueError(f"unknown field `{key}`")
+        raw = data.get("projects", {})
+        if not isinstance(raw, dict):
+            raise ValueError("projects must be a table")
 
-        aliases = []
-        exact_paths: set[str] = set()
-        for raw_name, raw_paths in raw_aliases.items():
-            name = str(raw_name).strip()
-            if not name:
-                raise ConfigError("project alias names cannot be empty")
-            paths = normalized_path_list(
-                raw_paths,
-                f"project alias {name} needs at least one path",
-            )
-            register_exact_paths(paths, exact_paths, "project path appears in multiple aliases")
-            aliases.append(ProjectAlias(name, paths))
+        seen: dict[Path, str] = {}
+        projects: list[Project] = []
+        for label in sorted(raw):
+            values = raw[label]
+            project = split_project(label)
+            if project is None:
+                raise ValueError(f"project key must have <group>/<project> form: {label}")
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"project has no paths: {label}")
 
-        raw_groups = value.get("groups", {})
-        if not isinstance(raw_groups, dict):
-            raise ConfigError("groups must be a table")
+            roots = []
+            for value in values:
+                if not isinstance(value, str):
+                    raise ValueError(f"project path must be a string: {label}")
+                root = expand_path(value, home)
+                if other := seen.get(root):
+                    raise ValueError(f"path belongs to both {other} and {label}: {root}")
+                seen[root] = label
+                roots.append(root)
+            group, name = project
+            projects.append(Project(group, name, roots))
+        return cls(projects)
 
-        groups = []
-        exact_projects: set[str] = set()
-        for raw_name, raw_projects in raw_groups.items():
-            name = str(raw_name).strip()
-            if not name:
-                raise ConfigError("project group names cannot be empty")
-            if name == "ungrouped":
-                raise ConfigError("ungrouped is reserved for projects without a group")
-            projects = normalized_path_list(
-                raw_projects,
-                f"project group {name} needs at least one project",
-            )
-            register_exact_paths(projects, exact_projects, "project appears in multiple groups")
-            groups.append(ProjectGroup(name, projects))
+    def map_workdir(self, workdir: str, by: StatsBy) -> str:
+        if by is StatsBy.WORKDIR:
+            return workdir
+        project = self.find_project(workdir)
+        if by is StatsBy.PROJECT and project:
+            return f"{project.group}/{project.name}"
+        if by is StatsBy.PROJECT:
+            return workdir
+        return project.group if project else "@unmapped"
 
-        raw_sources = value.get("sources", {})
-        if not isinstance(raw_sources, dict):
-            raise ConfigError("sources must be a table")
-        unknown_sources = {str(key) for key in raw_sources} - {"claude", "codex"}
-        if unknown_sources:
-            raise ConfigError(f"unknown sources: {', '.join(sorted(unknown_sources))}")
-
-        def sources(provider: str) -> tuple[str, ...] | None:
-            raw_paths = raw_sources.get(provider)
-            if raw_paths is None:
-                return None
-            return normalized_path_list(
-                raw_paths,
-                f"sources.{provider} needs at least one path",
-            )
-
-        return cls(
-            aliases=tuple(aliases),
-            groups=tuple(groups),
-            claude_sources=sources("claude"),
-            codex_sources=sources("codex"),
+    def find_project(self, workdir: str) -> Project | None:
+        if workdir in self._cache:
+            return self._cache[workdir]
+        path = Path(workdir)
+        matches = (
+            (len(root.parts), project)
+            for project in self.projects
+            for root in project.roots
+            if path == root or root in path.parents
         )
+        project = max(matches, key=lambda x: x[0], default=(0, None))[1]
+        self._cache[workdir] = project
+        return project
 
-    @lru_cache(maxsize=256)
-    def resolve_project(self, project: str) -> str:
-        normalized = normalize_path(project)
-        matches = [
-            alias.name
-            for alias in self.aliases
-            if any(match_path(normalized, pattern) for pattern in alias.paths)
-        ]
-        if len(matches) > 1:
-            raise ConfigError(f"project {project} matches multiple aliases: {', '.join(matches)}")
-        return matches[0] if matches else project
 
-    @lru_cache(maxsize=256)
-    def resolve_group(self, project: str) -> str:
-        normalized = normalize_path(project)
-        matches = [
-            group.name
-            for group in self.groups
-            if any(match_path(normalized, pattern) for pattern in group.projects)
-        ]
-        if len(matches) > 1:
-            raise ConfigError(f"project {project} matches multiple groups: {', '.join(matches)}")
-        return matches[0] if matches else "ungrouped"
+def split_project(value: str) -> tuple[str, str] | None:
+    parts = value.split("/")
+    return (parts[0], parts[1]) if len(parts) == 2 and all(parts) else None
+
+
+def expand_path(value: str, home: Path | None = None) -> Path:
+    if value == "~":
+        if home is None:
+            raise ValueError("cannot expand ~ without HOME")
+        path = home
+    elif value.startswith("~/"):
+        if home is None:
+            raise ValueError("cannot expand ~ without HOME")
+        path = home / value[2:]
+    else:
+        path = Path(value)
+    if not path.is_absolute():
+        raise ValueError(f"project path must be absolute: {value}")
+    return path
+
+
+def home_dir() -> Path | None:
+    value = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    return Path(value) if value else None

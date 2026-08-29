@@ -1,743 +1,219 @@
 import argparse
-import calendar
-import os
 import sys
-from collections import Counter, defaultdict
-from collections.abc import Iterator
-from datetime import date, datetime, timedelta
-from importlib.metadata import PackageNotFoundError, version
+from datetime import date
+from importlib.metadata import version
 from pathlib import Path
+from typing import Any
 
-from rich.console import Console
-from rich.measure import Measurement
-from rich.table import Table
-from rich.text import Text
+import orjson
 
-from .claude import iter_sessions as iter_claude_sessions
-from .codex import iter_sessions as iter_codex_sessions
-from .config import Config, ConfigError
-from .history import iter_sessions
-from .metrics import ModelSummary, ProjectSummary, by_project, usage_by_period, usage_messages
-from .models import Session, Usage
-from .pricing import get_pricing
-from .utils import WorkerConfigError, json_dump
-from .week import first_weekday
-
-PERIODS = (
-    "today",
-    "yesterday",
-    "this-week",
-    "last-week",
-    "this-month",
-    "last-month",
-    "all",
-)
+from . import metrics, output, pricing
+from .config import Config, StatsBy
+from .metrics import DateRange, Granularity, Period, UsageSummary
+from .model import Provider
+from .parser import parse_history
 
 
-def parse_date(value: str) -> date:
-    return datetime.strptime(value, "%Y-%m-%d").date()
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(
+        prog="cctrail",
+        description="Report token usage and active time from local Claude Code and Codex history.",
+    )
+    root.add_argument("--version", action="version", version=f"%(prog)s {version('cctrail')}")
+    add_no_config(root)
+    commands = root.add_subparsers(dest="command", required=True, metavar="{usage,stats}")
+
+    usage = commands.add_parser("usage", help="Show token usage over time.")
+    add_no_config(usage)
+    add_report_args(usage)
+    usage.add_argument(
+        "--by",
+        dest="granularity",
+        choices=list(Granularity),
+        type=Granularity,
+        default=Granularity.DAY,
+        help="Calendar grouping.",
+    )
+    usage.add_argument("--models", action="store_true", help="Break down each period by model.")
+
+    stats = commands.add_parser(
+        "stats",
+        help="Show statistics by project, group, or working directory.",
+    )
+    add_no_config(stats)
+    add_report_args(stats)
+    stats.add_argument(
+        "--by",
+        choices=list(StatsBy),
+        type=StatsBy,
+        default=StatsBy.PROJECT,
+        help="Group statistics.",
+    )
+
+    update = commands.add_parser("update-pricing")
+    add_no_config(update)
+    return root
 
 
-def human(n: int) -> str:
-    if n >= 1_000_000_000:
-        return f"{n / 1_000_000_000:.2f}B"
-
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.2f}M"
-
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}K"
-
-    return str(n)
+def add_no_config(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--no-config",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Run without loading project configuration.",
+    )
 
 
-def money(n: float) -> str:
-    return f"${n:.2f}"
+def add_report_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("period", nargs="?", choices=list(Period), type=Period)
+    parser.add_argument("--since", type=parse_date, metavar="YYYY-MM-DD")
+    parser.add_argument("--until", type=parse_date, metavar="YYYY-MM-DD")
+    parser.add_argument("--provider", choices=list(Provider), type=Provider)
+    parser.add_argument("--json", action="store_true", help="Output machine-readable JSON.")
 
 
-def duration(value: timedelta) -> str:
-    minutes = int((value.total_seconds() + 30) // 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}h {minutes:02d}m"
-
-
-def format_local_date(value: datetime) -> str:
-    if value.tzinfo is not None:
-        value = value.astimezone()
-
-    return value.date().isoformat()
-
-
-def project_label(project: str, *, full: bool) -> str:
-    if full:
-        return project
-
+def main(argv: list[str] | None = None) -> int:
+    root = parser()
+    args = root.parse_args(argv)
+    if getattr(args, "period", None) and (args.since or args.until):
+        root.error("a period cannot be combined with --since or --until")
     try:
-        relative = Path(project).relative_to(Path.home())
-    except ValueError:
-        return project
-    return "~" if not relative.parts else f"~/{relative}"
+        if args.command == "usage":
+            run_usage(args)
+        elif args.command == "stats":
+            run_stats(args)
+        else:
+            update_pricing()
+    except (OSError, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 2
+    return 0
 
 
-def week_start(value: date, first_weekday: int) -> date:
-    return value - timedelta(days=(value.weekday() - first_weekday) % 7)
-
-
-def month_start(value: date) -> date:
-    return value.replace(day=1)
-
-
-def next_month(value: date) -> date:
-    return (value.replace(day=28) + timedelta(days=4)).replace(day=1)
-
-
-def period_range(
-    period: str | None,
-    *,
-    today: date | None = None,
-    first_weekday: int = calendar.MONDAY,
-) -> tuple[date | None, date | None]:
-    today = today or date.today()
-    if period in (None, "all"):
-        return None, None
-    if period == "today":
-        return today, today
-    if period == "yesterday":
-        yesterday = today - timedelta(days=1)
-        return yesterday, yesterday
-    if period == "this-week":
-        start = week_start(today, first_weekday)
-        return start, start + timedelta(days=6)
-    if period == "last-week":
-        end = week_start(today, first_weekday) - timedelta(days=1)
-        return end - timedelta(days=6), end
-    if period == "this-month":
-        start = month_start(today)
-        return start, next_month(start) - timedelta(days=1)
-    if period == "last-month":
-        end = month_start(today) - timedelta(days=1)
-        return month_start(end), end
-
-    raise ValueError(f"Unsupported period: {period}")
-
-
-def date_range(args: argparse.Namespace) -> tuple[date | None, date | None]:
-    if args.period is None:
-        return args.since, args.until
-    return period_range(args.period, first_weekday=first_weekday())
-
-
-def period_label(
-    value: date,
-    granularity: str,
-    *,
-    since: date | None = None,
-    until: date | None = None,
-) -> str:
-    if granularity == "day":
-        return value.isoformat()
-    if granularity == "week":
-        end = value + timedelta(days=6)
-    else:
-        end = next_month(value) - timedelta(days=1)
-
-    start = max(value, since) if since is not None else value
-    end = min(end, until) if until is not None else end
-    if start == value and granularity == "month" and end == next_month(value) - timedelta(days=1):
-        return value.strftime("%Y-%m")
-    if start == end:
-        return start.isoformat()
-    return f"{start.isoformat()} – {end.strftime('%m-%d')}"
-
-
-def model_label(summary: ModelSummary) -> Text:
-    suffix = " (fast)" if summary.speed == "fast" else ""
-    return Text(f"  {summary.provider}/{summary.model}{suffix}", style="default")
-
-
-def add_usage_columns(table: Table, *, full: bool, models: bool, granularity: str) -> None:
-    label = {"day": "Date", "week": "Week", "month": "Month"}[granularity]
-    if models:
-        label += " / Model"
-
-    columns = [(label, "cyan"), ("Input", None), ("Output", None)]
-    if full:
-        columns += [("Reasoning", None), ("Cache W", None), ("Cache R", None)]
-    columns += [("Total", None), ("Cost", "green"), ("Time", "yellow")]
-    for column, style in columns:
-        table.add_column(
-            column,
-            justify="right" if column != label else "left",
-            style=style,
-            no_wrap=True,
-        )
-
-
-def usage_row(
-    label: str | Text,
-    usage: Usage,
-    cost: float,
-    active_time: timedelta | None,
-    *,
-    full: bool,
-) -> tuple[str | Text, ...]:
-    values: list[str | Text] = [label, human(usage.input), human(usage.output)]
-    if full:
-        values += [human(usage.reasoning), human(usage.cache_write), human(usage.cache_read)]
-    values += [
-        human(usage.total),
-        money(cost),
-        duration(active_time) if active_time is not None else "",
-    ]
-    return tuple(values)
-
-
-def print_table(table: Table) -> None:
-    console = Console()
-    required_width = Measurement.get(console, console.options.update_width(1000), table).maximum
-    console.width = max(console.width, required_width)
-    console.print(table)
-
-
-def usage_json(usage: Usage) -> dict[str, int]:
-    return {
-        "input": usage.input,
-        "cache_write_5m": usage.cache_write_5m,
-        "cache_write_1h": usage.cache_write_1h,
-        "cache_write": usage.cache_write,
-        "cache_read": usage.cache_read,
-        "output": usage.output,
-        "reasoning": usage.reasoning,
-        "total": usage.total,
-    }
-
-
-def project_summary_json(summary: ProjectSummary) -> dict[str, object]:
-    return {
-        "sessions": summary.session_count,
-        "usage": usage_json(summary.usage),
-        "cost_usd": summary.cost,
-        "active_seconds": int(summary.active_time.total_seconds()),
-        "first_activity": summary.first_activity.isoformat() if summary.first_activity else None,
-        "last_activity": summary.last_activity.isoformat() if summary.last_activity else None,
-    }
-
-
-def combine_project_summaries(
-    summaries: list[ProjectSummary],
-    *,
-    name: str = "total",
-) -> ProjectSummary:
-    total = ProjectSummary(project=name)
-    for summary in summaries:
-        total.session_count += summary.session_count
-        total.usage = total.usage + summary.usage
+def run_usage(args: argparse.Namespace) -> None:
+    date_range = DateRange.resolve(args.period, args.since, args.until)
+    sessions = parse_history(args.provider)
+    granularity = args.granularity
+    buckets = metrics.usage_by_period(sessions, granularity, date_range)
+    total = UsageSummary()
+    for summary in buckets.values():
+        total.usage += summary.usage
         total.cost += summary.cost
         total.active_time += summary.active_time
-        if total.first_activity is None or (
-            summary.first_activity is not None and summary.first_activity < total.first_activity
-        ):
-            total.first_activity = summary.first_activity
-        if total.last_activity is None or (
-            summary.last_activity is not None and summary.last_activity > total.last_activity
-        ):
-            total.last_activity = summary.last_activity
-    return total
-
-
-def print_json(value: object) -> None:
-    sys.stdout.write(json_dump(value) + "\n")
-
-
-def query_json(args: argparse.Namespace, since: date | None, until: date | None) -> dict:
-    return {
-        "period": args.period,
-        "since": since.isoformat() if since else None,
-        "until": until.isoformat() if until else None,
-        "provider": args.provider,
-    }
-
-
-def bucket_range(
-    value: date,
-    granularity: str,
-    since: date | None,
-    until: date | None,
-) -> tuple[date, date]:
-    if granularity == "day":
-        end = value
-    elif granularity == "week":
-        end = value + timedelta(days=6)
-    else:
-        end = next_month(value) - timedelta(days=1)
-    return max(value, since) if since else value, min(end, until) if until else end
-
-
-def cmd_usage(args: argparse.Namespace) -> None:
-    since, until = date_range(args)
-    buckets = usage_by_period(
-        filtered_sessions(args),
-        granularity=args.granularity,
-        since=since,
-        until=until,
-        first_weekday=first_weekday(),
-    )
-
-    table = Table(box=None, header_style="bold", pad_edge=False, collapse_padding=True)
-    add_usage_columns(
-        table,
-        full=args.full,
-        models=args.models,
-        granularity=args.granularity,
-    )
-
-    total = Usage()
-    total_cost = 0.0
-    total_active = timedelta()
-    periods = []
-    for period in sorted(buckets):
-        summary = buckets[period]
-        usage = summary.usage
-        total = total + usage
-        total_cost += summary.cost
-        total_active += summary.active_time
-        start, end = bucket_range(period, args.granularity, since, until)
-        periods.append(
-            {
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-                "usage": usage_json(usage),
-                "cost_usd": summary.cost,
-                "active_seconds": int(summary.active_time.total_seconds()),
-                "models": [
-                    {
-                        "provider": model.provider,
-                        "model": model.model,
-                        "speed": model.speed,
-                        "usage": usage_json(model.usage),
-                        "cost_usd": model.cost,
-                    }
-                    for model in summary.models
-                ]
-                if args.models
-                else [],
-            }
-        )
-        if args.json:
-            continue
-        table.add_row(
-            *usage_row(
-                period_label(
-                    period,
-                    args.granularity,
-                    since=since,
-                    until=until,
-                ),
-                usage,
-                summary.cost,
-                summary.active_time,
-                full=args.full,
-            )
-        )
-        if args.models:
-            for model in summary.models:
-                table.add_row(
-                    *usage_row(
-                        model_label(model),
-                        model.usage,
-                        model.cost,
-                        None,
-                        full=args.full,
-                    )
-                )
 
     if args.json:
-        query = query_json(args, since, until)
-        query.update({"granularity": args.granularity, "models": args.models})
+        periods = []
+        for bucket, summary in buckets.items():
+            start, end = granularity.bounds(bucket, date_range)
+            periods.append(
+                {
+                    "start": str(start),
+                    "end": str(end),
+                    "usage": output.usage_json(summary.usage),
+                    "cost_usd": output.cost_json(summary.cost),
+                    "active_seconds": int(summary.active_time.total_seconds()),
+                    "models": [output.model_json(x) for x in summary.models] if args.models else [],
+                }
+            )
         print_json(
             {
                 "schema_version": 1,
                 "command": "usage",
-                "query": query,
+                "query": {
+                    "period": args.period.value if args.period else None,
+                    "since": str(date_range.since) if date_range.since else None,
+                    "until": str(date_range.until) if date_range.until else None,
+                    "provider": args.provider.value if args.provider else None,
+                    "granularity": granularity.value,
+                    "models": args.models,
+                },
                 "periods": periods,
                 "total": {
-                    "usage": usage_json(total),
-                    "cost_usd": total_cost,
-                    "active_seconds": int(total_active.total_seconds()),
+                    "usage": output.usage_json(total.usage),
+                    "cost_usd": output.cost_json(total.cost),
+                    "active_seconds": int(total.active_time.total_seconds()),
                 },
             }
         )
         return
 
-    table.add_section()
-    table.add_row(
-        *usage_row("total", total, total_cost, total_active, full=args.full),
-        style="bold",
-    )
-    print_table(table)
+    rows = []
+    for bucket, summary in buckets.items():
+        rows.append(
+            output.usage_row(
+                granularity.label(bucket, date_range),
+                summary.usage,
+                summary.cost,
+                summary.active_time,
+            )
+        )
+        if args.models:
+            for model in summary.models:
+                suffix = " (fast)" if model.fast else ""
+                rows.append(
+                    output.usage_row(
+                        f"  {model.provider.value}/{model.model}{suffix}",
+                        model.usage,
+                        model.cost,
+                        None,
+                    )
+                )
+    rows.append(output.usage_row("total", total.usage, total.cost, total.active_time))
+    label = {
+        Granularity.DAY: "Date",
+        Granularity.WEEK: "Week",
+        Granularity.MONTH: "Month",
+    }[granularity]
+    output.usage_table(f"{label} / Model" if args.models else label, rows)
 
 
-def cmd_projects(args: argparse.Namespace) -> None:
-    since, until = date_range(args)
-    projects = sorted(
-        by_project(
-            filtered_sessions(args),
-            since=since,
-            until=until,
-            project_resolver=args.config.resolve_project,
-        ).values(),
-        key=lambda p: p.usage.total,
-        reverse=True,
-    )
-    total = combine_project_summaries(projects)
+def run_stats(args: argparse.Namespace) -> None:
+    date_range = DateRange.resolve(args.period, args.since, args.until)
+    by = StatsBy.WORKDIR if getattr(args, "no_config", False) else args.by
+    config = Config() if by is StatsBy.WORKDIR else Config.load()
+    sessions = parse_history(args.provider)
+    stats = metrics.stats_by(sessions, date_range, config, by)
+    total = metrics.combine_stats(stats)
 
     if args.json:
         print_json(
             {
                 "schema_version": 1,
-                "command": "projects",
-                "query": query_json(args, since, until),
-                "projects": [
-                    {
-                        "project": project.project,
-                        **project_summary_json(project),
-                    }
-                    for project in projects
-                ],
-                "total": {
-                    "projects": len(projects),
-                    **project_summary_json(total),
+                "command": "stats",
+                "query": {
+                    "period": args.period.value if args.period else None,
+                    "since": str(date_range.since) if date_range.since else None,
+                    "until": str(date_range.until) if date_range.until else None,
+                    "provider": args.provider.value if args.provider else None,
+                    "by": by.value,
                 },
+                "groups": [output.stats_json(x, by) for x in stats],
+                "total": output.stats_total_json(total, len(stats), by),
             }
         )
         return
 
-    table = Table(box=None, header_style="bold", pad_edge=False, collapse_padding=True)
-    table.add_column("Project", style="cyan")
-    table.add_column("Sessions", justify="right")
-    table.add_column("Total tokens", justify="right")
-    table.add_column("Last active", style="dim")
-    table.add_column("Cost", justify="right", style="green")
-    table.add_column("Time", justify="right", style="yellow")
-    for project in projects:
-        table.add_row(
-            project_label(project.project, full=args.full),
-            str(project.session_count),
-            human(project.usage.total),
-            format_local_date(project.last_activity) if project.last_activity else "-",
-            money(project.cost),
-            duration(project.active_time),
-        )
-
-    table.add_section()
-    table.add_row(
-        "total",
-        str(total.session_count),
-        human(total.usage.total),
-        format_local_date(total.last_activity) if total.last_activity else "-",
-        money(total.cost),
-        duration(total.active_time),
-        style="bold",
-    )
-
-    if args.full:
-        print_table(table)
-    else:
-        Console().print(table)
+    rows = output.stats_rows(stats, by)
+    rows.append(output.stats_row(total, by))
+    output.stats_table(by, rows)
 
 
-def cmd_groups(args: argparse.Namespace) -> None:
-    since, until = date_range(args)
-    sessions = list(filtered_sessions(args))
-    projects = by_project(
-        sessions,
-        since=since,
-        until=until,
-        project_resolver=args.config.resolve_project,
-    )
-
-    grouped_projects: defaultdict[str, list[ProjectSummary]] = defaultdict(list)
-    for project in projects.values():
-        grouped_projects[args.config.resolve_group(project.project)].append(project)
-    groups = sorted(
-        (
-            combine_project_summaries(group_projects, name=group)
-            for group, group_projects in grouped_projects.items()
-        ),
-        key=lambda group: (-group.usage.total, group.project),
-    )
-    project_counts = {
-        group: len(group_projects) for group, group_projects in grouped_projects.items()
-    }
-    total = combine_project_summaries(groups)
-    total_projects = sum(project_counts.values())
-
-    if args.json:
-        print_json(
-            {
-                "schema_version": 1,
-                "command": "groups",
-                "query": query_json(args, since, until),
-                "groups": [
-                    {
-                        "group": group.project,
-                        "projects": project_counts[group.project],
-                        **project_summary_json(group),
-                    }
-                    for group in groups
-                ],
-                "total": {
-                    "groups": len(groups),
-                    "projects": total_projects,
-                    **project_summary_json(total),
-                },
-            }
-        )
-        return
-
-    table = Table(box=None, header_style="bold", pad_edge=False, collapse_padding=True)
-    table.add_column("Group", style="cyan")
-    table.add_column("Projects", justify="right")
-    table.add_column("Sessions", justify="right")
-    table.add_column("Tokens", justify="right")
-    table.add_column("Last active", style="dim")
-    table.add_column("Cost", justify="right", style="green")
-    table.add_column("Time", justify="right", style="yellow")
-    for group in groups:
-        table.add_row(
-            group.project,
-            str(project_counts[group.project]),
-            str(group.session_count),
-            human(group.usage.total),
-            format_local_date(group.last_activity) if group.last_activity else "-",
-            money(group.cost),
-            duration(group.active_time),
-        )
-    table.add_section()
-    table.add_row(
-        "total",
-        str(total_projects),
-        str(total.session_count),
-        human(total.usage.total),
-        format_local_date(total.last_activity) if total.last_activity else "-",
-        money(total.cost),
-        duration(total.active_time),
-        style="bold",
-    )
-    Console().print(table)
+def update_pricing() -> None:
+    path = Path(__file__).with_name("pricing.json")
+    pricing.update_catalog(path)
+    print(f"Updated {path}")
 
 
-def cmd_audit(args: argparse.Namespace) -> None:
-    sessions = list(filtered_sessions(args))
-    messages = usage_messages(sessions)
-    issue_messages: Counter[tuple[str, str, str]] = Counter()
-    issue_tokens: Counter[tuple[str, str, str]] = Counter()
-    total_tokens = 0
+def print_json(value: Any) -> None:
+    print(orjson.dumps(value).decode())
 
-    for session, message in messages:
-        assert message.usage is not None
-        total_tokens += message.usage.total
-        if message.model is None:
-            issue = "missing model", session.provider, "-"
-        elif get_pricing(message.model, provider=session.provider) is None:
-            issue = "missing pricing", session.provider, message.model
-        else:
-            continue
 
-        issue_messages[issue] += 1
-        issue_tokens[issue] += message.usage.total
-
-    unpriced_messages = sum(issue_messages.values())
-    unpriced_tokens = sum(issue_tokens.values())
+def parse_date(value: str) -> date:
     try:
-        current_version = version("cctrail")
-    except PackageNotFoundError:
-        current_version = "unknown"
-
-    issue_rows = []
-    for kind, provider, model in sorted(issue_messages):
-        issue = kind, provider, model
-        issue_rows.append(
-            {
-                "issue": kind,
-                "provider": provider,
-                "model": model,
-                "messages": issue_messages[issue],
-                "tokens": issue_tokens[issue],
-            }
-        )
-    if args.json:
-        print_json(
-            {
-                "schema_version": 1,
-                "command": "audit",
-                "query": {"provider": args.provider},
-                "cctrail_version": current_version,
-                "summary": {
-                    "sessions": len(sessions),
-                    "billable_messages": len(messages),
-                    "billable_tokens": total_tokens,
-                    "unpriced_messages": unpriced_messages,
-                    "unpriced_tokens": unpriced_tokens,
-                },
-                "issues": issue_rows,
-            }
-        )
-        return
-
-    summary = Table(title="Pricing audit", box=None, header_style="bold")
-    summary.add_column("Metric")
-    summary.add_column("Value", justify="right")
-    summary.add_row("cctrail version", current_version)
-    summary.add_row("Sessions", f"{len(sessions):,}")
-    summary.add_row("Billable messages", f"{len(messages):,}")
-    summary.add_row("Billable tokens", f"{total_tokens:,}")
-    summary.add_row("Unpriced messages", f"{unpriced_messages:,}")
-    summary.add_row("Unpriced tokens", f"{unpriced_tokens:,}")
-
-    console = Console()
-    console.print(summary)
-    if not issue_messages:
-        console.print("No pricing issues found.")
-        return
-
-    issues = Table(title="Pricing issues", box=None, header_style="bold")
-    issues.add_column("Issue")
-    issues.add_column("Provider")
-    issues.add_column("Model")
-    issues.add_column("Messages", justify="right")
-    issues.add_column("Tokens", justify="right")
-    for issue in sorted(issue_messages):
-        kind, provider, model = issue
-        issues.add_row(
-            kind,
-            provider,
-            model,
-            f"{issue_messages[issue]:,}",
-            f"{issue_tokens[issue]:,}",
-        )
-    console.print(issues)
+        return date.fromisoformat(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
 
 
-def add_date_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "period",
-        nargs="?",
-        choices=PERIODS,
-        metavar="PERIOD",
-        help="today, yesterday, this-week, last-week, this-month, last-month, or all",
-    )
-    parser.add_argument(
-        "--since",
-        type=parse_date,
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="start of a custom date range",
-    )
-    parser.add_argument(
-        "--until",
-        type=parse_date,
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="end of a custom date range",
-    )
-
-
-def add_provider_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--provider", choices=("claude", "codex"), help="Only include one history provider"
-    )
-
-
-def add_output_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
-
-
-def filtered_sessions(args: argparse.Namespace) -> Iterator[Session]:
-    claude_roots = None if "CLAUDE_CONFIG_DIR" in os.environ else args.config.claude_sources
-    codex_roots = None if "CODEX_HOME" in os.environ else args.config.codex_sources
-    if args.provider == "claude":
-        return iter_claude_sessions(roots=claude_roots)
-    if args.provider == "codex":
-        return iter_codex_sessions(roots=codex_roots)
-    return iter_sessions(claude_roots=claude_roots, codex_roots=codex_roots)
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="cctrail")
-    config_group = parser.add_mutually_exclusive_group()
-    config_group.add_argument(
-        "--config",
-        dest="config_path",
-        type=Path,
-        metavar="PATH",
-        help="Use a specific configuration file",
-    )
-    config_group.add_argument(
-        "--no-config",
-        action="store_true",
-        help="Run without loading a configuration file",
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    usage_parser = subparsers.add_parser("usage", help="Token usage over time")
-    add_date_arguments(usage_parser)
-    add_provider_argument(usage_parser)
-    add_output_arguments(usage_parser)
-    usage_parser.add_argument(
-        "--by",
-        choices=("day", "week", "month"),
-        default="day",
-        dest="granularity",
-        help="calendar grouping (default: day)",
-    )
-    usage_parser.add_argument(
-        "--models", action="store_true", help="Break down each period by model"
-    )
-    usage_parser.add_argument("--full", action="store_true", help="Show detailed token columns")
-    usage_parser.set_defaults(func=cmd_usage)
-
-    projects_parser = subparsers.add_parser("projects", help="Token usage aggregated by project")
-    add_date_arguments(projects_parser)
-    add_provider_argument(projects_parser)
-    add_output_arguments(projects_parser)
-    projects_parser.add_argument("--full", action="store_true", help="Show full project paths")
-    projects_parser.set_defaults(func=cmd_projects)
-
-    groups_parser = subparsers.add_parser("groups", help="Usage aggregated by project group")
-    add_date_arguments(groups_parser)
-    add_provider_argument(groups_parser)
-    add_output_arguments(groups_parser)
-    groups_parser.set_defaults(func=cmd_groups)
-
-    audit_parser = subparsers.add_parser("audit", help="Check pricing coverage")
-    add_provider_argument(audit_parser)
-    add_output_arguments(audit_parser)
-    audit_parser.set_defaults(func=cmd_audit)
-
-    args = parser.parse_args(argv)
-    if getattr(args, "period", None) is not None and (
-        args.since is not None or args.until is not None
-    ):
-        parser.error("PERIOD cannot be combined with --since or --until")
-    if getattr(args, "since", None) and getattr(args, "until", None) and args.since > args.until:
-        parser.error("--since must not be later than --until")
-
-    try:
-        if args.no_config:
-            args.config = Config()
-        elif args.config_path is not None:
-            args.config = Config.load(args.config_path.expanduser(), required=True)
-        else:
-            args.config = Config.load()
-        args.func(args)
-    except ConfigError as exc:
-        print(f"config error: {exc}", file=sys.stderr)
-        return 2
-    except WorkerConfigError as exc:
-        print(f"environment error: {exc}", file=sys.stderr)
-        return 2
-    except KeyboardInterrupt:
-        return 130
-
-    return 0
+if __name__ == "__main__":
+    raise SystemExit(main())

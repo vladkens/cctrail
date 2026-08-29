@@ -1,18 +1,18 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from urllib.request import Request, urlopen
 
-from .models import JsonTrait, Usage
-from .utils import json_load
+import orjson
 
-PROVIDERS = {"claude": "anthropic", "codex": "openai"}
-PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
+from .model import Provider, Speed, Usage
+
+CATALOG_URL = "https://models.dev/api.json"
+CATALOG_PATH = Path(__file__).with_name("pricing.json")
 
 
 @dataclass
-class Pricing(JsonTrait):
-    """Model prices in USD per million tokens."""
-
+class Price:
     input: float
     output: float
     cache_read: float | None = None
@@ -22,146 +22,144 @@ class Pricing(JsonTrait):
     long_context_output: float | None = None
     long_context_cache_read: float | None = None
     long_context_cache_write: float | None = None
-    fast_multiplier: float = 1.0
+    fast_multiplier: float | None = None
 
 
-def number(value: Any) -> int | float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+Catalog = dict[str, dict[str, Price]]
+
+
+def load_catalog(path: Path = CATALOG_PATH) -> Catalog:
+    raw = orjson.loads(path.read_bytes())
+    return {
+        provider: {model: Price(**price) for model, price in models.items()}
+        for provider, models in raw.items()
+    }
+
+
+CATALOG = load_catalog()
+
+
+def cost(
+    provider: Provider,
+    model: str | None,
+    usage: Usage,
+    speed: Speed | None,
+) -> float:
+    price = CATALOG.get(provider.pricing_key, {}).get(model or "")
+    if price is None:
+        return 0.0
+
+    long = (
+        price.long_context_threshold is not None
+        and usage.input + usage.cache_write + usage.cache_read > price.long_context_threshold
+    )
+    input_price = (
+        price.long_context_input if long and price.long_context_input is not None else price.input
+    )
+    output_price = (
+        price.long_context_output
+        if long and price.long_context_output is not None
+        else price.output
+    )
+    read = price.long_context_cache_read if long else None
+    if read is None:
+        read = price.cache_read if price.cache_read is not None else input_price
+    write = price.long_context_cache_write if long else None
+    if write is None:
+        write = price.cache_write if price.cache_write is not None else input_price * 1.25
+    dollars = (
+        usage.input * input_price
+        + usage.cache_write_5m * write
+        + usage.cache_write_1h * input_price * 2
+        + usage.cache_read * read
+        + (usage.output + usage.reasoning) * output_price
+    )
+    multiplier = (
+        price.fast_multiplier if speed is Speed.FAST and price.fast_multiplier is not None else 1.0
+    )
+    return dollars * multiplier / 1_000_000
+
+
+def update_catalog(path: Path = CATALOG_PATH) -> None:
+    catalog = download_catalog()
+    value = {
+        provider: {
+            model: {key: value for key, value in asdict(price).items() if value is not None}
+            for model, price in models.items()
+        }
+        for provider, models in catalog.items()
+    }
+    path.write_bytes(orjson.dumps(value, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS) + b"\n")
+
+
+def download_catalog() -> Catalog:
+    request = Request(CATALOG_URL, headers={"User-Agent": "cctrail"})
+    with urlopen(request, timeout=30) as response:
+        raw = orjson.loads(response.read())
+    return catalog_from_models_dev(raw)
+
+
+def catalog_from_models_dev(raw: Any) -> Catalog:
+    if not isinstance(raw, dict):
+        raise ValueError("models.dev response must be an object")
+
+    catalog: Catalog = {}
+    for provider in ("anthropic", "openai"):
+        value = raw.get(provider)
+        models = value.get("models") if isinstance(value, dict) else None
+        if not isinstance(models, dict):
+            raise ValueError(f"models.dev response has no {provider} models")
+        catalog[provider] = {}
+        for key, model in models.items():
+            if not isinstance(model, dict) or (model_price := price_from_model(model)) is None:
+                continue
+            id = model.get("id")
+            catalog[provider][id if isinstance(id, str) else key] = model_price
+    return catalog
+
+
+def price_from_model(model: dict[str, Any]) -> Price | None:
+    raw = model.get("cost")
+    if not isinstance(raw, dict):
         return None
-    return value
-
-
-def pricing_from_model(model: dict[str, Any]) -> dict[str, Any] | None:
-    cost = model.get("cost")
-    if not isinstance(cost, dict):
-        return None
-
-    input_price = number(cost.get("input"))
-    output_price = number(cost.get("output"))
+    input_price = price(raw.get("input"))
+    output_price = price(raw.get("output"))
     if input_price is None or output_price is None:
         return None
 
-    result = {"input": input_price, "output": output_price}
-    for field in ("cache_read", "cache_write"):
-        if (value := number(cost.get(field))) is not None:
-            result[field] = value
-
-    tiers = cost.get("tiers")
+    result = Price(
+        input=input_price,
+        output=output_price,
+        cache_read=price(raw.get("cache_read")),
+        cache_write=price(raw.get("cache_write")),
+    )
+    tiers = raw.get("tiers")
     if isinstance(tiers, list):
         for tier in tiers:
-            condition = tier.get("tier") if isinstance(tier, dict) else None
-            if not isinstance(condition, dict) or condition.get("type") != "context":
+            rule = tier.get("tier") if isinstance(tier, dict) else None
+            if not isinstance(rule, dict) or rule.get("type") != "context":
                 continue
-            threshold = number(condition.get("size"))
-            if threshold is None or int(threshold) != threshold:
+            at = rule.get("size")
+            if isinstance(at, bool) or not isinstance(at, int) or at < 0:
                 continue
-            result["long_context_threshold"] = int(threshold)
-            for field in PRICE_FIELDS:
-                if (value := number(tier.get(field))) is not None:
-                    result[f"long_context_{field}"] = value
+            result.long_context_threshold = at
+            result.long_context_input = price(tier.get("input"))
+            result.long_context_output = price(tier.get("output"))
+            result.long_context_cache_read = price(tier.get("cache_read"))
+            result.long_context_cache_write = price(tier.get("cache_write"))
             break
 
     experimental = model.get("experimental")
     modes = experimental.get("modes") if isinstance(experimental, dict) else None
     fast = modes.get("fast") if isinstance(modes, dict) else None
     fast_cost = fast.get("cost") if isinstance(fast, dict) else None
-    fast_input = number(fast_cost.get("input")) if isinstance(fast_cost, dict) else None
+    fast_input = price(fast_cost.get("input")) if isinstance(fast_cost, dict) else None
     if fast_input is not None and input_price:
-        result["fast_multiplier"] = fast_input / input_price
-
+        result.fast_multiplier = fast_input / input_price
     return result
 
 
-def catalog_from_models_dev(
-    raw: Any, providers: tuple[str, ...] = ("anthropic", "openai")
-) -> dict[str, dict[str, dict[str, Any]]]:
-    if not isinstance(raw, dict):
-        raise ValueError("models.dev response must be an object")
-
-    result = {}
-    for provider in providers:
-        data = raw.get(provider)
-        models = data.get("models") if isinstance(data, dict) else None
-        if not isinstance(models, dict):
-            raise ValueError(f"models.dev response has no {provider} models")
-
-        entries = {}
-        for key, model in models.items():
-            if not isinstance(model, dict):
-                continue
-            model_id = model.get("id", key)
-            pricing = pricing_from_model(model)
-            if isinstance(model_id, str) and pricing is not None:
-                entries[model_id] = pricing
-        result[provider] = dict(sorted(entries.items()))
-
-    return result
-
-
-def load_catalog() -> dict[str, dict[str, Pricing]]:
-    path = Path(__file__).with_name("pricing.json")
-    raw = json_load(path.read_bytes(), {})
-    if not isinstance(raw, dict):
-        return {}
-
-    result: dict[str, dict[str, Pricing]] = {}
-    for provider, models in raw.items():
-        if not isinstance(provider, str) or not isinstance(models, dict):
-            continue
-        result[provider] = {
-            model: Pricing(**values)
-            for model, values in models.items()
-            if isinstance(model, str) and isinstance(values, dict)
-        }
-    return result
-
-
-CATALOG = load_catalog()
-
-
-def get_pricing(model: str, provider: str = "anthropic") -> Pricing | None:
-    provider = PROVIDERS.get(provider, provider)
-    return CATALOG.get(provider, {}).get(model)
-
-
-def calculate_cost(
-    model: str,
-    usage: Usage,
-    provider: str = "anthropic",
-    speed: str | None = None,
-) -> float:
-    pricing = get_pricing(model, provider)
-    if pricing is None:
-        return 0.0
-
-    input_rate = pricing.input
-    output_rate = pricing.output
-    cache_read_rate = pricing.cache_read if pricing.cache_read is not None else input_rate
-    cache_write_rate = pricing.cache_write if pricing.cache_write is not None else input_rate * 1.25
-
-    input_tokens = usage.input + usage.cache_read + usage.cache_write
-    if pricing.long_context_threshold is not None and input_tokens > pricing.long_context_threshold:
-        input_rate = (
-            pricing.long_context_input if pricing.long_context_input is not None else input_rate
-        )
-        output_rate = (
-            pricing.long_context_output if pricing.long_context_output is not None else output_rate
-        )
-        if pricing.long_context_cache_read is not None:
-            cache_read_rate = pricing.long_context_cache_read
-        elif pricing.cache_read is None:
-            cache_read_rate = input_rate
-        if pricing.long_context_cache_write is not None:
-            cache_write_rate = pricing.long_context_cache_write
-        elif pricing.cache_write is None:
-            cache_write_rate = input_rate * 1.25
-
-    cost = (
-        usage.input * input_rate
-        + usage.cache_write_5m * cache_write_rate
-        + usage.cache_write_1h * input_rate * 2
-        + usage.cache_read * cache_read_rate
-        + (usage.output + usage.reasoning) * output_rate
-    )
-    multiplier = pricing.fast_multiplier if speed == "fast" else 1.0
-    return cost * multiplier / 1_000_000
+def price(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
