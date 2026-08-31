@@ -13,7 +13,7 @@ def run(
     claude: str,
     codex: str,
     *args: str,
-    config: str = "empty.toml",
+    config: str | Path = "empty.toml",
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ | {
         "CLAUDE_CONFIG_DIR": str(FIXTURES / claude),
@@ -122,6 +122,44 @@ def test_unmapped_json_is_always_complete():
     assert value["groups"][0]["project"] == "/repo"
     assert value["groups"][0]["usage"]["total"] == 427
     assert value["groups"][0]["active_seconds"] == 310
+
+
+def test_reports_current_project(tmp_path: Path):
+    config = tmp_path / "config.toml"
+    config.write_text(f'[projects]\n"oss/demo" = ["/repo", "{Path.cwd()}"]\n')
+
+    result = run("claude/projects", "missing", "project", "--provider", "claude", config=config)
+
+    assert result.returncode == 0
+    assert "oss/demo · " in result.stdout
+    assert result.stdout.splitlines()[1].split() == ["Period", "Total", "tokens", "Cost", "Time"]
+    assert any(
+        x.startswith("all time") and "0h 05m" in x and "427" in x
+        for x in result.stdout.splitlines()
+    )
+
+    value = json(
+        run(
+            "claude/projects",
+            "missing",
+            "project",
+            "--provider",
+            "claude",
+            "--json",
+            config=config,
+        )
+    )
+    assert value["project"] == {"group": "oss", "project": "demo"}
+    assert [x["period"] for x in value["periods"]] == [
+        "today",
+        "yesterday",
+        "this-week",
+        "last-week",
+        "this-month",
+        "all",
+    ]
+    assert value["periods"][-1]["usage"]["total"] == 427
+    assert value["periods"][-1]["active_seconds"] == 310
 
 
 def test_rejects_reversed_date_range():

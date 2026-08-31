@@ -9,7 +9,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .config import StatsBy, split_project
-from .metrics import ModelSummary, Stat, combine_stats
+from .metrics import ModelSummary, Stat, UsageSummary, combine_stats
 from .model import Usage
 
 
@@ -55,6 +55,18 @@ def stats_table(
     print_table([f"Unmapped workdirs ({len(rows)})", "Time"], rows, max_first_column=60)
 
 
+def project_table(project: str, workdir: str, summaries: list[tuple[str, UsageSummary]]) -> None:
+    title = Text(project, style="bold cyan")
+    title.append(" · ", style="dim")
+    title.append(workdir_label(workdir), style="dim")
+    Console(highlight=False).print(title)
+    rows = [
+        [label, format_tokens(x.usage.total), format_cost(x.cost), format_duration(x.active_time)]
+        for label, x in summaries
+    ]
+    print_table(["Period", "Total tokens", "Cost", "Time"], rows)
+
+
 def print_table(
     headers: list[str],
     rows: list[list[str]],
@@ -79,9 +91,9 @@ def print_table(
             style = None
             if i == 0 and not value.startswith("  "):
                 style = "cyan"
-            elif i == 4:
+            elif headers[i] == "Cost":
                 style = "green"
-            elif i == 5:
+            elif headers[i] == "Time":
                 style = "yellow"
             values.append(Text(value, style=style) if style else value)
         table.add_row(*values, style="bold" if bold else None)

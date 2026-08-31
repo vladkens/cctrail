@@ -55,6 +55,11 @@ def parser() -> argparse.ArgumentParser:
         help="List unmapped working directories below the table.",
     )
 
+    project = commands.add_parser("project", help="Show activity for the current project.")
+    add_no_config(project)
+    project.add_argument("--provider", choices=list(Provider), type=Provider)
+    project.add_argument("--json", action="store_true", help="Output machine-readable JSON.")
+
     update = commands.add_parser("update-pricing", help="Download the latest pricing catalog.")
     add_no_config(update)
     update.add_argument("--output", type=Path, help=argparse.SUPPRESS)
@@ -88,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
             run_usage(args)
         elif args.command == "stats":
             run_stats(args)
+        elif args.command == "project":
+            run_project(args)
         else:
             update_pricing(args.output)
     except (OSError, ValueError) as e:
@@ -203,6 +210,68 @@ def run_stats(args: argparse.Namespace) -> None:
         return
 
     output.stats_table(by, stats, total, show_unmapped=args.show_unmapped)
+
+
+def run_project(args: argparse.Namespace) -> None:
+    config = Config() if getattr(args, "no_config", False) else Config.load()
+    workdir = Path.cwd()
+    project = config.find_project(str(workdir))
+    name = f"{project.group}/{project.name}" if project else str(workdir)
+    sessions = [
+        x
+        for x in parse_history(args.provider)
+        if config.map_workdir(x.workdir, StatsBy.PROJECT) == name
+    ]
+    days = metrics.usage_by_period(sessions, Granularity.DAY, DateRange())
+    periods = (
+        (Period.TODAY, "today"),
+        (Period.YESTERDAY, "yesterday"),
+        (Period.THIS_WEEK, "this week"),
+        (Period.LAST_WEEK, "last week"),
+        (Period.THIS_MONTH, "this month"),
+        (Period.ALL, "all time"),
+    )
+    rows = []
+    for period, label in periods:
+        date_range = DateRange.resolve(period)
+        summary = UsageSummary()
+        for day, value in days.items():
+            if not date_range.contains_day(day):
+                continue
+
+            summary.usage += value.usage
+            summary.cost += value.cost
+            summary.active_time += value.active_time
+        rows.append((period, label, summary))
+
+    if args.json:
+        print_json(
+            {
+                "schema_version": 1,
+                "command": "project",
+                "query": {
+                    "provider": args.provider.value if args.provider else None,
+                    "workdir": str(workdir),
+                },
+                "project": {
+                    "group": project.group if project else "@unmapped",
+                    "project": project.name if project else str(workdir),
+                },
+                "periods": [
+                    {
+                        "period": period.value,
+                        "usage": output.usage_json(summary.usage),
+                        "cost_usd": output.cost_json(summary.cost),
+                        "active_seconds": int(summary.active_time.total_seconds()),
+                    }
+                    for period, _, summary in rows
+                ],
+            }
+        )
+        return
+
+    title = name if project else "@unmapped"
+    output.project_table(title, str(workdir), [(label, x) for _, label, x in rows])
 
 
 def update_pricing(path: Path | None = None) -> None:
