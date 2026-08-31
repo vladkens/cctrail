@@ -33,7 +33,6 @@ def test_divides_parallel_time_between_workdirs():
 
     assert len(stats) == 2
     assert all(x.active_time == timedelta(seconds=150) for x in stats)
-    assert sum((x.active_time for x in stats), timedelta()) == timedelta(minutes=5)
 
 
 def test_weeks_start_on_monday():

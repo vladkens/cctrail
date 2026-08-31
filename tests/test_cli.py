@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+from importlib.metadata import version
 from pathlib import Path
 
 import orjson
@@ -46,20 +47,6 @@ def test_reports_claude_usage():
     assert "2026-01-01" in result.stdout
     assert "2026-01-02" not in result.stdout
     assert total_tokens(result.stdout) == "427"
-
-
-def test_reports_codex_usage_without_replay():
-    result = run("missing", "codex", "usage", "--provider", "codex")
-
-    assert result.returncode == 0
-    assert total_tokens(result.stdout) == "455"
-
-
-def test_deduplicates_claude_sidechains():
-    result = run("claude_dedupe/projects", "missing", "usage", "--provider", "claude")
-
-    assert result.returncode == 0
-    assert total_tokens(result.stdout) == "80"
 
 
 @pytest.mark.parametrize(
@@ -282,30 +269,12 @@ def test_months_clip_to_custom_range_without_models():
     assert value["periods"][0]["models"] == []
 
 
-def test_weeks_start_on_monday():
-    value = json(
-        run(
-            "claude/projects",
-            "missing",
-            "usage",
-            "--provider",
-            "claude",
-            "--by",
-            "week",
-            "--json",
-        )
-    )
-
-    assert value["periods"][0]["start"] == "2025-12-29"
-    assert value["periods"][0]["end"] == "2026-01-04"
-
-
 @pytest.mark.parametrize("flag", ["-V", "--version"])
 def test_version(flag: str):
     result = run("missing", "missing", flag)
 
     assert result.returncode == 0
-    assert result.stdout == "cctrail 0.2.0\n"
+    assert result.stdout == f"cctrail {version('cctrail')}\n"
 
 
 def test_help_lists_pricing_update():

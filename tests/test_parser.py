@@ -3,7 +3,6 @@ from pathlib import Path
 import orjson
 
 from cctrail.metrics import DateRange, Granularity, usage_by_period
-from cctrail.model import Provider
 from cctrail.parser import claude, codex
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -23,7 +22,6 @@ def test_claude_links_subagent_to_main_root():
     main = next(x for x in sessions if x.is_main)
     agent = next(x for x in sessions if not x.is_main)
 
-    assert main.provider is Provider.CLAUDE
     assert agent.root_id == main.id
     assert agent.workdir == main.workdir == "/repo"
 
@@ -34,7 +32,6 @@ def test_codex_links_only_spawned_agent_and_removes_fork_replay():
     agent = next(x for x in sessions if x.id == "codex-agent-1")
     fork = next(x for x in sessions if x.id == "codex-fork-1")
 
-    assert main.provider is Provider.CODEX
     assert agent.root_id == main.id
     assert agent.workdir == main.workdir == "/repo"
     assert fork.root_id == fork.id

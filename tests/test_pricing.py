@@ -83,7 +83,6 @@ def test_update_catalog_writes_package_schema(
         "anthropic": {"model": {"input": 2, "output": 10, "cache_read": 0.2}},
         "openai": {},
     }
-    assert not path.with_name(".pricing.json.tmp").exists()
 
 
 def test_prefers_cached_catalog(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

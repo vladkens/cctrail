@@ -1,3 +1,23 @@
+## v0.2.1 – 2026-09-01
+
+### Features
+
+- Added a current-project activity dashboard with today, yesterday, weekly, monthly, and all-time summaries
+- Added `stats --show-unmapped` to reveal individual unmapped working directories while keeping the default report compact
+
+### Fixes
+
+- Fixed tables overflowing and wrapping incorrectly in narrow terminals
+
+### Improvements
+
+- Added the `-V` shorthand for displaying the installed version
+- Added contextual project-config paths and setup guidance to `stats` output and help
+
+**Full Changelog**: https://github.com/vladkens/cctrail/compare/v0.2.0...v0.2.1
+
+---
+
 ## v0.2.0 – 2026-08-29
 
 ### Breaking Changes
