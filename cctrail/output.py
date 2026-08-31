@@ -12,6 +12,8 @@ from .config import StatsBy, split_project
 from .metrics import ModelSummary, Stat, UsageSummary, combine_stats
 from .model import Usage
 
+CONFIG_GUIDE = "https://github.com/vladkens/cctrail#projects"
+
 
 def usage_table(label: str, rows: list[list[str]]) -> None:
     headers = [label, "Input", "Output", "Total", "Cost", "Time"]
@@ -24,6 +26,8 @@ def stats_table(
     total: Stat,
     *,
     show_unmapped: bool = False,
+    config_path: Path | None = None,
+    config_exists: bool = False,
 ) -> None:
     label = {
         StatsBy.PROJECT: "Project",
@@ -48,11 +52,27 @@ def stats_table(
             f"\n[dim]{len(unmapped)} unmapped {label} · run[/dim] "
             "[cyan]cctrail stats --show-unmapped[/cyan] [dim]to list them[/dim]"
         )
+    else:
+        print()
+        rows = [[workdir_label(x.name), format_duration(x.active_time)] for x in unmapped]
+        print_table([f"Unmapped workdirs ({len(rows)})", "Time"], rows, max_first_column=60)
+
+    if config_path is None:
         return
 
-    print()
-    rows = [[workdir_label(x.name), format_duration(x.active_time)] for x in unmapped]
-    print_table([f"Unmapped workdirs ({len(rows)})", "Time"], rows, max_first_column=60)
+    console = Console(highlight=False)
+    path = workdir_label(str(config_path))
+    if config_exists:
+        console.print("Project config:", Text(path, style="cyan"), style="dim")
+        return
+
+    console.print("\nNo project config found", style="dim")
+    console.print("Create:", Text(path, style="cyan"), style="dim")
+    console.print(
+        "Setup guide:",
+        Text(CONFIG_GUIDE, style=f"cyan link {CONFIG_GUIDE}"),
+        style="dim",
+    )
 
 
 def project_table(project: str, workdir: str, summaries: list[tuple[str, UsageSummary]]) -> None:

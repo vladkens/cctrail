@@ -31,12 +31,10 @@ class Config:
     @classmethod
     def load(cls) -> "Config":
         home = home_dir()
-        if "CCTRAIL_CONFIG" in os.environ:
-            return cls.read(Path(os.environ["CCTRAIL_CONFIG"]), home)
+        path = config_path(home)
+        if "CCTRAIL_CONFIG" in os.environ and path:
+            return cls.read(path, home)
 
-        root = os.environ.get("XDG_CONFIG_HOME")
-        path = Path(root) if root is not None else home / ".config" if home else None
-        path = path / "cctrail/config.toml" if path else None
         return cls.read(path, home) if path and path.is_file() else cls()
 
     @classmethod
@@ -132,3 +130,17 @@ def expand_path(value: str, home: Path | None = None) -> Path:
 def home_dir() -> Path | None:
     value = os.environ.get("HOME") or os.environ.get("USERPROFILE")
     return Path(value) if value else None
+
+
+def config_path(home: Path | None = None) -> Path | None:
+    if "CCTRAIL_CONFIG" in os.environ:
+        return Path(os.environ["CCTRAIL_CONFIG"])
+
+    root = os.environ.get("XDG_CONFIG_HOME")
+    if root is not None:
+        root = Path(root)
+    else:
+        home = home or home_dir()
+        root = home / ".config" if home else None
+
+    return root / "cctrail/config.toml" if root else None

@@ -1,4 +1,8 @@
-from cctrail.output import print_table
+from pathlib import Path
+
+from cctrail.config import StatsBy
+from cctrail.metrics import Stat
+from cctrail.output import CONFIG_GUIDE, print_table, stats_table
 
 
 def test_preserves_nested_indent_when_truncating(capsys):
@@ -29,3 +33,19 @@ def test_table_fits_terminal_width(capsys, monkeypatch):
     )
 
     assert max(map(len, capsys.readouterr().out.splitlines())) <= 72
+
+
+def test_explains_missing_project_config(capsys):
+    path = Path("/private/tmp/cctrail/config.toml")
+
+    stats_table(
+        StatsBy.PROJECT,
+        [Stat("/repo")],
+        Stat("total"),
+        config_path=path,
+    )
+
+    output = capsys.readouterr().out
+    assert "No project config found" in output
+    assert f"Create: {path}" in output
+    assert f"Setup guide: {CONFIG_GUIDE}" in output

@@ -97,6 +97,8 @@ def test_reports_unmapped_section_total():
     assert result.returncode == 0
     assert any(x.startswith("@unmapped") and "427" in x for x in result.stdout.splitlines())
     assert "1 unmapped workdir · run cctrail stats --show-unmapped to list them" in result.stdout
+    assert "Project config:" in result.stdout
+    assert "tests/fixtures/empty.toml" in result.stdout
     assert not any(x.startswith("/repo") for x in result.stdout.splitlines())
 
 
@@ -122,6 +124,14 @@ def test_unmapped_json_is_always_complete():
     assert value["groups"][0]["project"] == "/repo"
     assert value["groups"][0]["usage"]["total"] == 427
     assert value["groups"][0]["active_seconds"] == 310
+
+
+def test_stats_help_explains_project_config():
+    result = run("missing", "missing", "stats", "--help")
+
+    assert "Project mappings:" in result.stdout
+    assert "tests/fixtures/empty.toml" in result.stdout
+    assert "https://github.com/vladkens/cctrail#projects" in result.stdout
 
 
 def test_reports_current_project(tmp_path: Path):

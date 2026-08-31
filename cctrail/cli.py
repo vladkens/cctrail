@@ -8,7 +8,7 @@ from typing import Any
 import orjson
 
 from . import metrics, output, pricing
-from .config import Config, StatsBy
+from .config import Config, StatsBy, config_path
 from .metrics import DateRange, Granularity, Period, UsageSummary
 from .model import Provider
 from .parser import parse_history
@@ -36,9 +36,16 @@ def parser() -> argparse.ArgumentParser:
     )
     usage.add_argument("--models", action="store_true", help="Break down each period by model.")
 
+    path = config_path()
+    location = output.workdir_label(str(path)) if path else None
     stats = commands.add_parser(
         "stats",
         help="Show statistics by project, group, or working directory.",
+        epilog=(
+            f"Project mappings: {location}. Setup guide: {output.CONFIG_GUIDE}"
+            if location
+            else None
+        ),
     )
     add_no_config(stats)
     add_report_args(stats)
@@ -186,6 +193,7 @@ def run_stats(args: argparse.Namespace) -> None:
     if args.show_unmapped and by is not StatsBy.PROJECT:
         raise ValueError("--show-unmapped requires --by project")
 
+    path = None if by is StatsBy.WORKDIR else config_path()
     config = Config() if by is StatsBy.WORKDIR else Config.load()
     sessions = parse_history(args.provider)
     stats = metrics.stats_by(sessions, date_range, config, by)
@@ -209,7 +217,14 @@ def run_stats(args: argparse.Namespace) -> None:
         )
         return
 
-    output.stats_table(by, stats, total, show_unmapped=args.show_unmapped)
+    output.stats_table(
+        by,
+        stats,
+        total,
+        show_unmapped=args.show_unmapped,
+        config_path=path,
+        config_exists=path.is_file() if path else False,
+    )
 
 
 def run_project(args: argparse.Namespace) -> None:
