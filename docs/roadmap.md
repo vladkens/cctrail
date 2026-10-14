@@ -19,6 +19,8 @@ Code and Codex. Tick a phase when done.
       row (#6). [Plan](plans/completed/20261014-hybrid-stats.md)
 - [x] **7. Clones by name and --all:** same-named directories fold into the one used last; `--all`
       lists every row (#7). [Plan](plans/completed/20261014-clones.md)
+- [x] **8. TUI:** `cctrail` on a terminal opens projects, models and a timeline with drill-downs
+      (#10). [Plan](plans/completed/20261015-tui.md)
 
 Later, only on request: a cache of parsed sessions keyed by file size and mtime, so a run reads
 only new history; other harnesses (Gemini CLI, opencode).

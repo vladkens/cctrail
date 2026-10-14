@@ -127,7 +127,7 @@ impl DateRange {
     Self::of(period, today)
   }
 
-  fn of(period: Period, today: Date) -> Self {
+  pub fn of(period: Period, today: Date) -> Self {
     let range = |a: Date, b: Date| Self { since: Some(a), until: Some(b) };
     let yesterday = today.yesterday().unwrap();
     let week = Granularity::Week.bucket(today);

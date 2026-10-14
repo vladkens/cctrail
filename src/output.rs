@@ -205,6 +205,21 @@ pub fn day(ts: Option<Ts>) -> String {
 
 // MARK: Reports
 
+/// Which rows fold into `other`: by project and by dir, rows (sorted by time) are listed until they
+/// cover 95% of the time and the unconfigured rest folds, at most 5% of the time. Configured
+/// projects always keep their row; JSON lists every directory.
+pub fn into_other(stats: &[Stat], total: i64, by: By, all: bool) -> Vec<bool> {
+  let mut covered = 0;
+  stats
+    .iter()
+    .map(|x| {
+      let small = !all && by != By::Group && !x.mapped && covered * 100 >= total * 95;
+      covered += x.active;
+      small && total > 0
+    })
+    .collect()
+}
+
 pub fn stats_text(
   by: By,
   stats: &[Stat],
@@ -234,20 +249,9 @@ pub fn stats_text(
     ]
   };
 
-  // By project, unconfigured directories sit beside the projects (dim). By project and by dir,
-  // rows (sorted by time) are listed until they cover 95% of the time; the unconfigured rest folds
-  // into one `other` row, at most 5% of the time. Configured projects always keep their row; JSON
-  // lists every directory.
+  // By project, unconfigured directories sit beside the projects (dim).
   let by_project = by == By::Project;
-  let mut covered = 0;
-  let small: Vec<bool> = stats
-    .iter()
-    .map(|x| {
-      let small = !all && by != By::Group && !x.mapped && covered * 100 >= total.active * 95;
-      covered += x.active;
-      small && total.active > 0
-    })
-    .collect();
+  let small = into_other(stats, total.active, by, all);
   let (mut rows, mut faint) = (vec![], vec![]);
   for (x, _) in stats.iter().zip(&small).filter(|x| !x.1) {
     if by_project && !x.mapped {
