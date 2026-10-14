@@ -1,19 +1,19 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Builds the dated price catalog (src/pricing.json) from the git history of models.dev.
+"""Builds the dated price catalog (src/pricing.tsv) from the git history of models.dev.
 
 Every version of providers/{anthropic,openai}/models/<model>.toml is a price that takes effect on
-its commit's date (committer date, UTC), as a `since` entry in a list per model. An edit within
+its commit's date (committer date, UTC): one TSV row per model and `since` date, dollars per
+million tokens, an empty cell where a price is not set. An edit within
 14 days of the model's first commit is a data fix and replaces the earlier price for all dates. A
 model removed from models.dev keeps its last price.
 
-    uv run scripts/pricing-history.py [--repo 3rd/models.dev] [--output src/pricing.json]
+    uv run scripts/pricing-history.py [--repo 3rd/models.dev] [--output src/pricing.tsv]
     uv run scripts/pricing-history.py --test
 """
 
 import argparse
-import json
 import subprocess
 import sys
 import tomllib
@@ -23,6 +23,21 @@ from pathlib import Path
 URL = "https://github.com/anomalyco/models.dev"
 PROVIDERS = ("anthropic", "openai")
 CORRECTION = timedelta(days=14)
+COLUMNS = (
+    "provider",
+    "model",
+    "since",
+    "input",
+    "output",
+    "cache_read",
+    "cache_write",
+    "long_context_threshold",
+    "long_context_input",
+    "long_context_output",
+    "long_context_cache_read",
+    "long_context_cache_write",
+    "fast_multiplier",
+)
 
 
 def price_of(data: dict) -> dict | None:
@@ -155,6 +170,29 @@ def build(repo: Path) -> dict:
     return catalog
 
 
+def cell(value: object) -> str:
+    """A number as the shortest text that reads back to it, `2` rather than `2.0`."""
+    if value is None:
+        return ""
+    text = repr(value)
+    return text.removesuffix(".0") if isinstance(value, float) else text
+
+
+def tsv(catalog: dict) -> str:
+    rows = ["\t".join(COLUMNS)]
+    for provider, models in sorted(catalog.items()):
+        for model, periods in sorted(models.items()):
+            for x in sorted(periods, key=lambda x: x["since"]):
+                row = {"provider": provider, "model": model, **x}
+                rows.append(
+                    "\t".join(
+                        cell(row.get(k)) if k not in ("provider", "model", "since") else row[k]
+                        for k in COLUMNS
+                    )
+                )
+    return "\n".join(rows) + "\n"
+
+
 def checkout(repo: Path) -> None:
     if (repo / ".git").exists():
         git(repo, "fetch", "--quiet", "origin")
@@ -237,6 +275,29 @@ def test() -> None:
         **long,
     }
     assert price_of({"cost": {"output": 1}}) is None
+
+    # The TSV: a header, rows sorted by provider, model and date, empty cells for missing prices.
+    catalog = {
+        "openai": {"b": [{"since": "2026-01-01", "input": 1.25, "output": 10.0}]},
+        "anthropic": {
+            "a": [
+                {"since": "2026-02-01", "input": 3.0, "output": 15.0, "fast_multiplier": 1.75},
+                {
+                    "since": "2026-01-01",
+                    "input": 5.0,
+                    "output": 25.0,
+                    "long_context_threshold": 200_000,
+                },
+            ][::-1]
+        },
+    }
+    lines = tsv(catalog).splitlines()
+    assert lines[0].split("\t") == list(COLUMNS)
+    assert lines[1:] == [
+        "anthropic\ta\t2026-01-01\t5\t25\t\t\t200000\t\t\t\t\t",
+        "anthropic\ta\t2026-02-01\t3\t15\t\t\t\t\t\t\t\t1.75",
+        "openai\tb\t2026-01-01\t1.25\t10\t\t\t\t\t\t\t\t",
+    ], lines
     assert price_of({"cost": {"input": True, "output": 1}}) is None
     print("ok")
 
@@ -244,7 +305,7 @@ def test() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path("3rd/models.dev"))
-    parser.add_argument("--output", type=Path, default=Path("src/pricing.json"))
+    parser.add_argument("--output", type=Path, default=Path("src/pricing.tsv"))
     parser.add_argument("--test", action="store_true", help="check the rules and exit")
     args = parser.parse_args()
     if args.test:
@@ -253,7 +314,7 @@ def main() -> None:
     checkout(args.repo)
     catalog = build(args.repo)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n")
+    args.output.write_text(tsv(catalog))
     count = sum(len(x) for x in catalog.values())
     print(f"{args.output}: {count} models")
 

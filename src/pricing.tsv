@@ -1,0 +1,143 @@
+provider	model	since	input	output	cache_read	cache_write	long_context_threshold	long_context_input	long_context_output	long_context_cache_read	long_context_cache_write	fast_multiplier
+anthropic	claude-3-5-haiku-20241022	2025-06-05	0.8	4	0.08	0.08						
+anthropic	claude-3-5-haiku-20241022	2025-06-23	0.8	4	0.08	1						
+anthropic	claude-3-5-haiku-latest	2025-10-24	0.8	4	0.08	1						
+anthropic	claude-3-5-sonnet-20240620	2025-06-05	3	15	0.3	0.3						
+anthropic	claude-3-5-sonnet-20240620	2025-06-23	3	15	0.3	3.75						
+anthropic	claude-3-5-sonnet-20241022	2025-06-05	3	15	0.3	0.3						
+anthropic	claude-3-5-sonnet-20241022	2025-06-23	3	15	0.3	3.75						
+anthropic	claude-3-7-sonnet-20250219	2025-06-05	3	15	0.3	0.3						
+anthropic	claude-3-7-sonnet-20250219	2025-06-23	3	15	0.3	3.75						
+anthropic	claude-3-7-sonnet-latest	2025-10-24	3	15	0.3	3.75						
+anthropic	claude-3-haiku-20240307	2025-06-05	0.25	1.25	0.03	0.03						
+anthropic	claude-3-haiku-20240307	2025-06-23	0.25	1.25	0.03	0.3						
+anthropic	claude-3-opus-20240229	2025-06-05	15	75	1.5	1.5						
+anthropic	claude-3-opus-20240229	2025-06-23	15	75	1.5	18.75						
+anthropic	claude-3-sonnet-20240229	2025-06-05	3	15	0.3	0.3						
+anthropic	claude-fable-5	2026-06-09	10	50	1	12.5						
+anthropic	claude-fable-5-1	2026-09-01	10	50	0.25	12.5						
+anthropic	claude-haiku-4-5	2025-10-24	1	5	0.1	1.25						
+anthropic	claude-haiku-4-5-20251001	2025-10-15	1	5	0.1	1.25						
+anthropic	claude-haiku-5-5	2026-10-07	0.1	0.5	0.01	0.125	100000	0.5	2.5	0.05	0.625	
+anthropic	claude-opus-4-0	2025-10-24	15	75	1.5	18.75						
+anthropic	claude-opus-4-1	2025-10-24	15	75	1.5	18.75						
+anthropic	claude-opus-4-1-20250805	2025-08-05	15	75	1.5	18.75						
+anthropic	claude-opus-4-20250514	2025-06-05	15	75	1.5	1.5						
+anthropic	claude-opus-4-20250514	2025-06-23	15	75	1.5	18.75						
+anthropic	claude-opus-4-5	2025-11-24	5	25	0.5	6.25						
+anthropic	claude-opus-4-5-20251101	2025-11-27	5	25	0.5	6.25						
+anthropic	claude-opus-4-6	2026-02-05	5	25	0.5	6.25	200000	10	37.5	1	12.5	
+anthropic	claude-opus-4-6	2026-03-13	5	25	0.5	6.25						
+anthropic	claude-opus-4-6	2026-04-08	5	25	0.5	6.25						6
+anthropic	claude-opus-4-6	2026-08-06	5	25	0.5	6.25						
+anthropic	claude-opus-4-6-20260205	2026-02-05	5	25	0.5	6.25	200000	10	37.5	1	12.5	
+anthropic	claude-opus-4-7	2026-04-16	5	25	0.5	6.25						
+anthropic	claude-opus-4-7	2026-05-12	5	25	0.5	6.25						6
+anthropic	claude-opus-4-7	2026-08-06	5	25	0.5	6.25						
+anthropic	claude-opus-4-8	2026-05-28	5	25	0.5	6.25						2
+anthropic	claude-opus-5	2026-07-24	5	25	0.5	6.25						2
+anthropic	claude-opus-5-5	2026-09-22	4	20	0.2	5						2
+anthropic	claude-sonnet-4-0	2025-10-24	3	15	0.3	3.75						
+anthropic	claude-sonnet-4-20250514	2025-06-04	3	15	3.75	0.3						
+anthropic	claude-sonnet-4-20250514	2025-06-23	3	15	0.3	3.75						
+anthropic	claude-sonnet-4-5	2025-10-24	3	15	0.3	3.75						
+anthropic	claude-sonnet-4-5-20250929	2025-09-29	3	15	0.3	3.75						
+anthropic	claude-sonnet-4-6	2026-02-17	3	15	0.3	3.75	200000	6	22.5	0.6	7.5	
+anthropic	claude-sonnet-4-6	2026-03-13	3	15	0.3	3.75						
+anthropic	claude-sonnet-5	2026-06-30	2	10	0.2	2.5						
+anthropic	claude-sonnet-5-5	2026-09-28	2	10	0.1	2.5						
+openai	codex-mini-latest	2025-06-05	1.5	6	0.375							
+openai	gpt-3.5-turbo	2025-07-23	0.5	1.5	1.25							
+openai	gpt-3.5-turbo	2026-05-26	0.5	1.5	0							
+openai	gpt-4	2025-06-11	10	30								
+openai	gpt-4	2025-08-07	30	60								
+openai	gpt-4-turbo	2025-06-05	10	30								
+openai	gpt-4.1	2025-06-11	2	8	0.5							
+openai	gpt-4.1	2026-10-01	2	8	0.5							1.75
+openai	gpt-4.1-mini	2025-06-11	0.4	1.6	0.1							
+openai	gpt-4.1-mini	2026-10-01	0.4	1.6	0.1							1.7499999999999998
+openai	gpt-4.1-nano	2025-06-11	0.1	0.4	0.03							
+openai	gpt-4.1-nano	2026-05-26	0.1	0.4	0.025							
+openai	gpt-4.1-nano	2026-10-01	0.1	0.4	0.025							2
+openai	gpt-4.5-preview	2025-06-11	75	150	37.5							
+openai	gpt-4o	2025-06-05	2.5	10	1.25							
+openai	gpt-4o	2026-10-01	2.5	10	1.25							1.7
+openai	gpt-4o-2024-05-13	2025-09-25	5	15								
+openai	gpt-4o-2024-05-13	2026-10-01	5	15								1.75
+openai	gpt-4o-2024-08-06	2025-09-25	2.5	10	1.25							
+openai	gpt-4o-2024-11-20	2025-09-25	2.5	10	1.25							
+openai	gpt-4o-mini	2025-06-05	0.15	0.6	0.08							
+openai	gpt-4o-mini	2026-05-26	0.15	0.6	0.075							
+openai	gpt-4o-mini	2026-10-01	0.15	0.6	0.075							1.6666666666666667
+openai	gpt-5	2025-08-07	1.25	10	0.13							
+openai	gpt-5	2026-01-20	1.25	10	0.125							
+openai	gpt-5	2026-10-01	1.25	10	0.125							2
+openai	gpt-5-chat-latest	2025-08-07	1.25	10								
+openai	gpt-5-chat-latest	2026-05-26	1.25	10	0.125							
+openai	gpt-5-codex	2025-10-14	1.25	10	0.125							
+openai	gpt-5-mini	2025-08-07	0.25	2	0.03							
+openai	gpt-5-mini	2026-01-20	0.25	2	0.025							
+openai	gpt-5-mini	2026-10-01	0.25	2	0.025							1.8
+openai	gpt-5-nano	2025-08-07	0.05	0.4	0.01							
+openai	gpt-5-nano	2026-01-20	0.05	0.4	0.005							
+openai	gpt-5-pro	2025-10-26	15	120								
+openai	gpt-5.1	2025-11-13	1.25	10	0.13							
+openai	gpt-5.1	2026-05-26	1.25	10	0.125							
+openai	gpt-5.1	2026-10-01	1.25	10	0.125							2
+openai	gpt-5.1-chat-latest	2025-11-17	1.25	10	0.125							
+openai	gpt-5.1-codex	2025-11-17	1.25	10	0.125							
+openai	gpt-5.1-codex-max	2025-12-05	1.25	10	0.125							
+openai	gpt-5.1-codex-mini	2025-11-17	0.25	2	0.025							
+openai	gpt-5.2	2025-12-11	1.75	14	0.175							
+openai	gpt-5.2	2026-10-01	1.75	14	0.175							2
+openai	gpt-5.2-chat-latest	2025-12-11	1.75	14	0.175							
+openai	gpt-5.2-codex	2026-01-10	1.75	14	0.175							
+openai	gpt-5.2-pro	2025-12-11	21	168								
+openai	gpt-5.3-chat-latest	2026-03-29	1.75	14	0.175							
+openai	gpt-5.3-codex	2026-02-05	1.75	14	0.175							
+openai	gpt-5.3-codex	2026-10-01	1.75	14	0.175							2
+openai	gpt-5.3-codex-spark	2026-02-12	1.75	14	0.175							
+openai	gpt-5.3-codex-spark-preview	2026-03-13	1.75	14	0.175							
+openai	gpt-5.4	2026-03-05	2.5	15	0.25		200000	5	22.5	0.5		
+openai	gpt-5.4	2026-04-08	2.5	15	0.25		200000	5	22.5	0.5		2
+openai	gpt-5.4	2026-05-11	2.5	15	0.25		272000	5	22.5	0.5		2
+openai	gpt-5.4-mini	2026-03-17	0.75	4.5	0.075							
+openai	gpt-5.4-mini	2026-04-08	0.75	4.5	0.075							2
+openai	gpt-5.4-nano	2026-03-17	0.2	1.25	0.02							
+openai	gpt-5.4-pro	2026-03-05	30	180			200000	60	270			
+openai	gpt-5.4-pro	2026-05-11	30	180			272000	60	270			
+openai	gpt-5.5	2026-04-23	5	30	0.5		200000	10	45	1		2.5
+openai	gpt-5.5	2026-05-11	5	30	0.5		272000	10	45	1		2.5
+openai	gpt-5.5-pro	2026-04-27	30	180			272000	60	270			
+openai	gpt-5.6	2026-07-09	5	30	0.5	6.25	272000	10	45	1	12.5	2
+openai	gpt-5.6	2026-08-25	4	20	0.4	5	272000	8	30	0.8	10	2
+openai	gpt-5.6-luna	2026-07-09	1	6	0.1	1.25	272000	2	9	0.2	2.5	2
+openai	gpt-5.6-luna	2026-07-31	0.2	1.2	0.02	0.25	272000	0.4	1.8	0.04	0.5	2
+openai	gpt-5.6-sol	2026-07-09	5	30	0.5	6.25	272000	10	45	1	12.5	2
+openai	gpt-5.6-sol	2026-08-25	4	20	0.4	5	272000	8	30	0.8	10	2
+openai	gpt-5.6-terra	2026-07-09	2.5	15	0.25	3.125	272000	5	22.5	0.5	6.25	2
+openai	gpt-5.6-terra	2026-07-31	2	12	0.2	2.5	272000	4	18	0.4	5	2
+openai	gpt-6-astra	2026-09-04	10	50	1	12.5	272000	20	75	2	25	2
+openai	gpt-6-luna	2026-09-22	0.1	0.5	0.01	0.125	272000	0.2	0.75	0.02	0.25	2
+openai	gpt-6-sol	2026-09-22	2	10	0.2	2.5	272000	4	15	0.4	5	2
+openai	gpt-6.1-sol	2026-09-29	2	10	0.1	2.5	272000	4	15	0.2	5	2
+openai	gpt-daybreak-blue-latest	2026-09-28	4	20	0.4	5	272000	8	30	0.8	10	
+openai	gpt-daybreak-red-latest	2026-09-28	12.5	75	1.25	15.625						
+openai	gpt-image-2	2026-06-18	5	30	1.25							
+openai	gpt-realtime-2.1	2026-07-10	4	24	0.4							
+openai	o1	2025-06-11	15	60	7.5							
+openai	o1-mini	2025-06-05	1.1	4.4	0.55							
+openai	o1-preview	2025-06-05	15	60	7.5							
+openai	o1-pro	2025-06-11	150	600								
+openai	o3	2025-06-11	2	8	0.5							
+openai	o3	2026-10-01	2	8	0.5							1.75
+openai	o3-deep-research	2025-06-26	10	40	2.5							
+openai	o3-mini	2025-06-11	1.1	4.4	0.55							
+openai	o3-pro	2025-06-11	20	80								
+openai	o4-mini	2025-06-11	1.1	4.4	0.28							
+openai	o4-mini	2026-05-26	1.1	4.4	0.275							
+openai	o4-mini	2026-10-01	1.1	4.4	0.275							1.8181818181818181
+openai	o4-mini-deep-research	2025-06-26	2	8	0.5							
+openai	text-embedding-3-large	2025-10-22	0.13	0								
+openai	text-embedding-3-small	2025-10-22	0.02	0								
+openai	text-embedding-ada-002	2025-10-22	0.1	0								

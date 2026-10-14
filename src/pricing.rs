@@ -9,40 +9,27 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use jiff::civil::Date;
-use serde::Deserialize;
 
 use crate::config::home_dir;
 use crate::metrics::local_date;
 use crate::model::{Provider, Speed, Ts, Usage};
 
-const BUNDLED: &str = include_str!("pricing.json");
+const BUNDLED: &str = include_str!("pricing.tsv");
 
 /// Dollars per million tokens from a day on: the models.dev price set on that day.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Price {
-  pub since: String,
-  /// `since` parsed, filled in by `parse`.
-  #[serde(skip)]
-  day: Date,
-  #[serde(default)]
-  pub cache_read: Option<f64>,
-  #[serde(default)]
-  pub cache_write: Option<f64>,
-  #[serde(default)]
-  pub fast_multiplier: Option<f64>,
+  pub since: Date,
   pub input: f64,
-  #[serde(default)]
-  pub long_context_cache_read: Option<f64>,
-  #[serde(default)]
-  pub long_context_cache_write: Option<f64>,
-  #[serde(default)]
-  pub long_context_input: Option<f64>,
-  #[serde(default)]
-  pub long_context_output: Option<f64>,
-  #[serde(default)]
-  pub long_context_threshold: Option<u64>,
   pub output: f64,
+  pub cache_read: Option<f64>,
+  pub cache_write: Option<f64>,
+  pub long_context_threshold: Option<u64>,
+  pub long_context_input: Option<f64>,
+  pub long_context_output: Option<f64>,
+  pub long_context_cache_read: Option<f64>,
+  pub long_context_cache_write: Option<f64>,
+  pub fast_multiplier: Option<f64>,
 }
 
 /// Provider (`anthropic`, `openai`) to model id to its prices, oldest first.
@@ -63,41 +50,98 @@ const STALE: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Where the downloaded catalog lives; it wins over the bundled one.
 pub fn cache_path() -> Result<PathBuf> {
   if let Some(x) = env::var_os("XDG_CACHE_HOME").filter(|x| !x.is_empty()) {
-    return Ok(PathBuf::from(x).join("cctrail/pricing.json"));
+    return Ok(PathBuf::from(x).join("cctrail/pricing.tsv"));
   }
   let Some(home) = home_dir() else { bail!("cannot find pricing cache without HOME") };
-  Ok(home.join(".cache/cctrail/pricing.json"))
+  Ok(home.join(".cache/cctrail/pricing.tsv"))
 }
 
 /// The cached catalog with its mtime when it exists and parses, else the bundled one.
 fn load(cache: Option<&Path>) -> Loaded {
   if let Some(path) = cache.filter(|x| x.is_file())
-    && let Ok(x) = std::fs::read(path).map_err(anyhow::Error::from).and_then(|x| parse(&x))
+    && let Ok(x) =
+      std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|x| parse(&x))
   {
     let mtime = std::fs::metadata(path).and_then(|x| x.modified()).ok();
     return (x, Some(mtime.unwrap_or(SystemTime::UNIX_EPOCH)));
   }
-  (parse(BUNDLED.as_bytes()).expect("bundled pricing.json"), None)
+  (parse(BUNDLED).expect("bundled pricing.tsv"), None)
 }
 
-/// A catalog file: both providers present, every model with dated prices.
-fn parse(data: &[u8]) -> Result<Catalog> {
-  let mut catalog: Catalog = serde_json::from_slice(data)?;
+/// The catalog's columns, in order (`scripts/pricing-history.py` writes them).
+const COLUMNS: [&str; 13] = [
+  "provider",
+  "model",
+  "since",
+  "input",
+  "output",
+  "cache_read",
+  "cache_write",
+  "long_context_threshold",
+  "long_context_input",
+  "long_context_output",
+  "long_context_cache_read",
+  "long_context_cache_write",
+  "fast_multiplier",
+];
+
+/// A catalog file: the header, then one row per model and date; both providers present.
+fn parse(text: &str) -> Result<Catalog> {
+  let mut lines = text.lines().enumerate().filter(|(_, x)| !x.is_empty());
+  match lines.next() {
+    Some((_, x)) if x.split('\t').eq(COLUMNS) => {}
+    _ => bail!("pricing catalog: line 1 must be the header {}", COLUMNS.join(" ")),
+  }
+
+  let mut catalog = Catalog::new();
+  for (i, line) in lines {
+    let row = parse_row(line).with_context(|| format!("pricing catalog: line {}", i + 1))?;
+    let (provider, model, price) = row;
+    catalog.entry(provider.into()).or_default().entry(model.into()).or_default().push(price);
+  }
   for provider in ["anthropic", "openai"] {
     if catalog.get(provider).is_none_or(|x| x.is_empty()) {
       bail!("pricing catalog has no {provider} prices");
     }
   }
-  for (model, prices) in catalog.values_mut().flatten() {
-    if prices.is_empty() {
-      bail!("pricing catalog has no prices for {model}");
-    }
-    for x in prices.iter_mut() {
-      x.day = x.since.parse().with_context(|| format!("{model}: since"))?;
-    }
-    prices.sort_by_key(|x| x.day);
-  }
+  catalog.values_mut().flat_map(|x| x.values_mut()).for_each(|x| x.sort_by_key(|x| x.since));
   Ok(catalog)
+}
+
+fn parse_row(line: &str) -> Result<(&str, &str, Price)> {
+  let cells: Vec<&str> = line.split('\t').collect();
+  if cells.len() != COLUMNS.len() {
+    bail!("{} cells, expected {}", cells.len(), COLUMNS.len());
+  }
+  let num = |i: usize| -> Result<Option<f64>> {
+    match cells[i] {
+      "" => Ok(None),
+      x => x.parse().map(Some).with_context(|| format!("{}: not a number: {x}", COLUMNS[i])),
+    }
+  };
+  let required = |i: usize| num(i)?.with_context(|| format!("{} is required", COLUMNS[i]));
+  let (provider, model) = (cells[0], cells[1]);
+  if provider.is_empty() || model.is_empty() {
+    bail!("provider and model are required");
+  }
+  let threshold = match cells[7] {
+    "" => None,
+    x => Some(x.parse().with_context(|| format!("long_context_threshold: not a count: {x}"))?),
+  };
+  let price = Price {
+    since: cells[2].parse().with_context(|| format!("since: not a date: {}", cells[2]))?,
+    input: required(3)?,
+    output: required(4)?,
+    cache_read: num(5)?,
+    cache_write: num(6)?,
+    long_context_threshold: threshold,
+    long_context_input: num(8)?,
+    long_context_output: num(9)?,
+    long_context_cache_read: num(10)?,
+    long_context_cache_write: num(11)?,
+    fast_multiplier: num(12)?,
+  };
+  Ok((provider, model, price))
 }
 
 /// Whether `update-pricing` may bring new prices: the bundled catalog or an old download is in use.
@@ -116,7 +160,7 @@ pub fn price(provider: Provider, model: Option<&str>, ts: Option<Ts>) -> Option<
 }
 
 fn pick(prices: &[Price], day: Option<Date>) -> Option<&Price> {
-  let i = day.map_or(prices.len(), |day| prices.partition_point(|x| x.day <= day));
+  let i = day.map_or(prices.len(), |day| prices.partition_point(|x| x.since <= day));
   prices.get(i.saturating_sub(1))
 }
 
@@ -162,12 +206,12 @@ impl Price {
 // (`scripts/pricing-history.py`) and publishes it as the `pricing` release's asset.
 
 const CATALOG_URL: &str =
-  "https://github.com/vladkens/cctrail/releases/download/pricing/pricing.json";
+  "https://github.com/vladkens/cctrail/releases/download/pricing/pricing.tsv";
 
 /// A failed automatic download waits this long before the next try.
 const RETRY: Duration = Duration::from_secs(24 * 3600);
 
-fn download(timeout: Duration) -> Result<Vec<u8>> {
+fn download(timeout: Duration) -> Result<String> {
   let mut rep = ureq::get(CATALOG_URL)
     .header("User-Agent", concat!("cctrail/", env!("CARGO_PKG_VERSION")))
     .config()
@@ -175,13 +219,13 @@ fn download(timeout: Duration) -> Result<Vec<u8>> {
     .build()
     .call()
     .with_context(|| format!("failed to download {CATALOG_URL}"))?;
-  let data = rep.body_mut().with_config().limit(64 << 20).read_to_vec()?;
+  let data = rep.body_mut().with_config().limit(64 << 20).read_to_string()?;
   parse(&data).context("downloaded pricing catalog")?;
   Ok(data)
 }
 
 /// Writes through a temporary file, so a reader never sees half a catalog.
-fn write(path: &Path, data: &[u8]) -> Result<()> {
+fn write(path: &Path, data: &str) -> Result<()> {
   if let Some(dir) = path.parent().filter(|x| !x.as_os_str().is_empty()) {
     std::fs::create_dir_all(dir)?;
   }
@@ -217,7 +261,7 @@ pub fn refresh() -> Option<Refresh> {
   if tried || !is_stale(mtime(&path), now) {
     return None;
   }
-  write(&attempt, b"").ok()?;
+  write(&attempt, "").ok()?;
 
   let (tx, rx) = mpsc::channel();
   std::thread::spawn(move || {
@@ -245,13 +289,24 @@ pub fn finish(refresh: Option<Refresh>) {
 mod tests {
   use super::*;
 
+  const HEADER: &str = "provider\tmodel\tsince\tinput\toutput\tcache_read\tcache_write\t\
+    long_context_threshold\tlong_context_input\tlong_context_output\tlong_context_cache_read\t\
+    long_context_cache_write\tfast_multiplier";
+
+  /// A catalog from rows of `provider model since input output`, the other cells empty.
+  fn tsv(rows: &[&str]) -> String {
+    let rows = rows.iter().map(|x| format!("{}\t\t\t\t\t\t\t\t", x.replace(' ', "\t")));
+    std::iter::once(HEADER.to_string()).chain(rows).collect::<Vec<_>>().join("\n")
+  }
+
   #[test]
   fn picks_the_price_of_the_day() {
-    let data = br#"{"anthropic": {"m": [
-      {"since": "2026-03-01", "input": 3, "output": 10},
-      {"since": "2026-01-01", "input": 5, "output": 10}
-    ]}, "openai": {"n": [{"since": "2026-01-01", "input": 1, "output": 2}]}}"#;
-    let catalog = parse(data).unwrap();
+    let text = tsv(&[
+      "anthropic m 2026-03-01 3 10",
+      "anthropic m 2026-01-01 5 10",
+      "openai n 2026-01-01 1 2",
+    ]);
+    let catalog = parse(&text).unwrap();
     let prices = &catalog["anthropic"]["m"];
     let input = |x: Option<&str>| pick(prices, x.map(|x| x.parse().unwrap())).unwrap().input;
 
@@ -264,26 +319,45 @@ mod tests {
   }
 
   #[test]
+  fn reads_every_column() {
+    let text = format!(
+      "{HEADER}\nanthropic\tm\t2026-01-01\t2.5\t15\t0.25\t3.125\t272000\t5\t22.5\t0.5\t6.25\t\
+       1.7499999999999998\nopenai\tn\t2026-01-01\t1\t2\t\t\t\t\t\t\t\t\n"
+    );
+    let catalog = parse(&text).unwrap();
+    let expected = Price {
+      since: "2026-01-01".parse().unwrap(),
+      input: 2.5,
+      output: 15.0,
+      cache_read: Some(0.25),
+      cache_write: Some(3.125),
+      long_context_threshold: Some(272_000),
+      long_context_input: Some(5.0),
+      long_context_output: Some(22.5),
+      long_context_cache_read: Some(0.5),
+      long_context_cache_write: Some(6.25),
+      fast_multiplier: Some(1.7499999999999998),
+    };
+    assert_eq!(catalog["anthropic"]["m"], [expected]);
+    assert_eq!(catalog["openai"]["n"][0].cache_read, None);
+  }
+
+  #[test]
   fn rejects_incomplete_catalogs() {
-    let one = r#"[{"since": "2026-01-01", "input": 1, "output": 2}]"#;
-    let ok = format!(r#"{{"anthropic": {{"m": {one}}}, "openai": {{"n": {one}}}}}"#);
-    assert!(parse(ok.as_bytes()).is_ok());
-    for bad in [
-      format!(r#"{{"anthropic": {{"m": {one}}}}}"#),
-      format!(r#"{{"anthropic": {{"m": {one}}}, "openai": {{"n": []}}}}"#),
-      format!(
-        r#"{{"anthropic": {{"m": {one}}}, "openai": {{"n": {}}}}}"#,
-        one.replace("2026-01-01", "soon")
-      ),
-      format!(
-        r#"{{"anthropic": {{"m": {one}}}, "openai": {{"n": {}}}}}"#,
-        one.replace("\"output\"", "\"x\"")
-      ),
-      // The flat format of cctrail 0.3.0's first builds.
-      r#"{"anthropic": {"m": {"input": 1, "output": 2}}, "openai": {}}"#.to_string(),
-    ] {
-      assert!(parse(bad.as_bytes()).is_err(), "{bad}");
-    }
+    let ok = ["anthropic m 2026-01-01 1 2", "openai n 2026-01-01 1 2"];
+    assert!(parse(&tsv(&ok)).is_ok());
+    let err = |rows: &[&str]| parse(&tsv(rows)).unwrap_err().to_string();
+    let chain = |rows: &[&str]| format!("{:#}", parse(&tsv(rows)).unwrap_err());
+
+    assert!(err(&ok[..1]).contains("no openai prices"));
+    assert!(chain(&[ok[0], "openai n soon 1 2"]).contains("line 3: since: not a date: soon"));
+    assert!(chain(&[ok[0], "openai n 2026-01-01 x 2"]).contains("line 3: input: not a number"));
+    assert!(chain(&[ok[0], "openai n 2026-01-01  2"]).contains("line 3: input is required"));
+    let short = format!("{HEADER}\nanthropic\tm\t2026-01-01\t1\t2");
+    assert!(format!("{:#}", parse(&short).unwrap_err()).contains("line 2: 5 cells, expected 13"));
+    assert!(parse("provider\tmodel\n").unwrap_err().to_string().contains("line 1 must be"));
+    // The JSON catalog of the first dated builds is not a catalog any more.
+    assert!(parse(r#"{"anthropic": {}, "openai": {}}"#).is_err());
   }
 
   #[test]
@@ -314,19 +388,22 @@ mod tests {
 
   #[test]
   fn bundled_catalog_parses() {
-    let catalog = parse(BUNDLED.as_bytes()).unwrap();
+    let catalog = parse(BUNDLED).unwrap();
     assert!(catalog["anthropic"].contains_key("claude-opus-5-5"));
-    assert!(catalog["openai"].contains_key("gpt-6-astra"));
+
+    // GPT-5.6 Sol's price cut, as models.dev recorded it on 2026-08-25.
+    let sol = &catalog["openai"]["gpt-5.6-sol"];
+    let input = |day: &str| pick(sol, Some(day.parse().unwrap())).unwrap().input;
+    assert_eq!((input("2026-08-01"), input("2026-09-01")), (5.0, 4.0));
   }
 
   #[test]
   fn prefers_valid_cache() {
     let dir = std::env::temp_dir().join(format!("cctrail-pricing-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("pricing.json");
+    let path = dir.join("pricing.tsv");
 
-    let one = r#"[{"since": "2026-01-01", "input": 2, "output": 10}]"#;
-    std::fs::write(&path, format!(r#"{{"anthropic": {{"a": {one}}}, "openai": {{"m": {one}}}}}"#))
+    std::fs::write(&path, tsv(&["anthropic a 2026-01-01 2 10", "openai m 2026-01-01 2 10"]))
       .unwrap();
     let (catalog, mtime) = load(Some(&path));
     assert_eq!((catalog["openai"]["m"][0].input, catalog["anthropic"].len()), (2.0, 1));
@@ -338,7 +415,7 @@ mod tests {
     };
     std::fs::write(&path, "invalid").unwrap();
     assert!(bundled(&path));
-    assert!(bundled(&dir.join("missing.json")));
+    assert!(bundled(&dir.join("missing.tsv")));
     std::fs::remove_dir_all(&dir).unwrap();
   }
 

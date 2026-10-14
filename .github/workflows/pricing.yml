@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - run: uv run scripts/pricing-history.py --test
-      - run: uv run scripts/pricing-history.py --output target/pricing.json
+      - run: uv run scripts/pricing-history.py --output target/pricing.tsv
       - name: Publish the catalog
         env:
           GH_TOKEN: ${{ github.token }}
@@ -37,4 +37,4 @@ jobs:
             gh release create pricing --target main --prerelease --title "Prices" \
               --notes "Dated model prices for cctrail, rebuilt weekly from the models.dev git history."
           fi
-          gh release upload pricing target/pricing.json --clobber
+          gh release upload pricing target/pricing.tsv --clobber

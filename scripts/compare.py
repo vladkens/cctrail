@@ -3,9 +3,9 @@
 # ///
 """Compares the Rust binary with the Python cctrail 0.2.1 on the local history.
 
-Both read the same price catalog (src/pricing.json through XDG_CACHE_HOME) and stop at yesterday,
-so sessions running now don't change the numbers between the two runs. Costs may differ by 1e-9;
-everything else must match exactly.
+Both stop at yesterday, so sessions running now don't change the numbers between the two runs.
+Costs are skipped: the Rust binary prices each day at its own rate, 0.2.1 at one snapshot.
+Everything else must match exactly.
 
     uv run scripts/compare.py [--ref "uvx cctrail==0.2.1"] [--bin target/release/cctrail]
 """
@@ -14,7 +14,6 @@ import argparse
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,10 +46,9 @@ def run(cmd: list[str], env: dict[str, str]) -> dict:
 
 
 def diff(a, b, path: str, out: list[str]) -> None:
-    if path.endswith(".cost_usd") and isinstance(a, float | int) and isinstance(b, float | int):
-        if abs(a - b) > 1e-9:
-            out.append(f"{path}: {a} != {b}")
-    elif isinstance(a, dict) and isinstance(b, dict):
+    if path.endswith(".cost_usd"):
+        return
+    if isinstance(a, dict) and isinstance(b, dict):
         for key in sorted(set(a) | set(b)):
             if path == "" and key in IGNORED:
                 continue
@@ -76,9 +74,7 @@ def main() -> int:
     yesterday = date.today() - timedelta(days=1)
     until, since = str(yesterday), str(yesterday - timedelta(days=6))
     with tempfile.TemporaryDirectory() as cache:
-        (Path(cache) / "cctrail").mkdir()
-        shutil.copy(ROOT / "src/pricing.json", Path(cache) / "cctrail/pricing.json")
-        env = os.environ | {"XDG_CACHE_HOME": cache}
+        env = os.environ | {"XDG_CACHE_HOME": cache, "CCTRAIL_NO_UPDATE": "1"}
 
         failed = 0
         for ref_args, bin_args in cases(until, since):

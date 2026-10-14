@@ -71,7 +71,7 @@ price. The dated prices come from the models.dev git history, so a change counts
 models.dev recorded it, usually a few days after the provider's announcement.
 
 The prices bundled with the release are refreshed in the background once a week into
-`~/.cache/cctrail/pricing.json`, while the history is read; `cctrail update-pricing` does it now,
+`~/.cache/cctrail/pricing.tsv`, while the history is read; `cctrail update-pricing` does it now,
 and `CCTRAIL_NO_UPDATE=1` turns the weekly check off. Tokens on models without a price are listed
 below the report.
 

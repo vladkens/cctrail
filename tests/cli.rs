@@ -43,6 +43,15 @@ fn has_line(out: &str, start: &str, end: &str) -> bool {
   out.lines().any(|x| x.starts_with(start) && x.ends_with(end))
 }
 
+/// A price catalog from `provider model since input output` rows, the other cells empty.
+fn catalog(rows: &[&str]) -> String {
+  let header = "provider\tmodel\tsince\tinput\toutput\tcache_read\tcache_write\t\
+    long_context_threshold\tlong_context_input\tlong_context_output\tlong_context_cache_read\t\
+    long_context_cache_write\tfast_multiplier";
+  let rows = rows.iter().map(|x| format!("{x}\t\t\t\t\t\t\t\t\n"));
+  format!("{header}\n{}", rows.collect::<String>())
+}
+
 fn tmp(name: &str) -> PathBuf {
   let dir = std::env::temp_dir().join(format!("cctrail-cli-{}-{name}", std::process::id()));
   std::fs::create_dir_all(&dir).unwrap();
@@ -315,9 +324,8 @@ fn warns_about_unpriced_models() {
   // A fresh download lacks the model too: updating won't help.
   run.cache = dir.join("cache");
   std::fs::create_dir_all(run.cache.join("cctrail")).unwrap();
-  let one = r#"[{"since": "2026-01-01", "input": 1, "output": 2}]"#;
-  let catalog = format!(r#"{{"anthropic": {{"a": {one}}}, "openai": {{"b": {one}}}}}"#);
-  std::fs::write(run.cache.join("cctrail/pricing.json"), catalog).unwrap();
+  let catalog = catalog(&["anthropic\ta\t2026-01-01\t1\t2", "openai\tb\t2026-01-01\t1\t2"]);
+  std::fs::write(run.cache.join("cctrail/pricing.tsv"), catalog).unwrap();
   let fresh = run.stdout(&["days"]);
   std::fs::remove_dir_all(&dir).unwrap();
 
@@ -341,11 +349,12 @@ fn prices_each_day_at_its_rate() {
   let lines = [line("2026-01-10", "a"), line("2026-02-10", "b"), late].join("\n");
   std::fs::write(dir.join("s.jsonl"), lines).unwrap();
   std::fs::create_dir_all(dir.join("cache/cctrail")).unwrap();
-  let catalog = r#"{"anthropic": {"m": [
-    {"since": "2026-01-01", "input": 5, "output": 25},
-    {"since": "2026-02-01", "input": 3, "output": 15}
-  ]}, "openai": {"n": [{"since": "2026-01-01", "input": 1, "output": 2}]}}"#;
-  std::fs::write(dir.join("cache/cctrail/pricing.json"), catalog).unwrap();
+  let catalog = catalog(&[
+    "anthropic\tm\t2026-01-01\t5\t25",
+    "anthropic\tm\t2026-02-01\t3\t15",
+    "openai\tn\t2026-01-01\t1\t2",
+  ]);
+  std::fs::write(dir.join("cache/cctrail/pricing.tsv"), catalog).unwrap();
   let mut run = Run::new("missing", "missing");
   run.claude = dir.clone();
   run.cache = dir.join("cache");

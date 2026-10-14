@@ -6,7 +6,7 @@ right. Agents carry out each change end to end by following this file; plan in
 [docs/roadmap.md](docs/roadmap.md).
 
 Each fact has one source, which this file points to: the CLI is `cctrail --help`, the config format
-and history locations the readme, prices `src/pricing.json`, dependencies `Cargo.toml`, checks and
+and history locations the readme, prices `src/pricing.tsv`, dependencies `Cargo.toml`, checks and
 CI the `Makefile` and `.github/workflows/main.yml`.
 
 ## Scope
