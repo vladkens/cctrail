@@ -7,6 +7,7 @@ mod model;
 mod output;
 mod parser;
 mod pricing;
+mod workdir;
 
 use std::process::ExitCode;
 

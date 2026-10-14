@@ -54,6 +54,12 @@ Each key has the `<group>/<project>` form. A path includes all directories below
 overlap, the longest match wins. Directories outside any project are summed up as `@unmapped`;
 `cctrail --by dir` lists them.
 
+Agent worktrees count as their repository, recognized by their path:
+`<repo>/.claude/worktrees/<name>` (any `<repo>/.<tool>/worktrees/<name>`),
+`<repo>/.worktrees/<name>` and `<repo>-worktrees/<name>`. A path configured for a single worktree still maps it on its own.
+Clones of a repository at other paths are separate directories: list each clone's path in the
+project. `--json --by dir` lists the folded paths of each directory.
+
 ## How it counts
 
 Claude history is read from `~/.claude/projects` and Codex history from `~/.codex/sessions` and

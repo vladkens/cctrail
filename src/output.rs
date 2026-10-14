@@ -338,7 +338,10 @@ pub fn group_json(x: &Stat, by: By) -> Value {
       value.insert("project".into(), json!(project));
     }
     By::Group => _ = value.insert("group".into(), json!(x.name)),
-    By::Dir => _ = value.insert("workdir".into(), json!(x.name)),
+    By::Dir => {
+      value.insert("workdir".into(), json!(x.name));
+      value.insert("paths".into(), json!(x.paths));
+    }
   }
   Value::Object(value)
 }

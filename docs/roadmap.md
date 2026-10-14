@@ -13,6 +13,8 @@ Code and Codex. Tick a phase when done.
 - [x] **4. Dated prices:** every request at its day's price from the models.dev git history,
       refreshed daily without the person's help (#3).
       [Plan](plans/completed/20261014-price-history.md)
+- [x] **5. Workdirs:** agent worktrees fold into their repository (#4).
+      [Plan](plans/completed/20261014-workdirs.md)
 
 Later, only on request: a cache of parsed sessions keyed by file size and mtime, so a run reads
 only new history; other harnesses (Gemini CLI, opencode).

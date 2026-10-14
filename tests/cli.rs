@@ -135,6 +135,35 @@ fn groups_by_dir_without_config() {
 }
 
 #[test]
+fn folds_worktrees_into_the_repository() {
+  let value = Run::new("", "").config("missing.toml").json(&["--by", "dir", "--json"]);
+  let groups = value["groups"].as_array().unwrap();
+  assert_eq!(groups.len(), 1, "{value}");
+  let worktree = format!("{REPO}/.claude/worktrees/flag");
+  assert_eq!(groups[0]["workdir"], REPO);
+  assert_eq!(groups[0]["paths"], json!([REPO, worktree]));
+  assert_eq!(groups[0]["usage"]["total"], 977);
+}
+
+#[test]
+fn maps_worktrees_with_the_repository_unless_configured() {
+  let dir = tmp("folds");
+  let config = dir.join("config.toml");
+  let worktree = format!("{REPO}/.claude/worktrees/flag");
+  let text = format!("[projects]\n\"oss/demo\" = [{REPO:?}]\n\"try/flag\" = [{worktree:?}]\n");
+  std::fs::write(&config, text).unwrap();
+  let value = Run::new("", "").config(&config).json(&["--json"]);
+  std::fs::remove_dir_all(&dir).unwrap();
+  let totals: Vec<(&Value, &Value)> = value["groups"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|x| (&x["project"], &x["usage"]["total"]))
+    .collect();
+  assert_eq!(totals, [(&json!("demo"), &json!(962)), (&json!("flag"), &json!(15))], "{value}");
+}
+
+#[test]
 fn reports_configured_projects() {
   let out =
     Run::new("claude/projects", "missing").config("config.toml").stdout(&["--provider", "claude"]);
@@ -219,7 +248,13 @@ fn reports_current_project() {
   );
 
   let value = run.json(&["here", "--provider", "claude", "--json"]);
+  // A worktree of the project reports the project.
+  let worktree = run.cwd.as_ref().unwrap().join(".worktrees/x");
+  std::fs::create_dir_all(&worktree).unwrap();
+  run.cwd = Some(worktree);
+  let inside = run.json(&["here", "--provider", "claude", "--json"]);
   std::fs::remove_dir_all(&dir).unwrap();
+  assert_eq!(inside["project"], value["project"]);
   assert_eq!(value["project"], json!({"group": "oss", "project": "demo"}));
   let periods: Vec<&str> =
     value["periods"].as_array().unwrap().iter().map(|x| x["period"].as_str().unwrap()).collect();
@@ -287,14 +322,14 @@ fn stats_json_over_all_fixtures() {
   assert_eq!(value["groups"].as_array().unwrap().len(), 1);
   let group = &value["groups"][0];
   assert_eq!((&group["group"], &group["project"]), (&json!("oss"), &json!("demo")));
-  assert_eq!(group["sessions"], 5);
-  assert_eq!(group["usage"]["total"], 962);
-  assert_eq!(group["active_seconds"], 1227);
+  assert_eq!(group["sessions"], 6);
+  assert_eq!(group["usage"]["total"], 977);
+  assert_eq!(group["active_seconds"], 1532);
   assert_eq!(value["total"]["projects"], 1);
 
   let value = Run::new("", "").config("config.toml").json(&["--by", "group", "--json"]);
   assert_eq!(value["groups"][0]["group"], "oss");
-  assert_eq!(value["groups"][0]["usage"]["total"], 962);
+  assert_eq!(value["groups"][0]["usage"]["total"], 977);
   assert_eq!(value["total"]["groups"], 1);
 }
 

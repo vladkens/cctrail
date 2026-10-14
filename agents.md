@@ -33,8 +33,9 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 ## Code
 
 - One binary crate, flat modules: `cli` (arguments, commands), `config`, `model`,
-  `parser/{claude,codex}`, `metrics`, `output` (tables, JSON), `pricing`. Keep it within ~3000
-  lines of Rust, tests excluded; simplify before growing past it.
+  `parser/{claude,codex}`, `workdir` (worktrees folded into their repository by path), `metrics`,
+  `output` (tables, JSON), `pricing`. Keep it within ~3000 lines of Rust, tests excluded; simplify
+  before growing past it.
 - Treat history as untrusted input: harnesses change formats and leave truncated lines. Skip what
   doesn't parse, never panic or fail the run on it.
 - Errors go through `anyhow` with the path or value that failed. Comment only format quirks of a
@@ -52,9 +53,11 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 - The repository is public: never put the person's own numbers (costs, tokens, hours) or private
   project names in PR bodies, review replies, commits or docs. Fixture numbers, data sizes, speed
   measurements and "identical to `main`" are fine; report the rest to the person directly.
-- Until the port is done, the reference is the Python cctrail 0.2.1 (`uvx cctrail==0.2.1`).
-  `make compare` runs both on the local history and diffs the JSON: tokens, sessions, seconds and
-  timestamps exact, costs within 1e-9.
+- `make compare REF=<binary>` runs the branch and a reference build (usually `main`) on the local
+  history: totals must match (tokens, sessions and first/last activity exact, costs within 1e-9,
+  active time within a second per group), and it lists how groups and periods moved. When grouping
+  changes on purpose, describe in the PR body which rule moved what, without the numbers. The Rust
+  port matched the Python cctrail 0.2.1 exactly.
 - Unit-test logic that can break silently, inline in `#[cfg(test)] mod tests`: deduplication,
   subagent linking, fork replay, activity windows and their split by day and between projects, date
   ranges, config mapping, pricing. `tests/` holds end-to-end CLI tests on `tests/fixtures/`.

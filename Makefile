@@ -45,9 +45,9 @@ update:
 	cargo upgrade -i
 	uv run scripts/pricing-history.py
 
-# The numbers against the Python cctrail 0.2.1 on the local history (see the script).
+# The numbers against a reference build on the local history: make compare REF=<main's binary>.
 compare: build
-	uv run scripts/compare.py
+	uv run scripts/compare.py --ref "$(REF)"
 
 # Warm runs over the full local history; bench-ref adds the Python 0.2.1.
 bench: build

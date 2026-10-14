@@ -120,7 +120,10 @@ pub struct Session {
   /// The id of the main session an agent belongs to, its own id for a main session.
   pub root_id: String,
   pub is_main: bool,
+  /// The repository directory the session ran in, worktrees folded into it.
   pub workdir: String,
+  /// The working directory as logged.
+  pub cwd: String,
   pub provider: Provider,
   pub events: Vec<Event>,
 }
@@ -132,6 +135,7 @@ impl Session {
       root_id: id.to_string(),
       is_main,
       workdir: workdir.to_string(),
+      cwd: workdir.to_string(),
       provider,
       events: vec![],
     }

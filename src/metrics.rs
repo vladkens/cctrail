@@ -215,6 +215,8 @@ pub struct Stat {
   pub active: i64,
   pub first: Option<Ts>,
   pub last: Option<Ts>,
+  /// The logged directories grouped here, sorted.
+  pub paths: Vec<String>,
 }
 
 /// Billable events as `(session, event)` indexes in history order: not failed, with usage, and
@@ -340,12 +342,13 @@ pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By
 
   // Whether a name is a configured project or group comes from the config, never from its text:
   // a working directory such as `C:/repo` looks like a `<group>/<project>` label.
-  let mut cache: HashMap<&str, (String, bool)> = HashMap::new();
+  let mut cache: HashMap<(&str, &str), (String, bool)> = HashMap::new();
   let keys: Vec<(String, bool)> = sessions
     .iter()
     .map(|x| {
-      let mapped = || by != By::Dir && config.find(&x.workdir).is_some();
-      cache.entry(&x.workdir).or_insert_with(|| (config.map(&x.workdir, by), mapped())).clone()
+      let (cwd, dir) = (x.cwd.as_str(), x.workdir.as_str());
+      let mapped = || by != By::Dir && config.find(cwd, dir).is_some();
+      cache.entry((cwd, dir)).or_insert_with(|| (config.map(cwd, dir, by), mapped())).clone()
     })
     .collect();
   let names: Vec<&str> = keys.iter().map(|x| x.0.as_str()).collect();
@@ -355,6 +358,7 @@ pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By
   let mut stats: HashMap<&str, Stat> = HashMap::new();
   let mut roots: HashMap<&str, HashSet<(Provider, &str)>> = HashMap::new();
   let mut stamps: HashMap<&str, Vec<Ts>> = HashMap::new();
+  let mut paths: HashMap<&str, BTreeSet<&str>> = HashMap::new();
   for (si, session) in sessions.iter().enumerate() {
     if !billable.contains(&session.root()) {
       continue;
@@ -363,6 +367,7 @@ pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By
       session.events.iter().filter(|e| !e.failed && in_range(e)).filter_map(|e| e.ts).collect();
     let (Some(first), Some(last)) = (own.iter().min(), own.iter().max()) else { continue };
     let name = names[si];
+    paths.entry(name).or_default().insert(&session.cwd);
     let stat = stats.entry(name).or_insert_with(|| new_stat(si));
     stat.first = Some(stat.first.map_or(*first, |x| x.min(*first)));
     stat.last = Some(stat.last.map_or(*last, |x| x.max(*last)));
@@ -378,6 +383,7 @@ pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By
       continue;
     }
     let name = names[si];
+    paths.entry(name).or_default().insert(&session.cwd);
     let stat = stats.entry(name).or_insert_with(|| new_stat(si));
     let usage = event.usage.unwrap_or_default();
     stat.usage += usage;
@@ -393,6 +399,11 @@ pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By
   for (name, x) in roots {
     if let Some(stat) = stats.get_mut(name) {
       stat.sessions = x.len();
+    }
+  }
+  for (name, x) in paths {
+    if let Some(stat) = stats.get_mut(name) {
+      stat.paths = x.into_iter().map(String::from).collect();
     }
   }
 

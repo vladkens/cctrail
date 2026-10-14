@@ -9,7 +9,7 @@ use crate::metrics::{self, DateRange, Granularity, Period, UsageSummary};
 use crate::model::{Provider, Session};
 use crate::output::{self, Term};
 use crate::parser::parse_history;
-use crate::pricing;
+use crate::{pricing, workdir};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -202,7 +202,8 @@ fn stats(args: &Args) -> Result<()> {
     By::Dir => (Config::default(), None),
     _ => (Config::load()?, config::config_path()),
   };
-  let sessions = sessions(args.provider);
+  let mut sessions = sessions(args.provider);
+  workdir::fold_sessions(&mut sessions);
   let stats = metrics::stats_by(&sessions, &range, &config, args.by);
   let total = metrics::combine_stats("total", &stats);
   let unpriced = metrics::unpriced(&sessions, &range);
@@ -278,11 +279,13 @@ fn here(args: &Args) -> Result<()> {
   ];
 
   let config = Config::load()?;
-  let workdir = std::env::current_dir()?.to_string_lossy().to_string();
-  let project = config.find(&workdir);
-  let name = project.map_or(workdir.clone(), |x| x.label());
+  let cwd = std::env::current_dir()?.to_string_lossy().to_string();
   let mut sessions = sessions(args.provider);
-  sessions.retain(|x| config.map(&x.workdir, By::Project) == name);
+  let folds = workdir::fold_sessions(&mut sessions);
+  let workdir = folds.fold(&cwd);
+  let project = config.find(&cwd, &workdir);
+  let name = config.map(&cwd, &workdir, By::Project);
+  sessions.retain(|x| config.map(&x.cwd, &x.workdir, By::Project) == name);
   let days = metrics::usage_by_period(&sessions, Granularity::Day, &DateRange::default());
   let unpriced = metrics::unpriced(&sessions, &DateRange::default());
 
@@ -309,7 +312,7 @@ fn here(args: &Args) -> Result<()> {
     return print_json(&json!({
       "schema_version": 1,
       "command": "here",
-      "query": {"provider": args.provider.map(Provider::name), "workdir": workdir},
+      "query": {"provider": args.provider.map(Provider::name), "workdir": cwd},
       "project": {
         "group": project.map_or(config::UNMAPPED, |x| &x.group),
         "project": project.map_or(&workdir, |x| &x.name),
