@@ -1,0 +1,37 @@
+name: copilot
+
+# A required check that passes only once Copilot has reviewed the pull request's head commit: its
+# reviews only comment, so they can't count as a required approval. A push turns it red again
+# until Copilot reviews the new head (the `main` ruleset requests that review on every push).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  copilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Copilot reviewed the head commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          reviewed=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
+            --jq ".[] | select(.user.login == \"copilot-pull-request-reviewer[bot]\" and .commit_id == \"$HEAD\") | .id")
+          if [ -z "$reviewed" ]; then
+            echo "::error::Copilot hasn't reviewed $HEAD yet"
+            exit 1
+          fi
+          echo "Copilot reviewed $HEAD"
