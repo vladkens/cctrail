@@ -1,7 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
 //! Colors from the terminal's own palette, the same for an entity on every screen: names and counts
-//! in the default foreground, time yellow, cost green; the selected period, tab and metric cyan;
+//! in the default foreground, time yellow, cost green; the selected period, tab and bar cyan;
 //! dark gray only for headers, separators, hints and inactive choices. The selected row is one
 //! even subtle bar across its width. Tables keep an equal gutter left (the `▶` column) and right.
 
@@ -10,15 +10,15 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as Text};
 use ratatui::widgets::{
-  Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row as TableRow, Sparkline,
-  Table, TableState,
+  Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row as TableRow, Scrollbar,
+  ScrollbarOrientation, ScrollbarState, Table, TableState,
 };
 
-use super::{App, Col, Hits, Metric, Row, Span, Tab};
+use super::{App, Col, Hits, Row, Sort, Span, Tab};
 use crate::output::duration;
 
 const DIM: Style = Style::new().fg(Color::DarkGray);
-/// The selected period, tab and metric, and the keys.
+/// The selected period and tab, and the keys.
 const KEY: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
 const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
 const TEXT: Style = Style::new().fg(Color::Reset);
@@ -31,7 +31,7 @@ const SELECTED: Style = Style::new().bg(Color::Indexed(236));
 const VERSION: &str = concat!("cctrail v", env!("CARGO_PKG_VERSION"));
 /// The `▶ ` column on the left, matched by as much room on the right.
 const GUTTER: u16 = 2;
-/// Room for a sort mark (` ▼`) after a header; a column fits its header, the mark and a space.
+/// Room for a sort arrow (` ↓`) after a header; a column fits its header, the mark and a space.
 const MARK: u16 = 2;
 
 fn dim(s: impl Into<String>) -> Text<'static> {
@@ -172,8 +172,10 @@ fn header(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     spans.push(Text::styled(label, if s == app.span { KEY } else { DIM }));
     spans.push(Text::raw("  "));
   }
+  let provider = app.prov.map_or("claude+codex", |x| x.name());
+  hits.provider = Rect::new(x + 1, area.y, provider.len() as u16, 1).intersection(area);
   spans.push(Text::raw(" "));
-  spans.push(Text::styled(app.prov.map_or("claude+codex", |x| x.name()), TEXT));
+  spans.push(Text::styled(provider, TEXT));
   let line = Line::from(spans);
   let free = (area.width as usize).saturating_sub(line.width());
   if free <= VERSION.len() + 2 {
@@ -186,7 +188,7 @@ fn header(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   f.render_widget(Paragraph::new(Text::styled(VERSION, TEXT)), right);
 }
 
-/// Tabs, the metric, the filter, cut with `…` at the edge, and the unpriced note when it fits.
+/// Tabs and the filter, cut with `…` at the edge, and the unpriced note when it fits.
 fn tab_line(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let mut spans = vec![Text::raw(" ")];
   let mut x = area.x + 1;
@@ -201,10 +203,8 @@ fn tab_line(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     spans.push(Text::styled(label, if tab == app.tab { KEY } else { DIM }));
     spans.push(Text::raw("  "));
   }
-  spans.push(dim(" metric "));
-  spans.push(Text::styled(app.metric.label(), KEY));
   if !app.filter.is_empty() || app.typing {
-    spans.push(dim("   filter "));
+    spans.push(dim(" filter "));
     let caret = if app.typing { "▏" } else { "" };
     spans.push(Text::styled(format!("{}{caret}", app.filter), TEXT));
   }
@@ -213,8 +213,10 @@ fn tab_line(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     let names: Vec<&str> = app.unpriced.iter().map(|x| x.0.as_str()).collect();
     let note = format!("{} {}", toks(t), names.join(", "));
     let room = (area.width as usize).saturating_sub(1 + Line::from(spans.clone()).width());
-    if 12 + note.chars().count() <= room {
-      spans.push(dim("   unpriced "));
+    // Three spaces from what is before it, as between the tabs and the filter.
+    let gap = if app.filter.is_empty() && !app.typing { " " } else { "   " };
+    if gap.len() + 9 + note.chars().count() <= room {
+      spans.push(dim(format!("{gap}unpriced ")));
       spans.push(Text::styled(note, TEXT));
     }
   }
@@ -223,10 +225,11 @@ fn tab_line(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   f.render_widget(Paragraph::new(lines), area);
 }
 
-/// The header with its sort mark: `▼` most first (names A to Z), `▲` reversed.
-fn head_label(app: &App, col: Col, label: &str) -> String {
-  match app.sort {
-    Some((c, rev)) if c == col => format!("{label} {}", if rev { "▲" } else { "▼" }),
+/// The header with the sort arrow on the sorted column, as macmon's: `↓` most first, `↑` least
+/// first (names A to Z).
+fn head_label(sort: Sort, col: Col, label: &str) -> String {
+  match sort {
+    (c, most) if c == col => format!("{label} {}", if most { "↓" } else { "↑" }),
     _ => label.to_string(),
   }
 }
@@ -238,8 +241,9 @@ struct Column {
   width: Constraint,
 }
 
-/// Lays out rows under a header, the `total` row right under them, both gutters, and records where
-/// the header columns and rows went. Returns the height used.
+/// Lays out rows under a header, the `total` row right under them, both gutters and a scrollbar
+/// in the right one when the rows don't fit, and records where the header columns and rows went.
+/// Returns the height used.
 #[allow(clippy::too_many_arguments)]
 fn grid(
   f: &mut Frame,
@@ -250,8 +254,8 @@ fn grid(
   sel: usize,
   hits: &mut Hits,
 ) -> u16 {
-  let n = lines.len() as u16;
-  let height = (n + 1).min(area.height.saturating_sub(1)).max(1);
+  let n = lines.len();
+  let height = (n as u16 + 1).min(area.height.saturating_sub(1)).max(1);
   let table = Rect { height, ..area };
   let foot = Rect { y: area.y + height, height: area.height.saturating_sub(height).min(1), ..area };
   // The right gutter: an empty last column, after the usual one-column spacing.
@@ -261,7 +265,7 @@ fn grid(
   hits.cols = columns
     .iter()
     .zip(cols.iter())
-    .filter(|(c, _)| !c.head.is_empty())
+    .filter(|(c, _)| !c.head.is_empty() && c.col != Col::Share)
     .map(|(c, r)| (r.x, r.x + r.width, c.col))
     .collect();
   hits.head = Rect { height: 1, ..table };
@@ -278,6 +282,7 @@ fn grid(
   let mut state = TableState::default().with_selected(Some(sel));
   f.render_stateful_widget(t, table, &mut state);
   hits.offset = state.offset();
+  scrollbar(f, area, hits.rows, n, hits.offset);
   if foot.height > 0 {
     // Unselected, but with the same `▶ ` column, so its cells line up with the rows'.
     let t = Table::new([total.style(BOLD)], widths)
@@ -286,6 +291,26 @@ fn grid(
     f.render_widget(t, foot);
   }
   height + foot.height
+}
+
+/// Where the visible rows are among `len`, in the last column of the right gutter, as macmon's.
+fn scrollbar(f: &mut Frame, area: Rect, rows: Rect, len: usize, offset: usize) {
+  let page = usize::from(rows.height);
+  if len <= page || page < 3 || area.width < 2 {
+    return;
+  }
+  let bar = Rect { x: area.right() - 1, width: 1, ..rows };
+  // Scroll positions, not rows, so the thumb reaches the bottom at the last one.
+  let mut state =
+    ScrollbarState::new(len - page + 1).position(offset).viewport_content_length(page);
+  let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+    .begin_symbol(Some("↑"))
+    .end_symbol(Some("↓"))
+    .track_symbol(None)
+    .thumb_symbol("┃")
+    .style(DIM)
+    .thumb_style(TEXT);
+  f.render_stateful_widget(scrollbar, bar, &mut state);
 }
 
 /// The column rectangles of a table in `area`, after the `▶ ` column.
@@ -321,47 +346,33 @@ fn table(
     empty(f, app, area, hits);
     return 1;
   }
-  let m = app.metric;
+  let sort = app.sort();
   let name = match app.tab {
     _ if app.open.is_some() && app.tab == Tab::Projects => "Model",
     Tab::Models if app.open.is_none() => "Model",
     _ => "Project",
   };
+  let column = |col, label, width| Column {
+    head: head_label(sort, col, label),
+    col,
+    width: Constraint::Length(width + MARK),
+  };
   let mut columns = vec![
-    Column { head: head_label(app, Col::Name, name), col: Col::Name, width: Constraint::Fill(1) },
-    Column {
-      head: head_label(app, Col::Time, "Time"),
-      col: Col::Time,
-      width: Constraint::Length(10 + MARK),
-    },
-    Column {
-      head: head_label(app, Col::Tokens, "Tokens"),
-      col: Col::Tokens,
-      width: Constraint::Length(7 + MARK),
-    },
-    Column {
-      head: head_label(app, Col::Cost, "Cost"),
-      col: Col::Cost,
-      width: Constraint::Length(10 + MARK),
-    },
+    Column { head: head_label(sort, Col::Name, name), col: Col::Name, width: Constraint::Fill(1) },
+    column(Col::Time, "Time", 10),
+    column(Col::Tokens, "Tokens", 7),
+    column(Col::Cost, "Cost", 10),
   ];
   if sessions {
-    columns.push(Column {
-      head: head_label(app, Col::Sessions, "Sessions"),
-      col: Col::Sessions,
-      width: Constraint::Length(9 + MARK),
-    });
+    columns.push(column(Col::Sessions, "Sessions", 9));
   }
-  columns.push(Column {
-    head: head_label(app, Col::Share, "Share"),
-    col: Col::Share,
-    width: Constraint::Length(6 + MARK),
-  });
+  columns.push(column(Col::Share, "Share", 6));
   let mut widths: Vec<Constraint> = columns.iter().map(|x| x.width).collect();
   widths.push(Constraint::Length(GUTTER - 1));
   let name_width = layout(&widths, area)[0].width as usize;
 
-  let share = shares(&rows.iter().map(|x| m.of(x)).collect::<Vec<_>>());
+  let of = sort.0.share();
+  let share = shares(&rows.iter().map(|x| of.of(x)).collect::<Vec<_>>());
   let cells = |x: &Row, label: &str, share: String| {
     let mut cells = vec![
       Cell::from(cut(label, name_width)).style(TEXT),
@@ -376,75 +387,153 @@ fn table(
       cells.push(num(x.sessions.map_or(String::new(), |x| x.to_string()), TEXT));
     }
     // An unknown cost has no share of the cost either.
-    cells.push(match x.unpriced && m == Metric::Cost {
+    cells.push(match x.unpriced && of == Col::Cost {
       true => num("–".into(), NONE),
       false => num(share, TEXT),
     });
     TableRow::new(cells)
   };
   let lines = rows.iter().zip(share).map(|(x, s)| cells(x, &x.label, s)).collect();
-  let all = if rows.iter().any(|x| m.of(x) > 0.0) { "100%".into() } else { String::new() };
+  let all = if rows.iter().any(|x| of.of(x) > 0.0) { "100%".into() } else { String::new() };
   let total = cells(total, "total", all);
   grid(f, &columns, lines, total, area, sel, hits)
 }
 
-/// The metric's text and color for a row.
-fn metric_value(m: Metric, x: &Row) -> (String, Style) {
-  match m {
-    Metric::Time => (duration(x.active.unwrap_or(0)), TIME),
-    Metric::Tokens => (toks(x.tokens), TEXT),
-    Metric::Cost => (money(x.cost), COST),
+/// The column's text and color for a row.
+fn value(col: Col, x: &Row) -> (String, Style) {
+  match col {
+    Col::Tokens => (toks(x.tokens), TEXT),
+    Col::Cost => (money(x.cost), COST),
+    _ => (duration(x.active.unwrap_or(0)), TIME),
   }
 }
 
-/// The metric's color, for its bars and sparkline as for its numbers.
-fn metric_color(m: Metric) -> Style {
-  [TIME, TEXT, COST][m as usize]
+/// A bar `eighths` high, from the bottom: its cell on line `line` (0 at the bottom).
+fn bar_cell(eighths: usize, line: usize) -> &'static str {
+  const PARTS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+  PARTS[eighths.saturating_sub(line * 8).min(8)]
 }
 
+/// The timeline: a bar per day (per week for all of the history) with the date under some, the
+/// largest value on the axis, the selected bar in the selection color and its numbers under the
+/// chart over the period's total.
 fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
-  let m = app.metric;
+  let col = app.sort().0;
   let rows = &app.list;
-  if rows.iter().all(|x| m.of(x) == 0.0) {
+  if rows.iter().all(|x| col.of(x) == 0.0) || area.height < 8 {
     return empty(f, app, area, hits);
   }
-  let max = rows.iter().map(|x| m.of(x)).fold(0.0, f64::max);
-  let width = area.width.saturating_sub(36) as usize;
-  let lines = rows
-    .iter()
-    .map(|x| {
-      let full = if max > 0.0 { (m.of(x) / max * width as f64).round() as usize } else { 0 };
-      let (text, style) =
-        if m.of(x) == 0.0 { ("–".to_string(), NONE) } else { metric_value(m, x) };
-      TableRow::new(vec![
-        Cell::from(x.label.clone()).style(TEXT),
-        num(text, style),
-        Cell::from(Text::styled("█".repeat(full), metric_color(m))),
-      ])
-    })
-    .collect();
-  let (text, style) = metric_value(m, &app.total);
-  let total = TableRow::new(vec![Cell::from("total"), num(text, style), Cell::from("")]);
-  let day = if app.span.gran() == crate::metrics::Granularity::Week { "Week" } else { "Day" };
-  let value = ["Time", "Tokens", "Cost"][m as usize];
+  let week = app.span.gran() == crate::metrics::Granularity::Week;
+  let name = ["Time", "Tokens", "Cost"][(col as usize).clamp(1, 3) - 1];
+  let title =
+    vec![Text::raw("  "), Text::styled(name, KEY), dim(if week { " by week" } else { " by day" })];
+  f.render_widget(Paragraph::new(Line::from(title)), area);
+
+  // Title, a blank line, the bars, their dates, a blank line, the numbers table.
+  let height = area.height - 7;
+  let chart = Rect::new(area.x, area.y + 2, area.width, height);
+  let max = rows.iter().map(|x| col.of(x)).fold(0.0, f64::max);
+  let top = value(col, rows.iter().max_by(|a, b| col.of(a).total_cmp(&col.of(b))).unwrap()).0;
+  let axis = top.chars().count() as u16 + 1;
+  let x0 = area.x + GUTTER + axis;
+  let room = area.right().saturating_sub(GUTTER + x0) as usize;
+  // Each bar and the gap after it: at least two cells, at most eight, the same for all.
+  let n = rows.len();
+  let shown = (room / 2).min(n).max(1);
+  let pitch = (room / shown).min(8);
+  let at = |i: usize| i * pitch;
+  let width = (pitch as u16 - 1).max(1);
+  let sel = app.sel().min(n - 1);
+  let first = n.saturating_sub(shown).min(sel);
+  let style = match col {
+    Col::Tokens => TEXT,
+    Col::Cost => COST,
+    _ => TIME,
+  };
+  f.render_widget(
+    Paragraph::new(Line::from(dim(top)).right_aligned()),
+    Rect::new(area.x, chart.y, x0 - area.x - 1, 1),
+  );
+  f.render_widget(
+    Paragraph::new(Line::from(dim("0")).right_aligned()),
+    Rect::new(area.x, chart.bottom() - 1, x0 - area.x - 1, 1),
+  );
+  let buf = f.buffer_mut();
+  for (i, row) in rows.iter().enumerate().skip(first).take(shown) {
+    let x = x0 + at(i - first) as u16;
+    let v = col.of(row);
+    let eighths = match v > 0.0 {
+      true => ((v / max * height as f64 * 8.0).round() as usize).max(1),
+      false => 0,
+    };
+    let style = if i == sel { Style::new().fg(Color::Cyan) } else { style };
+    for line in 0..height as usize {
+      let y = chart.bottom() - 1 - line as u16;
+      for dx in 0..width {
+        buf[(x + dx, y)].set_symbol(bar_cell(eighths, line)).set_style(style);
+      }
+    }
+    hits.bars.push((Rect::new(x, chart.y, width, height), i));
+  }
+  // Dates under every few bars, counted back from the newest so that it has one.
+  let date = |x: &Row| {
+    x.day
+      .map_or(String::new(), |d| if week { d.to_string() } else { d.strftime("%m-%d").to_string() })
+  };
+  let wide: usize = if week { 10 } else { 5 };
+  let every = (wide + 1).div_ceil(pitch);
+  let last = first + shown - 1;
+  // From the newest back, each under its bar (the newest kept on screen) and clear of the next.
+  let end = usize::from(area.right().saturating_sub(GUTTER + x0));
+  let mut marks: Vec<(usize, usize)> = vec![];
+  for i in (first..=last).rev().step_by(every) {
+    let x = at(i - first).min(end.saturating_sub(wide));
+    if marks.last().is_none_or(|(next, _)| x + wide + 1 < *next) {
+      marks.push((x, i));
+    }
+  }
+  let mut labels = vec![Text::raw(" ".repeat((x0 - area.x) as usize))];
+  let mut free = 0;
+  for (x, i) in marks.into_iter().rev() {
+    let style = if i == sel { Style::new().fg(Color::Cyan) } else { DIM };
+    labels.push(Text::raw(" ".repeat(x - free)));
+    labels.push(Text::styled(date(&rows[i]), style));
+    free = x + wide;
+  }
+  let labels = cut_spans(labels, area.width.saturating_sub(GUTTER) as usize);
+  f.render_widget(
+    Paragraph::new(Line::from(labels)),
+    Rect::new(area.x, chart.bottom(), area.width, 1),
+  );
+
+  // The selected bar's numbers over the period's total, in the tables' columns.
+  let numbers = Rect { y: chart.bottom() + 2, height: 3, ..area };
+  let head = if week { "Week" } else { "Day" };
   let columns = [
-    Column {
-      head: head_label(app, Col::Name, day),
-      col: Col::Name,
-      width: Constraint::Length(14 + MARK),
-    },
-    Column {
-      head: head_label(app, Col::Share, value),
-      col: Col::Share,
-      width: Constraint::Length(10 + MARK),
-    },
-    Column { head: String::new(), col: Col::Share, width: Constraint::Fill(1) },
+    Column { head: head.into(), col: Col::Name, width: Constraint::Fill(1) },
+    Column { head: "Time".into(), col: Col::Time, width: Constraint::Length(10 + MARK) },
+    Column { head: "Tokens".into(), col: Col::Tokens, width: Constraint::Length(7 + MARK) },
+    Column { head: "Cost".into(), col: Col::Cost, width: Constraint::Length(10 + MARK) },
   ];
-  grid(f, &columns, lines, total, area, app.sel(), hits);
+  let line = |x: &Row, label: &str| {
+    TableRow::new(vec![
+      Cell::from(label.to_string()).style(TEXT),
+      match x.active.filter(|x| *x > 0) {
+        Some(t) => num(duration(t), TIME),
+        None => num("–".into(), NONE),
+      },
+      num(toks(x.tokens), TEXT),
+      num(money(x.cost), COST),
+    ])
+  };
+  let row = &rows[sel];
+  grid(f, &columns, vec![line(row, &row.label)], line(&app.total, "total"), numbers, 0, hits);
+  // Bars take the clicks: the table's single row is the selected bar.
+  (hits.cols, hits.head, hits.rows) = (vec![], Rect::default(), Rect::default());
 }
 
-/// A drill-down, in place of the list: its name, its rows with the opened row as their total, the
-/// metric per day right under them and its paths.
+/// A drill-down, in place of the list: its name, its rows with the opened row as their total and
+/// its paths.
 fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let d = app.open.as_ref().unwrap();
   let r = &d.row;
@@ -454,32 +543,10 @@ fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   ]);
   f.render_widget(Paragraph::new(title), area);
   let body = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
-  // Room for the sparkline and the paths below the table, when there are any.
-  let below = if d.days.is_empty() { 0 } else { 5 } + if d.paths.is_empty() { 0 } else { 2 };
+  let below = if d.paths.is_empty() { 0 } else { 2 };
   let room = Rect { height: body.height.saturating_sub(below).max(3), ..body };
-  let used = table(f, app, &d.rows, r, app.tab == Tab::Timeline, room, app.osel, hits);
-  let mut y = body.y + used;
-  if !d.days.is_empty() && y + 5 <= area.bottom() && area.width > 2 * GUTTER {
-    let m = app.metric;
-    let gran = if app.span.gran() == crate::metrics::Granularity::Week { "week" } else { "day" };
-    let caption = format!("  {} by {gran}", m.label());
-    f.render_widget(Paragraph::new(dim(caption)), Rect::new(area.x, y + 1, area.width, 1));
-    let line = Rect::new(area.x + GUTTER, y + 2, area.width.saturating_sub(2 * GUTTER), 2);
-    // The newest buckets that fit, each stretched over an even part of the line.
-    let days = &d.days[d.days.len().saturating_sub(line.width as usize)..];
-    // Cents for the cost, so a day under a dollar still draws.
-    let scale = if m == Metric::Cost { 100.0 } else { 1.0 };
-    let (n, w) = (days.len(), line.width as usize);
-    let values: Vec<u64> = (0..w).map(|i| (m.of(&days[i * n / w]) * scale) as u64).collect();
-    f.render_widget(Sparkline::default().data(&values).style(metric_color(m)), line);
-    let (first, last) = (&days[0].key, &days[n - 1].key);
-    let dates = Rect::new(line.x, y + 4, line.width, 1);
-    f.render_widget(Paragraph::new(dim(first.clone())), dates);
-    if first != last {
-      f.render_widget(Paragraph::new(Line::from(dim(last.clone())).right_aligned()), dates);
-    }
-    y += 5;
-  }
+  let used = table(f, app, &d.rows, r, d.sessions, room, app.osel, hits);
+  let y = body.y + used;
   if !d.paths.is_empty() && y + 2 <= area.bottom() {
     let paths = Line::from(vec![dim("  Paths "), Text::styled(d.paths.join(", "), TEXT)]);
     f.render_widget(Paragraph::new(paths), Rect::new(area.x, y + 1, area.width, 1));
@@ -490,18 +557,21 @@ fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
 fn help(f: &mut Frame, area: Rect) {
   let keys = [
     ("1 2 3", "projects / models / timeline"),
-    ("← →", "period: today, week, month, 30 days, all"),
-    ("↑ ↓", "select a row"),
+    ("← →", "period: today, week, month, 30 days, all; wraps around"),
+    ("↑ ↓", "select a row or a day; wraps around"),
+    ("PgUp PgDn", "a page up / down"),
+    ("Home End", "the first / last row"),
     ("enter", "open: project → models, model → projects, day → projects"),
-    ("esc ⌫", "back"),
-    ("m", "metric for shares, sorting and bars: time / tokens / cost"),
+    ("esc ⌫ q", "back"),
+    ("s", "sort by the next column; on the timeline: bars of time / tokens / cost"),
+    ("S", "reverse the sort"),
     ("p", "provider: both / claude / codex"),
     ("/", "filter by name"),
-    ("mouse", "click a row to select it, again to open it; a header sorts; the wheel scrolls"),
+    ("mouse", "click a row or bar to select it, again to open it; a header sorts, again reverses"),
     ("?", "this help"),
     ("q", "quit"),
   ];
-  const KEYS: usize = 8;
+  const KEYS: usize = 11;
   let widest = keys.iter().map(|x| x.1.chars().count()).max().unwrap_or(0) + KEYS + 2;
   let width = (widest as u16 + 2).min(area.width);
   let room = (width as usize).saturating_sub(2 + KEYS + 2).max(10);
@@ -510,11 +580,9 @@ fn help(f: &mut Frame, area: Rect) {
     let mut first = true;
     let mut line = String::new();
     let mut flush = |line: &mut String, first: &mut bool| {
-      let key = if *first { format!(" {k:<7}") } else { " ".repeat(KEYS) };
-      lines.push(Line::from(vec![
-        Text::styled(key, Style::new().fg(Color::Cyan)),
-        Text::styled(std::mem::take(line), TEXT),
-      ]));
+      let key = if *first { format!(" {k:<10}") } else { " ".repeat(KEYS) };
+      let text = Text::styled(std::mem::take(line), TEXT);
+      lines.push(Line::from(vec![Text::styled(key, Style::new().fg(Color::Cyan)), text]));
       *first = false;
     };
     for word in d.split(' ') {
@@ -549,21 +617,31 @@ fn footer(app: &App, width: u16) -> Line<'static> {
   let hints: &[(&str, &str, u8)] = match () {
     _ if app.typing => &[("enter", "keep", 1), ("esc", "clear", 1)],
     // The box itself says how to close it.
-    _ if app.help => &[("q", "quit", 9)],
+    _ if app.help => &[],
     _ if app.open.is_some() => &[
       ("↑↓", "select", 2),
+      ("s", "sort", 1),
       ("esc", "back", 7),
-      ("m", "metric", 1),
       ("←→", "period", 0),
       ("?", "help", 8),
+    ],
+    _ if app.tab == Tab::Timeline => &[
+      ("↑↓", "day", 6),
+      ("enter", "open", 5),
+      ("s", "bars", 4),
+      ("←→", "period", 3),
+      ("p", "provider", 1),
+      ("1-3", "view", 0),
+      ("?", "help", 8),
+      ("q", "quit", 9),
     ],
     _ => &[
       ("↑↓", "select", 6),
       ("enter", "open", 5),
-      ("1-3", "view", 0),
+      ("s", "sort", 4),
       ("←→", "period", 3),
-      ("m", "metric", 4),
       ("p", "provider", 1),
+      ("1-3", "view", 0),
       ("/", "filter", 2),
       ("?", "help", 8),
       ("q", "quit", 9),

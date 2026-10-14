@@ -240,8 +240,8 @@ impl Data {
     rows.into_values().collect()
   }
 
-  /// The metric of a project, or of everything, per bucket of the span, oldest first; a bounded
-  /// span lists its empty days too.
+  /// Time, tokens and cost of a project, or of everything, per bucket of the span, oldest first;
+  /// a bounded span lists its empty days too.
   pub fn timeline(&self, span: Span, prov: Option<Provider>, project: Option<&str>) -> Vec<Row> {
     let range = span.range(self.today);
     let gran = span.gran();
