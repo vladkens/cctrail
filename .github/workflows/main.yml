@@ -35,157 +35,33 @@ jobs:
         run: make check
       - run: cargo test --release --locked
 
-  # `dev` builds the archives next to `test` (main and manual runs); on main `dev-release` publishes
-  # them as the `dev` pre-release. Two jobs, so the token that can write to the repo never sits on
-  # the machine that runs the build scripts of every dependency.
-  dev:
+  # The shared release steps (github.com/vladkens/actions): `build` runs `make dist` read-only
+  # (beside `test`); on main `publish` puts the archives up as the `dev` pre-release, and a
+  # `release: vX.Y.Z (#N)` commit creates the tag and the GitHub release with the same archives.
+  # `publish` never compiles. Users check an archive with
+  # `gh attestation verify FILE -R vladkens/cctrail`.
+  build:
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest # the macOS binary needs a Mac; Linux and Windows cross-compile
     steps:
       - uses: actions/checkout@v7
-      # One cache for the registry, cargo-cross, the targets' dependencies and the cross toolchains.
-      - uses: Swatinem/rust-cache@v2
+      - uses: vladkens/actions/rust-build@v1
         with:
-          cache-directories: ${{ runner.temp }}/cross
-      - run: make dist
-        env:
-          CROSS_COMPILER_DIR: ${{ runner.temp }}/cross
-      - uses: actions/upload-artifact@v7
-        with:
-          name: cctrail-dev
-          path: target/distrib/*
+          dist: make dist
+          cache-directories: ~/.cache/cargo-cross
 
-  dev-release:
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    needs: [test, dev]
-    permissions:
-      attestations: write
-      contents: write
-      id-token: write
-    concurrency:
-      group: dev-${{ github.ref }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: cctrail-dev
-          path: target/distrib
-      # Users check an archive with `gh attestation verify FILE -R vladkens/cctrail`.
-      - uses: actions/attest@v4
-        with:
-          subject-path: target/distrib/*
-
-      - name: Update dev pre-release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          head=$(git ls-remote --exit-code origin refs/heads/main)
-          if [ "$(echo "$head" | cut -f1)" != "$GITHUB_SHA" ]; then
-            echo "main has moved past $GITHUB_SHA, skipping"
-            exit 0
-          fi
-          NOTES="Latest build of \`main\` at ${GITHUB_SHA} ($(date -u '+%Y-%m-%d %H:%M UTC'))."
-          git tag -f dev
-          git push -f origin refs/tags/dev
-          if gh release view dev >/dev/null 2>&1; then
-            gh release upload dev target/distrib/* --clobber
-            gh release edit dev --title "Dev build" --notes "$NOTES"
-          else
-            gh release create dev target/distrib/* --prerelease --title "Dev build" --notes "$NOTES"
-          fi
-
-  # Split like `dev`: `release-check` builds without write rights, `release` only publishes.
-  release-check:
-    if: github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release:')
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
-      notes: ${{ steps.notes.outputs.notes }}
-    steps:
-      - uses: actions/checkout@v7
-      - id: version
-        name: Check the title against Cargo.toml
-        env:
-          MESSAGE: ${{ github.event.head_commit.message }}
-        run: |
-          title=$(printf '%s\n' "$MESSAGE" | head -n1 | sed -E 's/ \(#[0-9]+\)$//')
-          tag="v$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
-          if [ "$title" != "release: $tag" ]; then
-            echo "::error::expected the title 'release: $tag' (from Cargo.toml), got '$title'"
-            exit 1
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - id: notes
-        name: Take the notes from changelog.md
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          awk -v tag="$TAG" '/^## / { found = ($2 == tag); next } found && $0 != "---"' changelog.md > notes.md
-          if ! grep -q '^- [^[:space:]]' notes.md; then
-            echo "::error::changelog.md has no '## $TAG' section with changes"
-            exit 1
-          fi
-          { echo 'notes<<END_OF_NOTES'; cat notes.md; echo END_OF_NOTES; } >> "$GITHUB_OUTPUT"
-      - run: cargo publish --dry-run --locked
-
-  release:
-    runs-on: ubuntu-latest
-    needs: [test, dev, release-check]
+  publish:
+    if: github.ref == 'refs/heads/main' # write rights only for main's own workflow
+    needs: [test, build]
+    runs-on: ubuntu-latest # no build here, and Linux runners start faster
     permissions:
       attestations: write
       contents: write
       id-token: write # crates.io Trusted Publishing and attestations
-    env:
-      TAG: ${{ needs.release-check.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
-      - id: tag
-        name: Check the tag
-        run: |
-          sha=$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | tail -n1 | cut -f1)
-          if [ -n "$sha" ] && [ "$sha" != "$GITHUB_SHA" ]; then
-            echo "::error::tag $TAG already points to $sha, not $GITHUB_SHA"
-            exit 1
-          fi
-          echo "exists=$([ -n "$sha" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v8
+      - uses: vladkens/actions/rust-publish@v1
         with:
-          name: cctrail-dev
-          path: target/distrib
-      - name: Name the archives after the version
-        run: |
-          for f in target/distrib/cctrail-dev-*; do mv "$f" "${f/cctrail-dev-/cctrail-$TAG-}"; done
-          ls -l target/distrib
-      - uses: actions/attest@v4
-        with:
-          subject-path: target/distrib/*
-
-      - if: steps.tag.outputs.exists == 'false'
-        run: git push origin "$GITHUB_SHA:refs/tags/$TAG"
-
-      # https://crates.io/docs/trusted-publishing
-      - uses: rust-lang/crates-io-auth-action@v1
-        id: auth
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: |
-          if curl -fsS -o /dev/null -A "cctrail-ci (github.com/$GITHUB_REPOSITORY)" "https://crates.io/api/v1/crates/cctrail/${TAG#v}"; then
-            echo "cctrail ${TAG#v} is already on crates.io"
-          else
-            cargo publish --locked --no-verify
-          fi
-
-      - name: Create the GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NOTES: ${{ needs.release-check.outputs.notes }}
-        run: |
-          if have=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null); then
-            for f in target/distrib/*; do
-              grep -qxF "${f##*/}" <<< "$have" || gh release upload "$TAG" "$f"
-            done
-          else
-            gh release create "$TAG" target/distrib/* --verify-tag --title "$TAG" --notes "$NOTES"
-          fi
+          # Until the first version is published by hand and Trusted Publishing is set up for
+          # this workflow on crates.io.
+          crates: false
