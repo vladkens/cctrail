@@ -6,7 +6,7 @@ use jiff::civil::Date;
 
 use crate::config::{By, Config};
 use crate::metrics::{self, DateRange, Granularity, Period};
-use crate::model::{Provider, Session, Speed};
+use crate::model::{Event, Provider, Session, Speed};
 use crate::output::{self, workdir_label};
 use crate::pricing;
 
@@ -127,22 +127,21 @@ impl Data {
   /// Models by tokens and cost; time doesn't split between models.
   pub fn models(&self, span: Span, prov: Option<Provider>, project: Option<&str>) -> Vec<Row> {
     let range = span.range(self.today);
-    let events: Vec<_> = self
-      .events(prov)
-      .into_iter()
-      .filter(|(si, _)| project.is_none_or(|p| self.names[*si].0 == p))
-      .collect();
-    let days = metrics::usage_by_period(&self.sessions, &events, Granularity::Day, &range);
     let mut rows: HashMap<String, Row> = HashMap::new();
-    for m in days.values().flat_map(|x| &x.models) {
-      let key = model_key(m.provider, &m.model, m.fast);
+    for (si, ei) in self.events(prov) {
+      let (s, e) = (&self.sessions[si], &self.sessions[si].events[ei]);
+      if !in_span(&range, e) || project.is_some_and(|p| self.names[si].0 != p) {
+        continue;
+      }
+      let key = model_key(s.provider, e.model.as_deref().unwrap_or("unknown"), is_fast(e));
       let row = rows.entry(key.clone()).or_insert_with(|| Row {
         label: key.clone(),
         key,
         ..Default::default()
       });
-      row.tokens = row.tokens.saturating_add(m.usage.total());
-      row.cost += m.cost;
+      let usage = e.usage.unwrap_or_default();
+      row.tokens = row.tokens.saturating_add(usage.total());
+      row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
     }
     rows.into_values().collect()
   }
@@ -153,9 +152,9 @@ impl Data {
     let mut rows: HashMap<&str, Row> = HashMap::new();
     for (si, ei) in self.events(prov) {
       let (s, e) = (&self.sessions[si], &self.sessions[si].events[ei]);
-      let fast = e.speed == Some(Speed::Fast);
-      let Some(ts) = e.ts.filter(|x| range.contains(*x)) else { continue };
-      if model_key(s.provider, e.model.as_deref().unwrap_or("unknown"), fast) != model {
+      if !in_span(&range, e)
+        || model_key(s.provider, e.model.as_deref().unwrap_or("unknown"), is_fast(e)) != model
+      {
         continue;
       }
       let (name, mapped) = &self.names[si];
@@ -167,7 +166,7 @@ impl Data {
       });
       let usage = e.usage.unwrap_or_default();
       row.tokens = row.tokens.saturating_add(usage.total());
-      row.cost += pricing::cost(s.provider, e.model.as_deref(), Some(ts), &usage, e.speed);
+      row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
     }
     rows.into_values().collect()
   }
@@ -255,6 +254,16 @@ impl Data {
   }
 }
 
+/// An event counts in a span as `stats_by` counts it: by its day, and always for all time, even
+/// without a timestamp.
+fn in_span(range: &DateRange, e: &Event) -> bool {
+  !range.bounded() || e.ts.is_some_and(|x| range.contains(x))
+}
+
+fn is_fast(e: &Event) -> bool {
+  e.speed == Some(Speed::Fast)
+}
+
 pub fn model_key(provider: Provider, model: &str, fast: bool) -> String {
   format!("{}/{model}{}", provider.name(), if fast { " (fast)" } else { "" })
 }
@@ -272,15 +281,31 @@ pub mod tests {
 
   use super::*;
 
+  /// The fixtures' `/repo`, absolute on this platform: Windows needs a drive.
+  pub const REPO: &str = if cfg!(windows) { "C:/repo" } else { "/repo" };
+
   fn fixtures(dir: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(dir)
   }
 
-  pub fn data() -> Data {
+  fn sessions() -> Vec<Session> {
     let mut sessions = crate::parser::claude::parse(&[fixtures("claude/projects")]);
     sessions.extend(crate::parser::codex::parse(&[fixtures("codex")]));
-    let config = Config::read(&fixtures("config.toml"), None).unwrap();
+    for x in &mut sessions {
+      if let Some(rest) = x.workdir.strip_prefix("/repo") {
+        x.workdir = format!("{REPO}{rest}");
+      }
+    }
+    sessions
+  }
+
+  fn data_of(sessions: Vec<Session>) -> Data {
+    let config = Config::parse(&format!("[projects]\n\"oss/demo\" = [{REPO:?}]\n"), None).unwrap();
     Data::new(sessions, config, jiff::civil::date(2026, 1, 10))
+  }
+
+  pub fn data() -> Data {
+    data_of(sessions())
   }
 
   #[test]
@@ -312,7 +337,22 @@ pub mod tests {
     let busy = days.iter().find(|x| x.tokens > 0).unwrap();
     let projects = data.bucket_projects(Span::All, None, busy.day.unwrap());
     assert!(projects.iter().any(|x| x.key == "oss/demo"));
-    assert!(data.paths("oss/demo").contains(&"/repo".to_string()));
+    assert!(data.paths("oss/demo").contains(&REPO.to_string()));
+  }
+
+  #[test]
+  fn counts_undated_usage_for_all_time() {
+    let mut sessions = sessions();
+    let model = Some("claude-sonnet-5".to_string());
+    let usage = Some(crate::model::Usage { input: 123, ..Default::default() });
+    sessions[0].events.push(Event { usage, model, ..Default::default() });
+    let data = data_of(sessions);
+    let (_, total) = data.projects(Span::All, None, false);
+    let models = data.models(Span::All, None, None);
+    assert_eq!(models.iter().map(|x| x.tokens).sum::<u64>(), total.tokens);
+    let model = models.iter().find(|x| x.key == "claude/claude-sonnet-5").unwrap();
+    let used: u64 = data.model_projects(Span::All, None, &model.key).iter().map(|x| x.tokens).sum();
+    assert_eq!(used, model.tokens);
   }
 
   #[test]

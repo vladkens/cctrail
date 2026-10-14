@@ -198,12 +198,13 @@ fn detail(f: &mut Frame, app: &App, area: Rect) {
     let gran = if app.span.gran() == crate::metrics::Granularity::Week { "week" } else { "day" };
     let [label, line] =
       Layout::vertical([Constraint::Length(1), Constraint::Length(2)]).areas(days);
-    let first = d.days.first().map_or(String::new(), |x| x.key.clone());
+    // The caption starts at the first bucket that fits on the line.
+    let skip = values.len().saturating_sub(line.width as usize);
+    let first = d.days.get(skip).map_or(String::new(), |x| x.key.clone());
     f.render_widget(
       Paragraph::new(Line::from(dim(format!(" {} by {gran} since {first}", m.label())))),
       label,
     );
-    let skip = values.len().saturating_sub(line.width as usize);
     f.render_widget(
       Sparkline::default().data(&values[skip..]).style(Style::new().fg(Color::Green)),
       line,

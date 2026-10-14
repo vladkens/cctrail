@@ -146,6 +146,9 @@ impl App {
     if key.kind != KeyEventKind::Press {
       return;
     }
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+      return self.quit = true;
+    }
     if self.typing {
       match key.code {
         KeyCode::Char(c) => self.filter.push(c),
@@ -160,11 +163,12 @@ impl App {
     let olen = self.open.as_ref().map_or(0, |x| x.rows.len());
     let sel = &mut self.sel[self.tab as usize];
     match key.code {
-      KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
-      KeyCode::Char('q') => self.quit = true,
-      KeyCode::Char('?') => self.help = !self.help,
-      KeyCode::Esc if self.help => self.help = false,
-      KeyCode::Esc if self.open.is_some() => self.open = None,
+      // Moves and toggles that change no data return without rebuilding the rows.
+      KeyCode::Char('q') => return self.quit = true,
+      KeyCode::Char('?') => return self.help = !self.help,
+      KeyCode::Esc if self.help => return self.help = false,
+      KeyCode::Esc if self.open.is_some() => return self.open = None,
+      KeyCode::Esc if self.filter.is_empty() => return,
       KeyCode::Esc => self.filter.clear(),
       KeyCode::Char(c @ '1'..='3') => {
         self.tab = [Tab::Projects, Tab::Models, Tab::Timeline][c as usize - '1' as usize];
@@ -182,13 +186,13 @@ impl App {
           Some(Provider::Codex) => None,
         }
       }
-      KeyCode::Char('/') => self.typing = true,
+      KeyCode::Char('/') => return self.typing = true,
       KeyCode::Up if self.open.is_some() => return self.osel = self.osel.saturating_sub(1),
       KeyCode::Down if self.open.is_some() => {
         return self.osel = (self.osel + 1).min(olen.saturating_sub(1));
       }
-      KeyCode::Up => *sel = sel.saturating_sub(1),
-      KeyCode::Down => *sel = (*sel + 1).min(len.saturating_sub(1)),
+      KeyCode::Up => return *sel = sel.saturating_sub(1),
+      KeyCode::Down => return *sel = (*sel + 1).min(len.saturating_sub(1)),
       KeyCode::Enter if self.open.is_none() => {
         // `other` and empty days open nothing.
         if let Some(row) = self
@@ -272,7 +276,7 @@ mod tests {
 
     press(&mut app, KeyCode::Enter);
     let out = screen(&app);
-    assert!(out.contains("claude/claude-sonnet-5") && out.contains("/repo"), "{out}");
+    assert!(out.contains("claude/claude-sonnet-5") && out.contains(data::tests::REPO), "{out}");
     let models = app.open.as_ref().unwrap().rows.len();
     press(&mut app, KeyCode::Down);
     assert_eq!(app.osel, 1.min(models - 1));
