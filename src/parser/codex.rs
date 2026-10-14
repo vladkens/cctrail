@@ -11,6 +11,7 @@ use super::{
   AgentCall, Content, Obj, Present, Text, Val, inherit_roots, jsonl, jsonl_files, parse_ts,
 };
 use crate::model::{Event, Provider, Session, Speed, Usage};
+use crate::workdir::normalize_remote;
 
 /// A token count's six numbers: a fork replays its parent's counts, found by these.
 type Signature = [u64; 6];
@@ -36,6 +37,13 @@ struct Meta {
   subagent_history_start_ordinal: Val,
   forked_from_id: Val,
   cwd: Val,
+  git: Obj<Git>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Git {
+  repository_url: Val,
 }
 
 #[derive(Deserialize, Default)]
@@ -142,6 +150,8 @@ struct Rollout {
   forked_from_id: Option<String>,
   has_history_base: bool,
   workdir: String,
+  /// The git remote Codex logged for the working directory, normalized.
+  remote: Option<String>,
   /// Lines with a smaller `ordinal` are the parent's history, copied into an agent's rollout.
   own_start: Option<i64>,
 }
@@ -269,6 +279,7 @@ fn read_meta(path: &Path) -> Option<Rollout> {
     forked_from_id: meta.forked_from_id.str().map(String::from),
     has_history_base: matches!(meta.history_base, Val::Map(_)),
     workdir: meta.cwd.str().unwrap_or("unknown").to_string(),
+    remote: meta.git.0.as_ref().and_then(|x| normalize_remote(x.repository_url.str()?)),
     own_start: meta.subagent_history_start_ordinal.ordinal(),
   })
 }
@@ -287,6 +298,7 @@ fn nested_parent_id(value: &Value) -> Option<String> {
 fn parse_file(rollout: &Rollout) -> Parsed {
   let mut session =
     Session::new(&rollout.id, rollout.parent_id.is_none(), &rollout.workdir, Provider::Codex);
+  session.remote = rollout.remote.clone();
   let mut model: Option<String> = None;
   let mut speed: Option<Speed> = None;
   let mut prev_total: Option<Signature> = None;

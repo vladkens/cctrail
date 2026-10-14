@@ -2,23 +2,33 @@
 
 use std::collections::HashMap;
 
-use crate::model::Session;
+use crate::model::{Session, Ts};
 
-/// Folds agent worktrees into their repository by path alone, so it works for deleted ones too.
+/// Folds agent worktrees into their repository by path alone, so it works for deleted ones too,
+/// and clones of a repository (directories of the same name) into the one used last.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Folds {
   /// The Codex and Claude homes (`same_path`): their `worktrees` name no repository.
   homes: Vec<String>,
+  /// A worktree-folded directory → the clone it folds into.
+  clones: HashMap<String, String>,
 }
 
 impl Folds {
   pub fn new(homes: &[String]) -> Self {
-    Self { homes: homes.iter().map(|x| same_path(x)).collect() }
+    Self { homes: homes.iter().map(|x| same_path(x)).collect(), clones: HashMap::new() }
+  }
+
+  /// The repository directory a directory belongs to: its worktree's repository, then the clone
+  /// that repository folds into.
+  pub fn fold(&self, dir: &str) -> String {
+    let repo = self.worktree(dir);
+    self.clones.get(&repo).cloned().unwrap_or(repo)
   }
 
   /// The repository a directory belongs to: `<repo>` for `<repo>/.<tool>/worktrees/<name>`,
   /// `<repo>/.worktrees/<name>` and `<repo>-worktrees/<name>` (and below them); else itself.
-  pub fn fold(&self, dir: &str) -> String {
+  fn worktree(&self, dir: &str) -> String {
     let is_sep = |c: char| c == '/' || c == '\\';
     let mut segs = vec![];
     let mut start = 0;
@@ -59,14 +69,113 @@ impl Folds {
 
 /// Folds every session's directory into its repository, keeping the logged one in `cwd`.
 pub fn fold_sessions(sessions: &mut [Session]) -> Folds {
-  let folds = Folds::new(&homes());
+  let mut folds = Folds::new(&homes());
   // Sessions share a few hundred directories: fold each directory once.
   let mut cache: HashMap<String, String> = HashMap::new();
   for x in sessions.iter_mut() {
     x.cwd = x.workdir.clone();
-    x.workdir = cache.entry(x.cwd.clone()).or_insert_with(|| folds.fold(&x.cwd)).clone();
+    x.workdir = cache.entry(x.cwd.clone()).or_insert_with(|| folds.worktree(&x.cwd)).clone();
+  }
+
+  let mut seen: HashMap<&str, (Option<Ts>, Option<&str>)> = HashMap::new();
+  for x in sessions.iter() {
+    let last = x.events.iter().filter_map(|e| e.ts).max();
+    let dir = seen.entry(&x.workdir).or_default();
+    *dir = (dir.0.max(last), dir.1.or(x.remote.as_deref()));
+  }
+  let dirs: Vec<Dir> = seen
+    .into_iter()
+    .map(|(path, (last, remote))| Dir { path: path.into(), last, remote: remote.map(Into::into) })
+    .collect();
+  folds.clones = clones(&dirs, &temp_dirs());
+  for x in sessions.iter_mut() {
+    if let Some(clone) = folds.clones.get(&x.workdir) {
+      x.workdir = clone.clone();
+    }
   }
   folds
+}
+
+/// A repository directory as the sessions saw it.
+struct Dir {
+  path: String,
+  /// The latest activity in it.
+  last: Option<Ts>,
+  remote: Option<String>,
+}
+
+/// Clones of one repository: directories of the same name fold into the one with the latest
+/// activity. A temp directory, a directory holding other session directories (`~/Code`) and
+/// directories Codex saw with different git remotes never fold together.
+fn clones(dirs: &[Dir], temps: &[String]) -> HashMap<String, String> {
+  let keys: Vec<String> = dirs.iter().map(|x| same_path(&x.path)).collect();
+  let below =
+    |dir: &str, root: &str| dir.len() > root.len() + 1 && dir.starts_with(&format!("{root}/"));
+  let mut groups: HashMap<&str, Vec<&Dir>> = HashMap::new();
+  for (x, key) in dirs.iter().zip(&keys) {
+    let Some((_, name)) = key.rsplit_once('/').filter(|x| !x.1.is_empty()) else { continue };
+    let temp = temps.iter().any(|t| key == t || below(key, t));
+    if temp || keys.iter().any(|other| below(other, key)) {
+      continue;
+    }
+    groups.entry(name).or_default().push(x);
+  }
+
+  let mut map = HashMap::new();
+  for mut group in groups.into_values() {
+    // The latest first; ties by path, so the result doesn't depend on the order of sessions.
+    group.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.path.cmp(&b.path)));
+    let mut repos: Vec<(&str, Option<&str>)> = vec![];
+    for x in group {
+      let remote = x.remote.as_deref();
+      match repos.iter_mut().find(|r| r.1.is_none() || remote.is_none() || r.1 == remote) {
+        Some(repo) => {
+          repo.1 = repo.1.or(remote);
+          if repo.0 != x.path {
+            map.insert(x.path.clone(), repo.0.to_string());
+          }
+        }
+        None => repos.push((&x.path, remote)),
+      }
+    }
+  }
+  map
+}
+
+/// System temp directories (`same_path`): sessions there are throwaway, never a clone.
+fn temp_dirs() -> Vec<String> {
+  let fixed = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"].map(String::from);
+  let env = ["TMPDIR", "TEMP"].into_iter().filter_map(std::env::var_os);
+  let env = env.map(|x| x.to_string_lossy().to_string()).filter(|x| !x.is_empty());
+  fixed.into_iter().chain(env).map(|x| same_path(&x)).collect()
+}
+
+/// `host/owner/repo` of a git remote URL: scheme, user, port, `git@host:` and `.git` dropped, the
+/// host lowercased. None for a local path or anything else without a host.
+pub fn normalize_remote(url: &str) -> Option<String> {
+  let url = url.trim();
+  let (host, path) = match url.split_once("://") {
+    Some((scheme, _)) if scheme.eq_ignore_ascii_case("file") => return None,
+    Some((_, rest)) => {
+      let (authority, path) = rest.split_once('/')?;
+      let host = authority.rsplit_once('@').map_or(authority, |x| x.1);
+      (host.split_once(':').map_or(host, |x| x.0), path)
+    }
+    // scp-like `user@host:owner/repo`; one letter before `:` is a Windows drive.
+    None => {
+      let (authority, path) = url.split_once(':')?;
+      if authority.contains('/') || authority.len() < 2 || path.starts_with('/') {
+        return None;
+      }
+      (authority.rsplit_once('@').map_or(authority, |x| x.1), path)
+    }
+  };
+  let path = path.trim_matches('/');
+  let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
+  match host.is_empty() || path.is_empty() {
+    true => None,
+    false => Some(format!("{}/{path}", host.to_lowercase())),
+  }
 }
 
 /// The Codex and Claude homes, the configured and the default ones.
@@ -136,6 +245,75 @@ mod tests {
     assert_eq!(folds.fold(dir), expected);
     let dir = "C:/Users/Me/.codex/worktrees/a1/repo";
     assert_eq!(folds.fold(dir), dir);
+  }
+
+  fn dir(path: &str, last: Ts, remote: Option<&str>) -> Dir {
+    Dir { path: path.into(), last: Some(last), remote: remote.map(Into::into) }
+  }
+
+  #[test]
+  fn folds_clones_by_name_into_the_latest() {
+    let temps = ["/tmp".to_string()];
+    let dirs = [
+      dir("/h/Code/macmon", 30, None),
+      dir("/h/Code/pub/macmon", 20, Some("github.com/me/macmon")),
+      dir("/Volumes/Data/h/Code/pub/macmon", 10, None),
+      dir("/h/Code/other", 5, None),
+    ];
+    let map = clones(&dirs, &temps);
+    assert_eq!(map.get("/h/Code/pub/macmon").map(String::as_str), Some("/h/Code/macmon"));
+    assert_eq!(
+      map.get("/Volumes/Data/h/Code/pub/macmon").map(String::as_str),
+      Some("/h/Code/macmon")
+    );
+    assert_eq!(map.len(), 2);
+  }
+
+  #[test]
+  fn keeps_temp_parents_and_other_remotes_apart() {
+    let temps = ["/tmp".to_string(), "/private/var/folders".to_string()];
+    let dirs = [
+      // Temp directories never fold, not even with a same-named repository.
+      dir("/tmp/x/run-1", 10, None),
+      dir("/private/var/folders/ab/T/run-1", 20, None),
+      dir("/h/run-1", 5, None),
+      // A directory holding other session directories is no clone.
+      dir("/h/Code", 10, None),
+      dir("/h/Code/app", 10, None),
+      dir("/h/old/Code", 30, None),
+      // Different remotes stay apart; one without a remote joins the latest.
+      dir("/h/vpn", 30, Some("github.com/me/vpn")),
+      dir("/h/priv/vpn", 20, Some("github.com/me/other-vpn")),
+      dir("/h/old/vpn", 10, None),
+    ];
+    let map = clones(&dirs, &temps);
+    assert_eq!(map.get("/h/old/vpn").map(String::as_str), Some("/h/vpn"));
+    assert_eq!(map.len(), 1, "{map:?}");
+  }
+
+  #[test]
+  fn folds_worktrees_then_clones() {
+    let mut folds = Folds::new(&[]);
+    folds.clones.insert("/a/app".into(), "/b/app".into());
+    assert_eq!(folds.fold("/a/app/.worktrees/x"), "/b/app");
+    assert_eq!(folds.fold("/a/app"), "/b/app");
+    assert_eq!(folds.fold("/c/app"), "/c/app");
+  }
+
+  #[test]
+  fn normalizes_remotes() {
+    let repo = Some("github.com/vladkens/macmon".to_string());
+    for url in [
+      "git@github.com:vladkens/macmon.git",
+      "https://github.com/vladkens/macmon",
+      "https://user:token@GitHub.com/vladkens/macmon.git/",
+      "ssh://git@github.com:22/vladkens/macmon.git",
+    ] {
+      assert_eq!(normalize_remote(url), repo, "{url}");
+    }
+    for url in ["", "/srv/git/repo.git", "file:///srv/repo.git", "C:\\repo", "https://host"] {
+      assert_eq!(normalize_remote(url), None, "{url}");
+    }
   }
 
   #[test]
