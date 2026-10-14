@@ -172,12 +172,11 @@ fn reports_configured_projects() {
 }
 
 #[test]
-fn reports_unmapped_section_total() {
+fn lists_unconfigured_dirs_beside_projects() {
   let out = Run::new("claude/projects", "missing").stdout(&["--provider", "claude"]);
-  assert!(out.lines().any(|x| x.starts_with("@unmapped") && x.contains("427")), "{out}");
-  assert!(out.contains("1 unmapped dir · run cctrail --by dir"));
+  assert!(out.lines().any(|x| x.starts_with(REPO) && x.contains("427")), "{out}");
+  assert!(!out.contains("@unmapped") && !out.contains("other ("), "{out}");
   assert!(has_line(&out, "Project config: ", "empty.toml"), "{out}");
-  assert!(!out.lines().any(|x| x.starts_with(REPO)));
 }
 
 #[test]

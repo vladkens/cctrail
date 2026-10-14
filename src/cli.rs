@@ -1,5 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
+use std::collections::HashMap;
+
 use anyhow::{Result, bail};
 use jiff::civil::Date;
 use serde_json::{Map, Value, json};
@@ -204,9 +206,10 @@ fn stats(args: &Args) -> Result<()> {
   };
   let mut sessions = sessions(args.provider);
   workdir::fold_sessions(&mut sessions);
-  let stats = metrics::stats_by(&sessions, &range, &config, args.by);
+  let events = metrics::billable_events(&sessions);
+  let stats = metrics::stats_by(&sessions, &events, &range, &config, args.by);
   let total = metrics::combine_stats("total", &stats);
-  let unpriced = metrics::unpriced(&sessions, &range);
+  let unpriced = metrics::unpriced(&sessions, &events, &range);
 
   if args.json {
     let mut query = query(args, &range);
@@ -230,10 +233,11 @@ fn stats(args: &Args) -> Result<()> {
 fn usage(args: &Args, gran: Granularity) -> Result<()> {
   let range = DateRange::resolve(args.period, args.since, args.until);
   let sessions = sessions(args.provider);
-  let buckets = metrics::usage_by_period(&sessions, gran, &range);
+  let events = metrics::billable_events(&sessions);
+  let buckets = metrics::usage_by_period(&sessions, &events, gran, &range);
   let mut total = UsageSummary::default();
   buckets.values().for_each(|x| total.add(x));
-  let unpriced = metrics::unpriced(&sessions, &range);
+  let unpriced = metrics::unpriced(&sessions, &events, &range);
 
   if args.json {
     let periods: Vec<Value> = buckets
@@ -285,9 +289,14 @@ fn here(args: &Args) -> Result<()> {
   let workdir = folds.fold(&cwd);
   let project = config.find(&cwd, &workdir);
   let name = config.map(&cwd, &workdir, By::Project);
-  sessions.retain(|x| config.map(&x.cwd, &x.workdir, By::Project) == name);
-  let days = metrics::usage_by_period(&sessions, Granularity::Day, &DateRange::default());
-  let unpriced = metrics::unpriced(&sessions, &DateRange::default());
+  let mut cache: HashMap<(String, String), bool> = HashMap::new();
+  sessions.retain(|x| {
+    let key = (x.cwd.clone(), x.workdir.clone());
+    *cache.entry(key).or_insert_with(|| config.map(&x.cwd, &x.workdir, By::Project) == name)
+  });
+  let events = metrics::billable_events(&sessions);
+  let days = metrics::usage_by_period(&sessions, &events, Granularity::Day, &DateRange::default());
+  let unpriced = metrics::unpriced(&sessions, &events, &DateRange::default());
 
   let rows: Vec<(Period, &str, UsageSummary)> = PERIODS
     .iter()

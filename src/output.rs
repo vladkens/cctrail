@@ -82,11 +82,13 @@ pub struct Table {
   pub dim: Option<usize>,
   /// The widest the first column may get, in characters.
   pub max_first: Option<usize>,
+  /// Rows whose label is dim instead of cyan.
+  pub faint: Vec<usize>,
 }
 
 impl Table {
   pub fn new(headers: Vec<&'static str>, rows: Vec<Vec<String>>) -> Self {
-    Self { headers, rows, dim: None, max_first: None }
+    Self { headers, rows, dim: None, max_first: None, faint: vec![] }
   }
 
   /// Columns one space apart, the first left-aligned and truncated with `…` to fit the width.
@@ -127,8 +129,9 @@ impl Table {
 
     let headers = self.headers.iter().map(|x| x.to_string()).collect();
     line(headers, &|_, _| vec![BOLD]);
-    for row in &self.rows {
+    for (ri, row) in self.rows.iter().enumerate() {
       let bold = row[0] == "total" || row[0] == UNMAPPED;
+      let faint = self.faint.contains(&ri);
       line(row.clone(), &|i, x| {
         let mut styles = vec![];
         if bold {
@@ -138,6 +141,7 @@ impl Table {
           styles.push(DIM);
         }
         match self.headers[i] {
+          _ if i == 0 && faint => styles.push(DIM),
           _ if i == 0 && !x.starts_with("  ") => styles.push(CYAN),
           "Cost" => styles.push(GREEN),
           "Time" => styles.push(YELLOW),
@@ -185,9 +189,14 @@ pub fn cost(x: f64) -> String {
 }
 
 /// Microseconds as `Hh MMm`, rounded to the minute.
+/// `8h 14m`, and from a day on `45d 8h 14m` (days of 24 hours).
 pub fn duration(micros: i64) -> String {
   let minutes = (micros / 1_000_000 + 30) / 60;
-  format!("{}h {:02}m", minutes / 60, minutes % 60)
+  let (days, hours, minutes) = (minutes / (24 * 60), minutes / 60 % 24, minutes % 60);
+  match days {
+    0 => format!("{hours}h {minutes:02}m"),
+    _ => format!("{days}d {hours}h {minutes:02}m"),
+  }
 }
 
 pub fn day(ts: Option<Ts>) -> String {
@@ -224,37 +233,73 @@ pub fn stats_text(
     ]
   };
 
-  let unmapped: Vec<&Stat> = stats.iter().filter(|x| !x.mapped).collect();
-  let mut rows: Vec<Vec<String>> = match by {
-    By::Project => stats.iter().filter(|x| x.mapped).map(row).collect(),
-    _ => stats.iter().map(row).collect(),
-  };
-  if by == By::Project && !unmapped.is_empty() {
-    rows.push(row(&combine_stats(UNMAPPED, unmapped.iter().copied())));
+  // By project, unconfigured directories sit beside the projects (dim). By project and by dir,
+  // rows (sorted by time) are listed until they cover 95% of the time; the unconfigured rest folds
+  // into one `other` row, at most 5% of the time. Configured projects always keep their row; JSON
+  // lists every directory.
+  let by_project = by == By::Project;
+  let mut covered = 0;
+  let small: Vec<bool> = stats
+    .iter()
+    .map(|x| {
+      let small = by != By::Group && !x.mapped && covered * 100 >= total.active * 95;
+      covered += x.active;
+      small && total.active > 0
+    })
+    .collect();
+  let (mut rows, mut faint) = (vec![], vec![]);
+  for (x, _) in stats.iter().zip(&small).filter(|x| !x.1) {
+    if by_project && !x.mapped {
+      faint.push(rows.len());
+    }
+    rows.push(row(x));
+  }
+  let other: Vec<&Stat> = stats.iter().zip(&small).filter(|x| *x.1).map(|x| x.0).collect();
+  let dirs = if other.len() == 1 { "dir" } else { "dirs" };
+  if !other.is_empty() {
+    let label = format!("other ({} {dirs})", other.len());
+    let mut x = row(&combine_stats(&label, other.iter().copied()));
+    x[0] = label;
+    faint.push(rows.len());
+    rows.push(x);
   }
   rows.push(row(total));
   let headers = vec![label, "Sessions", "Total tokens", "Last active", "Cost", "Time"];
-  let table = Table { headers, rows, dim: Some(3), max_first: Some(60) };
+  let table = Table { headers, rows, dim: Some(3), max_first: Some(60), faint };
   let mut out = table.render(term);
-  if by != By::Project || unmapped.is_empty() {
+  let mut notes = String::new();
+  if !other.is_empty() {
+    let all = if by_project { "cctrail --json" } else { "cctrail --by dir --json" };
+    notes += &format!(
+      "{} {} {}\n",
+      term.paint(&format!("{} small {dirs} in other · run", other.len()), &[DIM]),
+      term.paint(all, &[CYAN]),
+      term.paint("for all", &[DIM])
+    );
+  }
+  if !by_project || stats.iter().all(|x| x.mapped) {
+    if !notes.is_empty() {
+      out += &format!("\n{notes}");
+    }
     return out;
   }
-
-  let dirs = if unmapped.len() == 1 { "dir" } else { "dirs" };
-  out += &format!(
-    "\n{} {}\n",
-    term.paint(&format!("{} unmapped {dirs} · run", unmapped.len()), &[DIM]),
-    term.paint("cctrail --by dir", &[CYAN])
-  );
-  let Some(path) = config else { return out };
-  let path_label = term.paint(&workdir_label(&path.to_string_lossy()), &[CYAN]);
-  if path.is_file() {
-    out += &format!("{} {path_label}\n", term.paint("Project config:", &[DIM]));
-    return out;
+  if let Some(path) = config {
+    let path_label = term.paint(&workdir_label(&path.to_string_lossy()), &[CYAN]);
+    if path.is_file() {
+      notes += &format!("{} {path_label}\n", term.paint("Project config:", &[DIM]));
+    } else {
+      if !notes.is_empty() {
+        notes.push('\n');
+      }
+      notes += &format!("{}\n", term.paint("No project config found", &[DIM]));
+      notes += &format!("{} {path_label}\n", term.paint("Create:", &[DIM]));
+      let guide = term.paint(CONFIG_GUIDE, &[CYAN]);
+      notes += &format!("{} {guide}\n", term.paint("Setup guide:", &[DIM]));
+    }
   }
-  out += &format!("\n{}\n", term.paint("No project config found", &[DIM]));
-  out += &format!("{} {path_label}\n", term.paint("Create:", &[DIM]));
-  out += &format!("{} {}\n", term.paint("Setup guide:", &[DIM]), term.paint(CONFIG_GUIDE, &[CYAN]));
+  if !notes.is_empty() {
+    out += &format!("\n{notes}");
+  }
   out
 }
 
@@ -449,7 +494,10 @@ mod tests {
     assert_eq!(duration(0), "0h 00m");
     assert_eq!(duration(29 * 1_000_000), "0h 00m");
     assert_eq!(duration(30 * 1_000_000), "0h 01m");
-    assert_eq!(duration((139 * 3600 + 35 * 60) * 1_000_000), "139h 35m");
+    assert_eq!(duration((23 * 3600 + 59 * 60 + 29) * 1_000_000), "23h 59m");
+    assert_eq!(duration((23 * 3600 + 59 * 60 + 30) * 1_000_000), "1d 0h 00m");
+    assert_eq!(duration((5 * 24 * 3600 + 19 * 3600 + 35 * 60) * 1_000_000), "5d 19h 35m");
+    assert_eq!(duration((45 * 24 * 3600 + 8 * 3600 + 14 * 60) * 1_000_000), "45d 8h 14m");
   }
 
   #[test]
@@ -495,15 +543,61 @@ mod tests {
   }
 
   #[test]
-  fn keeps_slashed_workdirs_unmapped() {
-    let stat = |name: &str, mapped| Stat { name: name.into(), mapped, ..Default::default() };
-    let stats = [stat("oss/demo", true), stat("C:/repo", false), stat("a/b", false)];
+  fn lists_unconfigured_dirs_beside_projects() {
+    let stat = |name: &str, mapped, secs: i64| Stat {
+      name: name.into(),
+      mapped,
+      active: secs * 1_000_000,
+      ..Default::default()
+    };
+    // Sorted by time, as `stats_by` returns them. `C:/repo` and `a/b` look like
+    // `<group>/<project>` labels but aren't configured.
+    let stats = [
+      stat("oss/demo", true, 5000),
+      stat("C:/repo", false, 4000),
+      stat("a/b", false, 50),
+      stat("/tmp/x", false, 40),
+      stat("oss/tiny", true, 10),
+    ];
     let total = combine_stats("total", &stats);
+    let rows = |out: &str, labels: &[&str]| {
+      let lines: Vec<&str> = out.lines().take_while(|x| !x.is_empty()).collect();
+      lines.len() == labels.len() && lines.iter().zip(labels).all(|(x, y)| x.starts_with(y))
+    };
 
+    // Past 95% of the time, unconfigured dirs fold into `other`; configured projects never do.
     let out = stats_text(By::Project, &stats, &total, None, &Term::default());
-    let names: Vec<&str> = out.lines().filter_map(|x| x.split(' ').next()).collect();
-    assert_eq!(names[..4], ["Project", "oss/demo", "@unmapped", "total"], "{out}");
-    assert!(out.contains("2 unmapped dirs"));
+    let expected = ["Project", "oss/demo", "C:/repo", "oss/tiny", "other (2 dirs)", "total"];
+    assert!(rows(&out, &expected), "{out}");
+    assert!(out.contains("\n2 small dirs in other · run cctrail --json for all\n"), "{out}");
+
+    // By dir the same tail folds, configured or not (nothing is mapped there); by group nothing.
+    let dirs = stats.clone().map(|x| Stat { mapped: false, ..x });
+    let out = stats_text(By::Dir, &dirs, &total, None, &Term::default());
+    let expected = ["Directory", "oss/demo", "C:/repo", "other (3 dirs)", "total"];
+    assert!(rows(&out, &expected), "{out}");
+    assert!(
+      out.ends_with("\n\n3 small dirs in other · run cctrail --by dir --json for all\n"),
+      "{out}"
+    );
+    let out = stats_text(By::Group, &dirs, &total, None, &Term::default());
+    assert!(!out.contains("other") && !out.contains("small"), "{out}");
+
+    // Unconfigured labels are dim, configured ones cyan.
+    let out = stats_text(By::Project, &stats, &total, None, &Term { color: true, width: None });
+    assert!(out.contains("\x1b[2mC:/repo") && out.contains("\x1b[36moss/demo"), "{out}");
+
+    // Coverage, not a share per row: rows of 4% and 3% stay while the first 95% isn't covered.
+    let wide = [stat("/a", false, 9000), stat("/b", false, 400), stat("/c", false, 300)];
+    let wide = [wide[0].clone(), wide[1].clone(), wide[2].clone(), stat("/d", false, 300)];
+    let out = stats_text(By::Dir, &wide, &combine_stats("total", &wide), None, &Term::default());
+    assert!(rows(&out, &["Directory", "/a", "/b", "/c", "other (1 dir)", "total"]), "{out}");
+
+    // Nothing small: no `other` row and no hint.
+    let big = [stat("oss/demo", true, 100), stat("/repo", false, 100)];
+    let out = stats_text(By::Project, &big, &combine_stats("total", &big), None, &Term::default());
+    assert!(rows(&out, &["Project", "oss/demo", "/repo", "total"]), "{out}");
+    assert!(!out.contains("other"), "{out}");
 
     let json = group_json(&stats[1], By::Project);
     assert_eq!((&json["group"], &json["project"]), (&json!("@unmapped"), &json!("C:/repo")));

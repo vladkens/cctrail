@@ -1,5 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
+use std::collections::HashMap;
+
 use crate::model::Session;
 
 /// Folds agent worktrees into their repository by path alone, so it works for deleted ones too.
@@ -58,9 +60,11 @@ impl Folds {
 /// Folds every session's directory into its repository, keeping the logged one in `cwd`.
 pub fn fold_sessions(sessions: &mut [Session]) -> Folds {
   let folds = Folds::new(&homes());
+  // Sessions share a few hundred directories: fold each directory once.
+  let mut cache: HashMap<String, String> = HashMap::new();
   for x in sessions.iter_mut() {
     x.cwd = x.workdir.clone();
-    x.workdir = folds.fold(&x.cwd);
+    x.workdir = cache.entry(x.cwd.clone()).or_insert_with(|| folds.fold(&x.cwd)).clone();
   }
   folds
 }
@@ -69,13 +73,13 @@ pub fn fold_sessions(sessions: &mut [Session]) -> Folds {
 fn homes() -> Vec<String> {
   let home = crate::config::home_dir();
   let roots = [
-    crate::parser::history_root("CODEX_HOME", ".codex"),
-    crate::parser::history_root("CLAUDE_CONFIG_DIR", ".claude"),
+    crate::parser::history_roots("CODEX_HOME", ".codex"),
+    crate::parser::history_roots("CLAUDE_CONFIG_DIR", ".claude"),
   ];
   let defaults = [".codex", ".claude"].into_iter().filter_map(|x| Some(home.as_ref()?.join(x)));
   // Logged directories are absolute: a relative override (`CODEX_HOME=./.codex`) must be too.
   let absolute = |x: std::path::PathBuf| std::path::absolute(&x).unwrap_or(x);
-  let homes = roots.into_iter().chain(defaults).map(absolute);
+  let homes = roots.into_iter().flatten().chain(defaults).map(absolute);
   homes.map(|x| x.to_string_lossy().to_string()).collect()
 }
 

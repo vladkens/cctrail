@@ -136,16 +136,40 @@ enum TurnKey {
   Anonymous(String),
 }
 
-/// Sessions under `<root>/projects` (or `<root>`); agents carry their main session's root and
-/// working directory.
-pub fn parse(root: &Path) -> Vec<Session> {
-  let projects = root.join("projects");
-  let root = if projects.is_dir() { projects } else { root.to_path_buf() };
-  if !root.is_dir() {
-    return vec![];
-  }
+/// Sessions under each root's `projects` (or the root itself); agents carry their main session's
+/// root and working directory. A session found in several roots (a copied profile) is read from the
+/// root with its longest main log, agents included, and skipped in the others.
+pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
+  let files: Vec<(usize, PathBuf)> = roots
+    .iter()
+    .map(|x| match x.join("projects") {
+      projects if projects.is_dir() => projects,
+      _ => x.to_path_buf(),
+    })
+    .enumerate()
+    .flat_map(|(i, x)| jsonl_files(&[x]).into_iter().map(move |x| (i, x)))
+    .collect();
 
-  let mut parsed: Vec<Parsed> = jsonl_files(&[root]).par_iter().map(|x| parse_file(x)).collect();
+  // A file's session: its own stem for a main log, its main log's for an agent.
+  let key = |path: &Path| {
+    let main = session_dir(path).unwrap_or_else(|| path.with_extension(""));
+    main.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default()
+  };
+  let mut best: HashMap<String, (u64, usize)> = HashMap::new();
+  for (root, path) in files.iter().filter(|x| session_dir(&x.1).is_none()) {
+    let size = std::fs::metadata(path).map_or(0, |x| x.len());
+    let x = best.entry(key(path)).or_insert((size, *root));
+    if size > x.0 {
+      *x = (size, *root);
+    }
+  }
+  let files: Vec<PathBuf> = files
+    .into_iter()
+    .filter(|(root, path)| best.get(&key(path)).is_none_or(|x| x.1 == *root))
+    .map(|x| x.1)
+    .collect();
+
+  let mut parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x)).collect();
   let mut agents: HashMap<(PathBuf, String), usize> = HashMap::new();
   for (i, x) in parsed.iter().enumerate() {
     let Some(dir) = session_dir(&x.path).filter(|_| !x.session.is_main) else { continue };
@@ -380,7 +404,7 @@ mod tests {
 
   #[test]
   fn links_subagent_to_main_root() {
-    let sessions = parse(&fixtures("claude/projects"));
+    let sessions = parse(&[fixtures("claude/projects")]);
     let main = sessions.iter().find(|x| x.is_main).unwrap();
     let agent = sessions.iter().find(|x| !x.is_main).unwrap();
 
@@ -391,7 +415,7 @@ mod tests {
 
   #[test]
   fn keeps_one_copy_of_sidechain_usage() {
-    let sessions = parse(&fixtures("claude_dedupe/projects"));
+    let sessions = parse(&[fixtures("claude_dedupe/projects")]);
     let events = crate::metrics::billable_events(&sessions);
     let total: u64 =
       events.iter().map(|(s, e)| sessions[*s].events[*e].usage.unwrap().total()).sum();
@@ -408,13 +432,36 @@ mod tests {
     ];
     std::fs::write(dir.join("main.jsonl"), lines.join("\n")).unwrap();
 
-    let sessions = parse(&dir);
+    let sessions = parse(std::slice::from_ref(&dir));
     std::fs::remove_dir_all(&dir).unwrap();
     let main = sessions.iter().find(|x| x.is_main).unwrap();
     let agent = sessions.iter().find(|x| !x.is_main).unwrap();
     assert_eq!(agent.root_id, main.id);
     assert_eq!(agent.workdir, "/repo");
     assert_eq!(total(std::slice::from_ref(agent)), 5);
+  }
+
+  #[test]
+  fn keeps_the_longest_copy_across_roots() {
+    let base = std::env::temp_dir().join(format!("cctrail-claude-copies-{}", std::process::id()));
+    let line = |id: &str, n: u64| {
+      format!(
+        r#"{{"type": "assistant", "timestamp": "2026-01-01T00:00:0{n}Z", "message": {{"id": "{id}", "usage": {{"input_tokens": {n}}}}}}}"#
+      )
+    };
+    let write = |path: PathBuf, lines: &[String]| {
+      std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+      std::fs::write(path, lines.join("\n")).unwrap();
+    };
+    // `a` has the shorter main log and its own agent; `b` the longer one without the agent.
+    write(base.join("a/s.jsonl"), &[line("m1", 1)]);
+    write(base.join("a/s/subagents/agent-x.jsonl"), &[line("x1", 4)]);
+    write(base.join("b/s.jsonl"), &[line("m1", 1), line("m2", 2)]);
+    for roots in [["a", "b"], ["b", "a"]] {
+      let sessions = parse(&roots.map(|x| base.join(x)));
+      assert_eq!((sessions.len(), total(&sessions)), (1, 3), "{roots:?}");
+    }
+    std::fs::remove_dir_all(&base).unwrap();
   }
 
   #[test]

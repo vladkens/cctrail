@@ -159,15 +159,37 @@ struct Parsed {
   signatures: Vec<Signature>,
 }
 
-/// Sessions under `<root>/sessions` and `<root>/archived_sessions` (or `<root>`); spawned agents
-/// carry their main session's root and working directory.
-pub fn parse(root: &Path) -> Vec<Session> {
-  let metas: Vec<Option<Rollout>> = history_files(root).par_iter().map(|x| read_meta(x)).collect();
+/// Sessions under each root's `sessions` and `archived_sessions` (or the root itself); spawned
+/// agents carry their main session's root and working directory. A rollout id seen twice counts
+/// once: within a root the later file wins (`sessions` over `archived_sessions`), across roots (a
+/// copied profile) the longest file, whole.
+pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
+  let files: Vec<(usize, PathBuf)> = roots
+    .iter()
+    .enumerate()
+    .flat_map(|(i, x)| history_files(x).into_iter().map(move |x| (i, x)))
+    .collect();
+  let metas: Vec<Option<(usize, Rollout)>> =
+    files.par_iter().map(|(i, x)| read_meta(x).map(|x| (*i, x))).collect();
+  // Each root on its own first (the later file wins), then the longest of the roots' winners.
+  let mut by_root: Vec<Vec<Rollout>> = roots.iter().map(|_| vec![]).collect();
+  let mut in_root: Vec<HashMap<String, usize>> = roots.iter().map(|_| HashMap::new()).collect();
+  for (root, x) in metas.into_iter().flatten() {
+    match in_root[root].get(&x.id) {
+      Some(i) => by_root[root][*i] = x,
+      None => {
+        in_root[root].insert(x.id.clone(), by_root[root].len());
+        by_root[root].push(x);
+      }
+    }
+  }
+  let size = |x: &Rollout| std::fs::metadata(&x.path).map_or(0, |x| x.len());
   let mut rollouts: Vec<Rollout> = vec![];
   let mut indexes: HashMap<String, usize> = HashMap::new();
-  for x in metas.into_iter().flatten() {
+  for x in by_root.into_iter().flatten() {
     match indexes.get(&x.id) {
-      Some(i) => rollouts[*i] = x,
+      Some(i) if size(&x) > size(&rollouts[*i]) => rollouts[*i] = x,
+      Some(_) => {}
       None => {
         indexes.insert(x.id.clone(), rollouts.len());
         rollouts.push(x);
@@ -467,7 +489,7 @@ mod tests {
   #[test]
   fn links_only_spawned_agent_and_removes_fork_replay() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex");
-    let sessions = parse(&root);
+    let sessions = parse(std::slice::from_ref(&root));
     let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
     let (main, agent, fork) = (find("codex-main-1"), find("codex-agent-1"), find("codex-fork-1"));
 
@@ -476,6 +498,42 @@ mod tests {
     assert_eq!(fork.root_id, fork.id);
     assert_eq!(total(&[fork]), 25);
     assert_eq!(total(&sessions.iter().collect::<Vec<_>>()), 455);
+
+    // The same rollouts under a second root (a copied profile) count once.
+    let twice = parse(&[root.clone(), root]);
+    assert_eq!(twice.len(), sessions.len());
+    assert_eq!(total(&twice.iter().collect::<Vec<_>>()), 455);
+  }
+
+  #[test]
+  fn keeps_the_longest_copy_across_roots() {
+    let base = std::env::temp_dir().join(format!("cctrail-copies-{}", std::process::id()));
+    let meta = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"s","cwd":"/r"}}"#;
+    let count = |n: u64, t: &str| {
+      format!(
+        r#"{{"timestamp":"2026-01-01T00:0{t}:00Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{n}}},"last_token_usage":{{"input_tokens":100}}}}}}}}"#
+      )
+    };
+    let short = [meta.to_string(), count(100, "1")].join("\n");
+    let long = [short.clone(), count(200, "2"), count(300, "3")].join("\n");
+    let file = |root: &str, sub: &str, text: &str| {
+      std::fs::create_dir_all(base.join(root).join(sub)).unwrap();
+      std::fs::write(base.join(root).join(sub).join("rollout.jsonl"), text).unwrap();
+    };
+    let all = |roots: &[&str]| {
+      let roots: Vec<PathBuf> = roots.iter().map(|x| base.join(x)).collect();
+      total(&parse(&roots).iter().collect::<Vec<_>>())
+    };
+
+    // Across roots the longest file wins whole, in either order.
+    file("a", "sessions", &long);
+    file("b", "sessions", &short);
+    assert_eq!((all(&["a", "b"]), all(&["b", "a"])), (300, 300));
+    // Within a root the later file wins, even when shorter (`sessions` over `archived_sessions`).
+    file("c", "archived_sessions", &long);
+    file("c", "sessions", &short);
+    assert_eq!(all(&["c"]), 100);
+    std::fs::remove_dir_all(&base).unwrap();
   }
 
   #[test]
