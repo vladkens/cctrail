@@ -251,13 +251,41 @@ mod tests {
     app.key(KeyEvent::new(code, KeyModifiers::NONE));
   }
 
-  fn screen(app: &App) -> String {
+  fn frame(app: &App) -> ratatui::buffer::Buffer {
     let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
     term.draw(|f| draw::draw(f, app)).unwrap();
-    let buf = term.backend().buffer();
+    term.backend().buffer().clone()
+  }
+
+  fn screen(app: &App) -> String {
+    let buf = frame(app);
     (0..buf.area.height)
       .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>() + "\n")
       .collect()
+  }
+
+  #[test]
+  fn draws_one_even_selection_and_no_bars() {
+    use ratatui::style::{Color, Modifier};
+
+    let mut app = app();
+    let buf = frame(&app);
+    let out = screen(&app);
+    assert!(!out.contains('█') && !out.contains('░') && out.contains('%'), "{out}");
+    // The selected row (the first under the header) is one dark gray bar, nothing reversed.
+    let y = (0..buf.area.height).find(|y| buf[(0, *y)].symbol() == "▶").unwrap();
+    for x in 0..buf.area.width {
+      let cell = &buf[(x, y)];
+      assert_eq!(cell.bg, Color::DarkGray, "column {x}");
+      assert!(!cell.modifier.contains(Modifier::REVERSED), "column {x}");
+    }
+    // The active period is marked by its text, not a filled block.
+    assert!((0..buf.area.width).all(|x| !buf[(x, 0)].modifier.contains(Modifier::REVERSED)));
+
+    // A drill-down is a bordered box over the list, which stays drawn around it.
+    press(&mut app, KeyCode::Enter);
+    let out = screen(&app);
+    assert!(out.contains('┌') && out.contains('┘') && out.contains("Name"), "{out}");
   }
 
   fn app() -> App {
