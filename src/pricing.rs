@@ -45,7 +45,7 @@ fn catalog() -> &'static Loaded {
 }
 
 /// A download older than this may lack recent models or price changes.
-const STALE: Duration = Duration::from_secs(7 * 24 * 3600);
+const STALE: Duration = Duration::from_secs(24 * 3600);
 
 /// Where the downloaded catalog lives; it wins over the bundled one.
 pub fn cache_path() -> Result<PathBuf> {
@@ -202,7 +202,7 @@ impl Price {
 
 // MARK: Updates
 //
-// A weekly workflow rebuilds the catalog from the models.dev git history
+// A daily workflow rebuilds the catalog from the models.dev git history
 // (`scripts/pricing-history.py`) and publishes it as the `pricing` release's asset.
 
 const CATALOG_URL: &str =
@@ -246,7 +246,7 @@ pub fn update() -> Result<PathBuf> {
 /// A download running beside the history parsing, started by `refresh`.
 pub struct Refresh(Receiver<Catalog>);
 
-/// Starts downloading the catalog when the cached one is missing or a week old and no attempt
+/// Starts downloading the catalog when the cached one is missing or a day old and no attempt
 /// failed in the last day. `CCTRAIL_NO_UPDATE=1` turns it off. Never fails: the bundled or cached
 /// prices stay in use.
 pub fn refresh() -> Option<Refresh> {
@@ -426,8 +426,9 @@ mod tests {
     let now = SystemTime::now();
     let day = Duration::from_secs(24 * 3600);
     assert!(is_stale(None, now));
-    assert!(is_stale(Some(now - 8 * day), now));
-    assert!(!is_stale(Some(now - 6 * day), now));
+    let hour = Duration::from_secs(3600);
+    assert!(is_stale(Some(now - 25 * hour), now));
+    assert!(!is_stale(Some(now - 23 * hour), now));
     assert!(!is_stale(Some(now + day), now));
   }
 }

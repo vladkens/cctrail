@@ -13,10 +13,10 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 
 - Read history only: never write into `~/.claude` or `~/.codex`. cctrail writes only under
   `~/.cache/cctrail`, and uses the network only to fetch the price catalog from the `pricing`
-  release: on `cctrail update-pricing`, and in the background when the cached one is a week old
+  release: on `cctrail update-pricing`, and in the background when the cached one is a day old
   (`CCTRAIL_NO_UPDATE=1` turns that off; tests set it).
 - Prices are dated: `scripts/pricing-history.py` builds them from the models.dev git history, the
-  weekly `pricing.yml` workflow publishes them. Price an event at its day's rate, never at today's.
+  daily `pricing.yml` workflow publishes them. Price an event at its day's rate, never at today's.
 - Support Claude Code (`~/.claude/projects`, `CLAUDE_CONFIG_DIR`) and Codex (`~/.codex/sessions`
   and `archived_sessions`, `CODEX_HOME`). Add another harness only on request, as its own
   `src/parser/<harness>.rs`.

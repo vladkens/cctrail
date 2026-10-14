@@ -1,11 +1,11 @@
 name: pricing
 
-# Every week: rebuild the dated price catalog from the models.dev git history and publish it as the
-# `pricing` release's asset, which cctrail downloads when its copy is a week old (src/pricing.rs).
+# Every day: rebuild the dated price catalog from the models.dev git history and publish it as the
+# `pricing` release's asset, which cctrail downloads when its copy is a day old (src/pricing.rs).
 # It runs no third-party code: the script only reads models.dev's TOML files.
 on:
   schedule:
-    - cron: "23 5 * * 1"
+    - cron: "23 5 * * *"
   # A change to the builder publishes at once, so the first merge seeds the asset too.
   push:
     branches: [main]
@@ -35,6 +35,6 @@ jobs:
         run: |
           if ! gh release view pricing >/dev/null 2>&1; then
             gh release create pricing --target main --prerelease --title "Prices" \
-              --notes "Dated model prices for cctrail, rebuilt weekly from the models.dev git history."
+              --notes "Dated model prices for cctrail, rebuilt daily from the models.dev git history."
           fi
           gh release upload pricing target/pricing.tsv --clobber

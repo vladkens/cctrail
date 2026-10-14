@@ -23,12 +23,12 @@ anything.
 - Format: `src/pricing.tsv`, a header and one row per price period (provider, model, since,
   prices; an empty cell for a price not set), sorted by provider, model and date. The bundled file
   is the fallback; a downloaded one in `~/.cache/cctrail` wins.
-- Delivery: a weekly scheduled workflow (`.github/workflows/pricing.yml`, plus
+- Delivery: a daily scheduled workflow (`.github/workflows/pricing.yml`, plus
   `workflow_dispatch`) rebuilds the catalog and uploads it as `pricing.tsv` to a rolling
   `pricing` GitHub release (created if missing, asset replaced). It needs `contents: write` only
   in that job and runs no third-party code: it reads TOML from the models.dev checkout.
-- Auto-update (approved by the person): when the downloaded catalog is missing or older than 7
-  days, cctrail fetches the release asset in the background while it parses the history (one
+- Auto-update (approved by the person): when the downloaded catalog is missing or older than a
+  day, cctrail fetches the release asset in the background while it parses the history (one
   request, a few seconds' timeout), uses it if it arrives in time and is valid, and saves it.
   Failures are silent. `CCTRAIL_NO_UPDATE=1` turns it off; tests set it. `cctrail update-pricing`
   fetches the same asset on demand and reports errors. agents.md's network rule changes to say
