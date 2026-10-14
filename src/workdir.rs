@@ -77,17 +77,21 @@ pub fn fold_sessions(sessions: &mut [Session]) -> Folds {
     x.workdir = cache.entry(x.cwd.clone()).or_insert_with(|| folds.worktree(&x.cwd)).clone();
   }
 
-  let mut seen: HashMap<&str, (Option<Ts>, BTreeSet<String>)> = HashMap::new();
+  // One entry per directory however it was spelled (`same_path`), shown as its latest spelling.
+  let mut seen: HashMap<String, Dir> = HashMap::new();
   for x in sessions.iter() {
     let last = x.events.iter().filter_map(|e| e.ts).max();
-    let dir = seen.entry(&x.workdir).or_default();
-    dir.0 = dir.0.max(last);
-    dir.1.extend(x.remote.clone());
+    let dir = seen.entry(same_path(&x.workdir)).or_insert_with(|| Dir {
+      path: x.workdir.clone(),
+      last: None,
+      remotes: BTreeSet::new(),
+    });
+    if last > dir.last {
+      (dir.path, dir.last) = (x.workdir.clone(), last);
+    }
+    dir.remotes.extend(x.remote.clone());
   }
-  let dirs: Vec<Dir> = seen
-    .into_iter()
-    .map(|(path, (last, remotes))| Dir { path: path.into(), last, remotes })
-    .collect();
+  let dirs: Vec<Dir> = seen.into_values().collect();
   folds.clones = clones(&dirs, &temp_dirs());
   for x in sessions.iter_mut() {
     if let Some(clone) = folds.clones.get(&same_path(&x.workdir)) {

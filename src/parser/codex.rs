@@ -242,6 +242,13 @@ pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
 
   let mut sessions: Vec<Session> = parsed.into_iter().map(|x| x.session).collect();
   inherit_roots(&mut sessions, &parents);
+  // The remote belongs to the directory the rollout started in: a session that moved (a later
+  // `turn_context`, or an agent taking its root's directory) keeps no remote.
+  for (x, rollout) in sessions.iter_mut().zip(&rollouts) {
+    if x.workdir != rollout.workdir {
+      x.remote = None;
+    }
+  }
   sessions.retain(|x| !x.events.is_empty());
   sessions
 }
