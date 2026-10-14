@@ -48,7 +48,10 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 
 - The numbers are the product: tokens, sessions, active seconds and first/last activity must not
   drift between versions. Treat any change in them as a bug unless it is a fix the person approved;
-  say it in the PR body with before/after numbers.
+  say in the PR body where it changes and why (which model, price, date or directory rule).
+- The repository is public: never put the person's own numbers (costs, tokens, hours, history
+  size) or private project names in PR bodies, review replies, commits or docs. Fixture numbers,
+  speed measurements and "identical to `main`" are fine; report the rest to the person directly.
 - Until the port is done, the reference is the Python cctrail 0.2.1 (`uvx cctrail==0.2.1`).
   `make compare` runs both on the local history and diffs the JSON: tokens, sessions, seconds and
   timestamps exact, costs within 1e-9.
@@ -61,8 +64,7 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 
 ## Performance
 
-- The full local history is ~10 GB of Codex and ~1 GB of Claude logs; every command reads all of
-  it. Measure with `make bench` (hyperfine, warm cache), A/B/A back to back; when the two A runs
+- Every command reads the full local history, gigabytes of logs. Measure with `make bench` (hyperfine, warm cache), A/B/A back to back; when the two A runs
   differ by more than 5%, rerun later instead of concluding.
 - Log every speed attempt in [docs/perf.md](docs/perf.md): what was tried, the result, kept or
   reverted and why. Keep a change only when `make compare` still matches and the gain is clear.
@@ -75,7 +77,7 @@ CI the `Makefile` and `.github/workflows/main.yml`.
   1. Agree the plan with the person. For multi-step work keep a checklist in
      `docs/plans/yyyymmdd-<name>.md` and during the work only tick its checkboxes, with no progress
      prose. The PR that finishes the plan's last item, in its own commits, adds a first line
-     `Done: yyyy-mm-dd, PR #N` and a short final `## Result` section with the key numbers, and
+     `Done: yyyy-mm-dd, PR #N` and a short final `## Result` section with the key results, and
      moves it to `docs/plans/completed/` (fixing links to it). Plans stay; never delete them.
   2. Branch from `main` as `feat/<name>`, in the agent's own git worktree under
      `.claude/worktrees/`. A small change that fits an open PR's topic goes into that PR instead of

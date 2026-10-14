@@ -53,8 +53,8 @@ anything.
 
 ## Result
 
-Tokens, sessions and active time identical to `main` on the full history. Cost by month
-(main → dated): 2026-07 $2996.73 → $3354.50, 2026-08 $2720.00 → $3236.70, other months unchanged
-but for $2.75 of gpt-5.4 in April–May; total $21397.40 → $22274.62. All of it is GPT-5.6 before
-models.dev recorded its price cut on 2026-08-25, and gpt-5.4 long-context prices from the older
-catalog layouts.
+Tokens, sessions and active time identical to `main` on the full history. Costs moved only where
+a price changed after a model's first price: GPT-5.6 sol, terra and luna requests before
+models.dev recorded the 2026-08-25 cut (sol $5/$30 → $4/$20 per million) now use the older,
+higher rate, so July and August cost more; gpt-5.4 requests over its long-context threshold in
+April–May now get the long-context rate from the older catalog layouts. Other months unchanged.
