@@ -73,7 +73,10 @@ fn homes() -> Vec<String> {
     crate::parser::history_root("CLAUDE_CONFIG_DIR", ".claude"),
   ];
   let defaults = [".codex", ".claude"].into_iter().filter_map(|x| Some(home.as_ref()?.join(x)));
-  roots.into_iter().chain(defaults).map(|x| x.to_string_lossy().to_string()).collect()
+  // Logged directories are absolute: a relative override (`CODEX_HOME=./.codex`) must be too.
+  let absolute = |x: std::path::PathBuf| std::path::absolute(&x).unwrap_or(x);
+  let homes = roots.into_iter().chain(defaults).map(absolute);
+  homes.map(|x| x.to_string_lossy().to_string()).collect()
 }
 
 /// A path for comparing, without a trailing separator; on Windows with `/` separators and

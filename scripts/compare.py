@@ -74,10 +74,12 @@ def changes(ref: dict, out: dict) -> list[str]:
         x, y = a.get(name), b.get(name)
         dt = (y["active_seconds"] if y else 0) - (x["active_seconds"] if x else 0)
         dk = (y["usage"]["total"] if y else 0) - (x["usage"]["total"] if x else 0)
-        if dt or dk:
-            moves.append((abs(dt), name, dt, dk))
+        dc = (y["cost_usd"] if y else 0) - (x["cost_usd"] if x else 0)
+        # Any field may move (cost, sessions, token kinds, models), not only time and totals.
+        if x != y:
+            moves.append((abs(dt), name, dt, dk, dc))
     moves.sort(key=lambda m: (-m[0], m[1]))
-    return [f"{n}: {dt / 3600:+.1f}h, {dk:+,} tokens" for _, n, dt, dk in moves]
+    return [f"{n}: {dt / 3600:+.1f}h, {dk:+,} tokens, ${dc:+.2f}" for _, n, dt, dk, dc in moves]
 
 
 def main() -> int:
