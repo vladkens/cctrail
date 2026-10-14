@@ -2,11 +2,40 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 use serde_json::{Value, json};
 
+/// The working directory in the fixtures; `/repo` is not absolute on Windows, where a project
+/// can't hold it.
+const REPO: &str = if cfg!(windows) { "C:/repo" } else { "/repo" };
+
+/// The fixtures, on Windows a copy with `REPO` for `/repo`.
 fn fixtures() -> PathBuf {
-  Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+  static DIR: OnceLock<PathBuf> = OnceLock::new();
+  let dir = DIR.get_or_init(|| {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    if !cfg!(windows) {
+      return src;
+    }
+    let dst = std::env::temp_dir().join(format!("cctrail-fixtures-{}", std::process::id()));
+    copy_tree(&src, &dst);
+    dst
+  });
+  dir.clone()
+}
+
+fn copy_tree(src: &Path, dst: &Path) {
+  std::fs::create_dir_all(dst).unwrap();
+  for entry in std::fs::read_dir(src).unwrap().map(Result::unwrap) {
+    let to = dst.join(entry.file_name());
+    if entry.file_type().unwrap().is_dir() {
+      copy_tree(&entry.path(), &to);
+      continue;
+    }
+    let text = std::fs::read_to_string(entry.path()).unwrap();
+    std::fs::write(to, text.replace("\"/repo", &format!("\"{REPO}"))).unwrap();
+  }
 }
 
 /// A line with this start and end: paths in between are `~/…` or absolute, native separators.
@@ -89,11 +118,11 @@ fn groups_by_dir_without_config() {
   let mut run = Run::new("claude/projects", "missing").config("missing.toml");
   let value = run.json(&["--by", "dir", "--provider", "claude", "--json"]);
   assert_eq!(value["query"]["by"], "dir");
-  assert_eq!(value["groups"][0]["workdir"], "/repo");
+  assert_eq!(value["groups"][0]["workdir"], REPO);
   assert_eq!(value["groups"][0]["usage"]["total"], 427);
 
   run.config = None;
-  assert!(run.stdout(&["--by", "dir"]).contains("/repo"));
+  assert!(run.stdout(&["--by", "dir"]).contains(REPO));
 }
 
 #[test]
@@ -110,7 +139,7 @@ fn reports_unmapped_section_total() {
   assert!(out.lines().any(|x| x.starts_with("@unmapped") && x.contains("427")), "{out}");
   assert!(out.contains("1 unmapped dir · run cctrail --by dir"));
   assert!(has_line(&out, "Project config: ", "empty.toml"), "{out}");
-  assert!(!out.lines().any(|x| x.starts_with("/repo")));
+  assert!(!out.lines().any(|x| x.starts_with(REPO)));
 }
 
 #[test]
@@ -140,7 +169,7 @@ fn explicit_config_must_exist() {
 fn unmapped_json_is_always_complete() {
   let value = Run::new("claude/projects", "missing").json(&["--provider", "claude", "--json"]);
   let group = &value["groups"][0];
-  assert_eq!((&group["group"], &group["project"]), (&json!("@unmapped"), &json!("/repo")));
+  assert_eq!((&group["group"], &group["project"]), (&json!("@unmapped"), &json!(REPO)));
   assert_eq!(group["usage"]["total"], 427);
   assert_eq!(group["active_seconds"], 310);
   assert_eq!(value["unpriced_models"], json!([]));
@@ -167,7 +196,7 @@ fn reports_current_project() {
   let config = dir.join("config.toml");
   // macOS: the temp dir is behind a symlink. Windows: `canonicalize` gives a `\\?\` path.
   let cwd = if cfg!(windows) { dir.clone() } else { dir.canonicalize().unwrap() };
-  std::fs::write(&config, format!("[projects]\n\"oss/demo\" = [\"/repo\", {:?}]\n", cwd)).unwrap();
+  std::fs::write(&config, format!("[projects]\n\"oss/demo\" = [{REPO:?}, {cwd:?}]\n")).unwrap();
   let mut run = Run::new("claude/projects", "missing").config(&config);
   run.cwd = Some(cwd);
 

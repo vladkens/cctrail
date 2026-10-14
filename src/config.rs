@@ -155,8 +155,7 @@ fn expand_path(value: &str, home: Option<&Path>) -> Result<PathBuf> {
     }
     _ => PathBuf::from(value),
   };
-  // `has_root`, not `is_absolute`: on Windows `\repo` is a root of the current drive.
-  if !path.has_root() {
+  if !path.is_absolute() {
     bail!("project path must be absolute: {value}");
   }
   Ok(path)
@@ -189,6 +188,11 @@ pub fn config_path() -> Option<PathBuf> {
 mod tests {
   use super::*;
 
+  /// An absolute path on this platform: Windows needs a drive.
+  fn abs(path: &str) -> String {
+    if cfg!(windows) { format!("C:{path}") } else { path.to_string() }
+  }
+
   #[test]
   fn maps_descendants_by_longest_prefix() {
     let text = r#"
@@ -196,30 +200,34 @@ mod tests {
       "oss/tools" = ["~/Code/tools"]
       "try/sandbox" = ["~/Code/tools/sandbox"]
     "#;
-    let config = Config::parse(text, Some(Path::new("/home/me"))).unwrap();
+    let home = abs("/home/me");
+    let config = Config::parse(text, Some(Path::new(&home))).unwrap();
+    let map = |path: &str, by| config.map(&abs(path), by);
 
-    assert_eq!(config.map("/home/me/Code/tools/cli", By::Project), "oss/tools");
-    assert_eq!(config.map("/home/me/Code/tools", By::Project), "oss/tools");
-    assert_eq!(config.map("/home/me/Code/tools/sandbox/app", By::Project), "try/sandbox");
-    assert_eq!(config.map("/home/me/Code/toolsx", By::Project), "/home/me/Code/toolsx");
-    assert_eq!(config.map("/home/me/Code/tools/cli", By::Group), "oss");
-    assert_eq!(config.map("/other", By::Group), "@unmapped");
-    assert_eq!(config.map("/other", By::Project), "/other");
-    assert_eq!(config.map("/other", By::Dir), "/other");
+    assert_eq!(map("/home/me/Code/tools/cli", By::Project), "oss/tools");
+    assert_eq!(map("/home/me/Code/tools", By::Project), "oss/tools");
+    assert_eq!(map("/home/me/Code/tools/sandbox/app", By::Project), "try/sandbox");
+    assert_eq!(map("/home/me/Code/toolsx", By::Project), abs("/home/me/Code/toolsx"));
+    assert_eq!(map("/home/me/Code/tools/cli", By::Group), "oss");
+    assert_eq!(map("/other", By::Group), "@unmapped");
+    assert_eq!(map("/other", By::Project), abs("/other"));
+    assert_eq!(map("/other", By::Dir), abs("/other"));
 
-    let other_case = config.map("/home/me/code/Tools/cli", By::Project);
-    assert_eq!(other_case, if cfg!(windows) { "oss/tools" } else { "/home/me/code/Tools/cli" });
+    let other_case = map("/home/me/code/Tools/cli", By::Project);
+    let expected = if cfg!(windows) { "oss/tools".into() } else { abs("/home/me/code/Tools/cli") };
+    assert_eq!(other_case, expected);
   }
 
   #[test]
   fn rejects_invalid_config() {
+    let both = format!("[projects]\n'oss/one' = ['{}']\n'try/two' = ['{}']", abs("/r"), abs("/r/"));
     let cases = [
       ("[projects]\ninvalid = ['/repo']", "<group>/<project>"),
       ("[projects]\n'a/b/c' = ['/repo']", "<group>/<project>"),
       ("[projects]\n'oss/demo' = []", "has no paths"),
       ("[projects]\n'oss/demo' = [1]", "must be a string"),
       ("[projects]\n'oss/demo' = ['relative']", "must be absolute"),
-      ("[projects]\n'oss/one' = ['/repo']\n'try/two' = ['/repo/']", "belongs to both"),
+      (both.as_str(), "belongs to both"),
       ("projects = 1", "must be a table"),
       ("other = 1", "unknown field `other`"),
       ("[projects", "TOML"),
