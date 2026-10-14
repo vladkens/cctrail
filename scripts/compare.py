@@ -6,8 +6,8 @@
 Both read the same price catalog (src/pricing.tsv through XDG_CACHE_HOME, no refresh) and stop at
 yesterday, so sessions running now don't change the numbers between the two runs. Totals must
 match: tokens and sessions exactly, costs within 1e-9, active time within a second per group
-(rounding when time is divided between groups). Group and period differences are listed, not failed on: grouping may
-change by design.
+(rounding when time is divided between groups). Group and period differences are listed, not
+failed on: grouping may change by design.
 
     uv run scripts/compare.py --ref ../main/target/release/cctrail [--bin target/release/cctrail]
 """

@@ -8,8 +8,8 @@ Code and Codex. Tick a phase when done.
 - [ ] **2. Fast:** the full history (~11 GB) well under the Python's 27 s; log attempts in
       [perf.md](perf.md).
 - [ ] **3. Release v0.3.0** on crates.io and as GitHub release binaries (macOS, Linux, Windows).
-      The person publishes the first version by hand and sets up crates.io Trusted Publishing;
-      PyPI stays at 0.2.1.
+      0.0.0 holds the name on crates.io; the person sets up Trusted Publishing for `main.yml`,
+      then `crates: false` goes. PyPI stays at 0.2.1.
 - [x] **4. Dated prices:** every request at its day's price from the models.dev git history,
       refreshed daily without the person's help (#3).
       [Plan](plans/completed/20261014-price-history.md)
