@@ -6,6 +6,10 @@ name: pricing
 on:
   schedule:
     - cron: "23 5 * * 1"
+  # A change to the builder publishes at once, so the first merge seeds the asset too.
+  push:
+    branches: [main]
+    paths: [scripts/pricing-history.py, .github/workflows/pricing.yml]
   workflow_dispatch:
 
 permissions:
