@@ -276,9 +276,12 @@ mod tests {
       dir("/h/Code/other", 5, None),
     ];
     let map = clones(&dirs, &temps);
-    assert_eq!(map.get("/h/Code/pub/macmon").map(String::as_str), Some("/h/Code/macmon"));
     assert_eq!(
-      map.get("/Volumes/Data/h/Code/pub/macmon").map(String::as_str),
+      map.get(&same_path("/h/Code/pub/macmon")).map(String::as_str),
+      Some("/h/Code/macmon")
+    );
+    assert_eq!(
+      map.get(&same_path("/Volumes/Data/h/Code/pub/macmon")).map(String::as_str),
       Some("/h/Code/macmon")
     );
     assert_eq!(map.len(), 2);
@@ -302,7 +305,7 @@ mod tests {
       dir("/h/old/vpn", 10, None),
     ];
     let map = clones(&dirs, &temps);
-    assert_eq!(map.get("/h/old/vpn").map(String::as_str), Some("/h/vpn"));
+    assert_eq!(map.get(&same_path("/h/old/vpn")).map(String::as_str), Some("/h/vpn"));
     assert_eq!(map.len(), 1, "{map:?}");
   }
 
@@ -351,8 +354,8 @@ mod tests {
     // /a/app saw remotes A and B, /b/app only A: one repository whichever order.
     let dirs = [dir("/a/app", 2, &["B", "A"]), dir("/b/app", 1, &["A"]), dir("/c/app", 0, &["C"])];
     let map = clones(&dirs, &[]);
-    assert_eq!(map.get("/b/app").map(String::as_str), Some("/a/app"));
-    assert_eq!(map.get("/c/app"), None);
+    assert_eq!(map.get(&same_path("/b/app")).map(String::as_str), Some("/a/app"));
+    assert_eq!(map.get(&same_path("/c/app")), None);
   }
 
   #[test]
