@@ -10,7 +10,8 @@ use crate::model::{Session, Ts};
 pub struct Folds {
   /// The Codex and Claude homes (`same_path`): their `worktrees` name no repository.
   homes: Vec<String>,
-  /// A worktree-folded directory (`same_path`) → the clone it folds into.
+  /// A worktree-folded directory (`same_path`) → the clone it folds into, or its own shown
+  /// spelling.
   clones: HashMap<String, String>,
 }
 
@@ -93,6 +94,10 @@ pub fn fold_sessions(sessions: &mut [Session]) -> Folds {
   }
   let dirs: Vec<Dir> = seen.into_values().collect();
   folds.clones = clones(&dirs, &temp_dirs());
+  // Every spelling of a directory that folds nowhere still takes its one shown spelling.
+  for x in &dirs {
+    folds.clones.entry(same_path(&x.path)).or_insert_with(|| x.path.clone());
+  }
   for x in sessions.iter_mut() {
     if let Some(clone) = folds.clones.get(&same_path(&x.workdir)) {
       x.workdir = clone.clone();
