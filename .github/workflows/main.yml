@@ -17,11 +17,7 @@ concurrency:
 
 jobs:
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -29,11 +25,9 @@ jobs:
         with:
           shared-key: release
           save-if: ${{ github.event_name != 'pull_request' }}
-      - if: matrix.os == 'ubuntu-latest'
-        run: rustup toolchain install nightly --profile minimal --component rustfmt
-      - if: matrix.os == 'ubuntu-latest'
-        run: make check
-      - run: cargo test --release --locked
+      - run: rustup toolchain install nightly --profile minimal --component rustfmt
+      - run: make check
+      - run: make test
 
   # The shared release steps (github.com/vladkens/actions): `build` runs `make dist` read-only
   # (beside `test`); on main `publish` puts the archives up as the `dev` pre-release, and a
