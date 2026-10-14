@@ -282,10 +282,36 @@ mod tests {
     // The active period is marked by its text, not a filled block.
     assert!((0..buf.area.width).all(|x| !buf[(x, 0)].modifier.contains(Modifier::REVERSED)));
 
-    // A drill-down is a bordered box over the list, which stays drawn around it.
+    // Colors as the text report, kept on the selected row: name cyan, time yellow, cost green.
+    let row = y;
+    let line: String = (0..buf.area.width).map(|x| buf[(x, row)].symbol()).collect();
+    let fg_at = |text: &str| {
+      let x = line.find(text).unwrap();
+      buf[(line[..x].chars().count() as u16, row)].fg
+    };
+    let second = &app.list[0];
+    assert_eq!(fg_at(&second.label[..3]), if second.dim { Color::DarkGray } else { Color::Cyan });
+    assert_eq!(fg_at(&crate::output::cost(second.cost)), Color::Green);
+    assert_eq!(fg_at(&crate::output::duration(second.active.unwrap())), Color::Yellow);
+    // Numbers are right-aligned: the share ends at the last column.
+    assert!(
+      line.trim_end().ends_with('%') && line.trim_end().chars().count() == line.chars().count(),
+      "{line}"
+    );
+    // The version sits at the right of the header.
+    let head: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+    assert!(head.trim_end().ends_with(concat!("cctrail v", env!("CARGO_PKG_VERSION"))), "{head}");
+
+    // A drill-down takes the screen; the help is a box over it.
     press(&mut app, KeyCode::Enter);
     let out = screen(&app);
-    assert!(out.contains('┌') && out.contains('┘') && out.contains("Name"), "{out}");
+    assert!(!out.contains('┌') && out.contains("claude/claude-sonnet-5"), "{out}");
+    press(&mut app, KeyCode::Char('?'));
+    let out = screen(&app);
+    assert!(
+      out.contains('┌') && out.contains("help") && out.contains("claude/claude-sonnet-5"),
+      "{out}"
+    );
   }
 
   fn app() -> App {
