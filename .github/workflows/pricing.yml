@@ -1,0 +1,36 @@
+name: pricing
+
+# Every week: rebuild the dated price catalog from the models.dev git history and publish it as the
+# `pricing` release's asset, which cctrail downloads when its copy is a week old (src/pricing.rs).
+# It runs no third-party code: the script only reads models.dev's TOML files.
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+
+jobs:
+  pricing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # the `pricing` release
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - run: uv run scripts/pricing-history.py --test
+      - run: uv run scripts/pricing-history.py --output target/pricing.json
+      - name: Publish the catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view pricing >/dev/null 2>&1; then
+            gh release create pricing --target main --prerelease --title "Prices" \
+              --notes "Dated model prices for cctrail, rebuilt weekly from the models.dev git history."
+          fi
+          gh release upload pricing target/pricing.json --clobber
