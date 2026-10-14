@@ -420,7 +420,8 @@ pub fn unpriced(sessions: &[Session], range: &DateRange) -> Vec<(String, u64)> {
     }
     if pricing::price(session.provider, event.model.as_deref()).is_none() {
       let model = event.model.as_deref().unwrap_or("unknown");
-      *models.entry(model).or_default() += event.usage.map_or(0, |x| x.total());
+      let x = models.entry(model).or_default();
+      *x = x.saturating_add(event.usage.map_or(0, |x| x.total()));
     }
   }
   let mut models: Vec<(String, u64)> =

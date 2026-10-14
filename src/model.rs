@@ -61,13 +61,16 @@ pub struct Usage {
   pub reasoning: u64,
 }
 
+// Sums saturate: history is untrusted, a crafted token count must not wrap or panic.
 impl Usage {
   pub fn cache_write(&self) -> u64 {
-    self.cache_write_5m + self.cache_write_1h
+    self.cache_write_5m.saturating_add(self.cache_write_1h)
   }
 
   pub fn total(&self) -> u64 {
-    self.input + self.cache_write() + self.cache_read + self.output + self.reasoning
+    [self.cache_write(), self.cache_read, self.output, self.reasoning]
+      .into_iter()
+      .fold(self.input, u64::saturating_add)
   }
 }
 
@@ -76,12 +79,12 @@ impl Add for Usage {
 
   fn add(self, x: Usage) -> Usage {
     Usage {
-      input: self.input + x.input,
-      cache_write_5m: self.cache_write_5m + x.cache_write_5m,
-      cache_write_1h: self.cache_write_1h + x.cache_write_1h,
-      cache_read: self.cache_read + x.cache_read,
-      output: self.output + x.output,
-      reasoning: self.reasoning + x.reasoning,
+      input: self.input.saturating_add(x.input),
+      cache_write_5m: self.cache_write_5m.saturating_add(x.cache_write_5m),
+      cache_write_1h: self.cache_write_1h.saturating_add(x.cache_write_1h),
+      cache_read: self.cache_read.saturating_add(x.cache_read),
+      output: self.output.saturating_add(x.output),
+      reasoning: self.reasoning.saturating_add(x.reasoning),
     }
   }
 }
@@ -136,5 +139,20 @@ impl Session {
 
   pub fn root(&self) -> (Provider, &str) {
     (self.provider, &self.root_id)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn saturates_huge_token_counts() {
+    let x = Usage { input: u64::MAX, output: 1, ..Default::default() };
+    assert_eq!(x.total(), u64::MAX);
+    assert_eq!((x + x).input, u64::MAX);
+    assert_eq!((x + x).output, 2);
+    let y = Usage { cache_write_5m: u64::MAX, cache_write_1h: 1, ..Default::default() };
+    assert_eq!(y.cache_write(), u64::MAX);
   }
 }

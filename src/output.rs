@@ -306,7 +306,7 @@ pub fn unpriced_text(models: &[(String, u64)], stale: bool, term: &Term) -> Stri
   if models.is_empty() {
     return String::new();
   }
-  let total = models.iter().map(|x| x.1).sum();
+  let total = models.iter().map(|x| x.1).fold(0, u64::saturating_add);
   let names: Vec<&str> = models.iter().map(|x| x.0.as_str()).collect();
   let text = format!("Cost excludes {} on unpriced models: {}", tokens(total), names.join(", "));
   match stale {
