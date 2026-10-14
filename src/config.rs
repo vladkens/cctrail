@@ -139,7 +139,7 @@ impl Config {
   }
 }
 
-pub fn split_project(value: &str) -> Option<(&str, &str)> {
+fn split_project(value: &str) -> Option<(&str, &str)> {
   let (group, name) = value.split_once('/')?;
   match !group.is_empty() && !name.is_empty() && !name.contains('/') {
     true => Some((group, name)),

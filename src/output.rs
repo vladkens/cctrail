@@ -7,7 +7,7 @@ use std::path::Path;
 use jiff::civil::Date;
 use serde_json::{Value, json};
 
-use crate::config::{By, UNMAPPED, home_dir, split_project};
+use crate::config::{By, UNMAPPED, home_dir};
 use crate::metrics::{
   DateRange, Granularity, ModelSummary, Stat, UsageSummary, combine_stats, local_date,
 };
@@ -211,7 +211,7 @@ pub fn stats_text(
   let row = |x: &Stat| {
     let name = match by {
       By::Group => x.name.clone(),
-      _ if split_project(&x.name).is_some() => x.name.clone(),
+      _ if x.mapped => x.name.clone(),
       _ => workdir_label(&x.name),
     };
     vec![
@@ -224,9 +224,9 @@ pub fn stats_text(
     ]
   };
 
-  let unmapped: Vec<&Stat> = stats.iter().filter(|x| split_project(&x.name).is_none()).collect();
+  let unmapped: Vec<&Stat> = stats.iter().filter(|x| !x.mapped).collect();
   let mut rows: Vec<Vec<String>> = match by {
-    By::Project => stats.iter().filter(|x| split_project(&x.name).is_some()).map(row).collect(),
+    By::Project => stats.iter().filter(|x| x.mapped).map(row).collect(),
     _ => stats.iter().map(row).collect(),
   };
   if by == By::Project && !unmapped.is_empty() {
@@ -331,7 +331,9 @@ pub fn group_json(x: &Stat, by: By) -> Value {
   let mut value = stat_json(x);
   match by {
     By::Project => {
-      let (group, project) = split_project(&x.name).unwrap_or((UNMAPPED, &x.name));
+      // A mapped name is a config key, checked to be `<group>/<project>`.
+      let label = x.name.split_once('/').filter(|_| x.mapped);
+      let (group, project) = label.unwrap_or((UNMAPPED, &x.name));
       value.insert("group".into(), json!(group));
       value.insert("project".into(), json!(project));
     }
@@ -487,6 +489,23 @@ mod tests {
     assert!(out.lines().all(|x| x.chars().count() <= 50), "{out}");
     assert!(out.lines().nth(1).unwrap().starts_with("  ~/Documents"));
     assert!(out.contains('…'));
+  }
+
+  #[test]
+  fn keeps_slashed_workdirs_unmapped() {
+    let stat = |name: &str, mapped| Stat { name: name.into(), mapped, ..Default::default() };
+    let stats = [stat("oss/demo", true), stat("C:/repo", false), stat("a/b", false)];
+    let total = combine_stats("total", &stats);
+
+    let out = stats_text(By::Project, &stats, &total, None, &Term::default());
+    let names: Vec<&str> = out.lines().filter_map(|x| x.split(' ').next()).collect();
+    assert_eq!(names[..4], ["Project", "oss/demo", "@unmapped", "total"], "{out}");
+    assert!(out.contains("2 unmapped dirs"));
+
+    let json = group_json(&stats[1], By::Project);
+    assert_eq!((&json["group"], &json["project"]), (&json!("@unmapped"), &json!("C:/repo")));
+    let json = group_json(&stats[0], By::Project);
+    assert_eq!((&json["group"], &json["project"]), (&json!("oss"), &json!("demo")));
   }
 
   #[test]

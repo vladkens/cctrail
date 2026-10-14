@@ -206,6 +206,8 @@ impl UsageSummary {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stat {
   pub name: String,
+  /// The name is a configured project or group, not a working directory or `@unmapped`.
+  pub mapped: bool,
   pub sessions: usize,
   pub usage: Usage,
   pub cost: f64,
@@ -335,11 +337,19 @@ pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By
   let mains: HashSet<(Provider, &str)> =
     sessions.iter().filter(|x| x.is_main).map(|x| x.root()).collect();
 
-  let mut cache: HashMap<&str, String> = HashMap::new();
-  let names: Vec<String> = sessions
+  // Whether a name is a configured project or group comes from the config, never from its text:
+  // a working directory such as `C:/repo` looks like a `<group>/<project>` label.
+  let mut cache: HashMap<&str, (String, bool)> = HashMap::new();
+  let keys: Vec<(String, bool)> = sessions
     .iter()
-    .map(|x| cache.entry(&x.workdir).or_insert_with(|| config.map(&x.workdir, by)).clone())
+    .map(|x| {
+      let mapped = || by != By::Dir && config.find(&x.workdir).is_some();
+      cache.entry(&x.workdir).or_insert_with(|| (config.map(&x.workdir, by), mapped())).clone()
+    })
     .collect();
+  let names: Vec<&str> = keys.iter().map(|x| x.0.as_str()).collect();
+  let new_stat =
+    |si: usize| Stat { name: keys[si].0.clone(), mapped: keys[si].1, ..Default::default() };
 
   let mut stats: HashMap<&str, Stat> = HashMap::new();
   let mut roots: HashMap<&str, HashSet<(Provider, &str)>> = HashMap::new();
@@ -351,9 +361,8 @@ pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By
     let own: Vec<Ts> =
       session.events.iter().filter(|e| !e.failed && in_range(e)).filter_map(|e| e.ts).collect();
     let (Some(first), Some(last)) = (own.iter().min(), own.iter().max()) else { continue };
-    let name = names[si].as_str();
-    let stat =
-      stats.entry(name).or_insert_with(|| Stat { name: name.to_string(), ..Default::default() });
+    let name = names[si];
+    let stat = stats.entry(name).or_insert_with(|| new_stat(si));
     stat.first = Some(stat.first.map_or(*first, |x| x.min(*first)));
     stat.last = Some(stat.last.map_or(*last, |x| x.max(*last)));
     stamps.entry(name).or_default().extend(own);
@@ -367,9 +376,8 @@ pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By
     if !in_range(event) {
       continue;
     }
-    let name = names[si].as_str();
-    let stat =
-      stats.entry(name).or_insert_with(|| Stat { name: name.to_string(), ..Default::default() });
+    let name = names[si];
+    let stat = stats.entry(name).or_insert_with(|| new_stat(si));
     let usage = event.usage.unwrap_or_default();
     stat.usage += usage;
     stat.cost += pricing::cost(session.provider, event.model.as_deref(), &usage, event.speed);
@@ -628,6 +636,22 @@ mod tests {
     let start = day_start(date(2026, 1, 2)) - 60 * MICROS;
     let parts = split_by_day(start, start + 5 * 60 * MICROS);
     assert_eq!(parts, vec![(date(2026, 1, 1), 60 * MICROS), (date(2026, 1, 2), 4 * 60 * MICROS)]);
+  }
+
+  #[test]
+  fn mapped_comes_from_config_not_the_name() {
+    let at = ts("2026-01-01T10:00:00Z");
+    let root = if cfg!(windows) { "C:/oss" } else { "/oss" };
+    let config = Config::parse(&format!("[projects]\n'oss/demo' = ['{root}']"), None).unwrap();
+    let sessions = [session("C:/repo", at), session("a/b", at), session(root, at)];
+
+    let stats = stats_by(&sessions, &DateRange::default(), &config, By::Project);
+    let mapped = |name: &str| stats.iter().find(|x| x.name == name).unwrap().mapped;
+    assert!(!mapped("C:/repo") && !mapped("a/b") && mapped("oss/demo"));
+
+    let stats = stats_by(&sessions, &DateRange::default(), &config, By::Group);
+    let mapped = |name: &str| stats.iter().find(|x| x.name == name).unwrap().mapped;
+    assert!(!mapped("@unmapped") && mapped("oss"));
   }
 
   #[test]
