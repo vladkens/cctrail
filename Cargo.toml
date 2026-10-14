@@ -1,0 +1,39 @@
+[package]
+name = "cctrail"
+version = "0.3.0"
+edition = "2024"
+description = "Time, tokens and cost per project from local Claude Code and Codex history."
+authors = ["vladkens"]
+license = "MIT"
+repository = "https://github.com/vladkens/cctrail"
+homepage = "https://github.com/vladkens/cctrail"
+readme = "readme.md"
+include = ["/src/**/*.rs", "/src/pricing.json", "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/readme.md"]
+keywords = ["claude-code", "codex", "token-usage", "time-tracking", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1.0.104"
+jiff = "0.2.38"
+rayon = "1.12.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+toml = "1.1.8"
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.190"
+
+[profile.release]
+debug = 1
+
+# The prebuilt binaries of `make dist`: file and line in backtraces at a smaller size.
+[profile.dist]
+inherits = "release"
+debug = "line-tables-only"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

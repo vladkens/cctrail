@@ -2,87 +2,72 @@
 
 <div align="center">
 
-[<img src="https://badges.ws/pypi/v/cctrail" alt="version" />](https://pypi.org/project/cctrail)
-[<img src="https://badges.ws/pypi/python/cctrail" alt="py versions" />](https://pypi.org/project/cctrail)
-[<img src="https://badges.ws/pypi/dm/cctrail" alt="downloads" />](https://pypi.org/project/cctrail)
+[<img src="https://badges.ws/crates/v/cctrail" alt="version" />](https://crates.io/crates/cctrail)
 [<img src="https://badges.ws/github/license/vladkens/cctrail" alt="license" />](https://github.com/vladkens/cctrail/blob/main/LICENSE)
 [<img src="https://badges.ws/badge/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
 
 </div>
 
-`cctrail` is a small CLI that reads local Claude Code and Codex history and reports token usage, estimated cost, active time, and project statistics.
+`cctrail` reads local Claude Code and Codex history and shows, per project, the active time,
+tokens and estimated cost.
 
 ## Install
 
-Run the latest version without installing it:
-
 ```sh
-uvx cctrail usage
+cargo install cctrail
 ```
 
-Or install the command persistently:
-
-```sh
-uv tool install cctrail
-```
+Or take a prebuilt binary for macOS, Linux or Windows from the
+[releases](https://github.com/vladkens/cctrail/releases).
 
 ## Usage
 
-Show usage by local calendar day:
-
 ```sh
-cctrail usage
-cctrail usage today
-cctrail usage this-month
-cctrail usage --by week
-cctrail usage --models
-cctrail usage --json
+cctrail                    # statistics per project
+cctrail this-month         # for a period
+cctrail --by group         # per group, or --by dir per working directory
+cctrail here               # the current directory's project: today, this week, this month…
+cctrail days               # tokens, cost and time per day; also weeks, months
+cctrail weeks --models     # broken down by model
 ```
 
-Show statistics grouped by configured project, group, or raw working directory:
-
-```sh
-cctrail stats
-cctrail stats this-month
-cctrail stats --by group
-cctrail stats --by workdir
-cctrail stats --no-config
-cctrail stats --json
-```
-
-Both commands accept `--provider claude|codex` and custom inclusive date ranges:
-
-```sh
-cctrail usage --provider codex --since 2026-08-01 --until 2026-08-31
-```
-
-Named periods are `today`, `yesterday`, `this-week`, `last-week`, `this-month`, `last-month`, and `all`. Weeks start on Monday.
+Periods are `today`, `yesterday`, `this-week`, `last-week`, `this-month`, `last-month` and `all`
+(the default); weeks start on Monday. `--since` and `--until` take inclusive `YYYY-MM-DD` dates
+instead. `--provider claude|codex` reads one harness only, and `--json` prints machine-readable
+output with full paths and token counts.
 
 ### Projects
 
-Projects are configured in `~/.config/cctrail/config.toml`. `XDG_CONFIG_HOME` changes the config root and `CCTRAIL_CONFIG` overrides the complete path.
+Projects are configured in `~/.config/cctrail/config.toml`. `XDG_CONFIG_HOME` changes the config
+root and `CCTRAIL_CONFIG` overrides the complete path.
 
 ```toml
 [projects]
 "env/dotfiles" = [
   "~/Code/dotfiles",
   "~/Code/scripts",
-  "~/Code/skills",
 ]
-"oss/cctrail" = ["~/Code/vibe/cctrail"]
+"oss/cctrail" = ["~/Code/cctrail"]
 ```
 
-Each key must have the `<group>/<project>` form. A configured path includes all descendant working directories; when paths overlap, the longest match wins. Unconfigured directories appear under `@unmapped`. Use the global `--no-config` flag before or after `stats` to skip the file and show raw working directories.
+Each key has the `<group>/<project>` form. A path includes all directories below it; when paths
+overlap, the longest match wins. Directories outside any project are summed up as `@unmapped`;
+`cctrail --by dir` lists them.
 
-Tables use color when stdout is a terminal. JSON always contains unabridged paths and token counts.
+## How it counts
 
-Claude history is read from `~/.claude/projects` and Codex history from `~/.codex/sessions` plus `~/.codex/archived_sessions`. `CLAUDE_CONFIG_DIR` and `CODEX_HOME` override those roots.
+Claude history is read from `~/.claude/projects` and Codex history from `~/.codex/sessions` and
+`~/.codex/archived_sessions`; `CLAUDE_CONFIG_DIR` and `CODEX_HOME` override those roots. Claude Code
+deletes sessions older than 30 days at startup by default: raise
+[`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically) to
+keep a long history.
 
-Claude Code deletes session files older than 30 days at startup by default. To preserve a long-term history, increase [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically) before the default cleanup removes those transcripts.
+Active time treats every user or assistant event as a five-minute window. Overlapping windows
+merge, and time spent in several projects at once is divided between them.
 
-Active time treats every user or assistant event as a five-minute window. Overlapping windows are merged, and simultaneous activity is divided between the names selected by `stats --by`.
-
-Costs are estimates based on the pricing catalog included in the installed package. Run `cctrail update-pricing` to download the latest catalog to `~/.cache/cctrail/pricing.json`; the downloaded catalog takes precedence over the bundled one.
+Costs are estimates from the [models.dev](https://models.dev) prices bundled with the release.
+`cctrail update-pricing` downloads the latest ones to `~/.cache/cctrail/pricing.json`, which then
+take precedence. Tokens on models without a price are listed below the report.
 
 ## License
 

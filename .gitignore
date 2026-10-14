@@ -1,8 +1,3 @@
-__pycache__/
-.coverage
-*.pyc
-/3rd
-/samples
-/target
-cctrail.toml
-/dist
+target/
+.claude/
+.DS_Store
