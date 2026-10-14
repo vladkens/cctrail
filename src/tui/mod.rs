@@ -100,6 +100,15 @@ pub struct Hits {
   pub offset: usize,
   /// The timeline's bars and the rows they stand for.
   pub bars: Vec<(Rect, usize)>,
+  /// The tab and whether a drill-down was drawn: what `offset` is of.
+  pub view: Option<(Tab, bool)>,
+}
+
+impl Hits {
+  /// The first row shown of a view the last frame drew, else none scrolled.
+  pub fn offset_of(&self, view: (Tab, bool)) -> usize {
+    if self.view == Some(view) { self.offset } else { 0 }
+  }
 }
 
 pub struct App {
@@ -377,18 +386,26 @@ impl App {
     (self.open, self.help) = (None, false);
   }
 
+  /// Moves the selection `rows` rows (negative: up), stopping at the ends, and scrolls the list as
+  /// much, so the selected row keeps its place on screen until the list hits its top or end.
+  fn wheel(&mut self, rows: isize) {
+    let (sel, len) = self.selection();
+    let Some(last) = len.checked_sub(1) else { return };
+    let (from, to) = (*sel, sel.saturating_add_signed(rows).min(last));
+    *sel = to;
+    let mut hits = self.hits.borrow_mut();
+    let page = usize::from(hits.rows.height).max(1);
+    hits.offset = ((hits.offset + to).saturating_sub(from)).min(len.saturating_sub(page));
+  }
+
   /// Clicks on periods, the provider, tabs, column headers, rows and bars; the wheel scrolls,
   /// stopping at the ends; a click on the selected row or bar opens it (so does a double click),
   /// anywhere while the help is open closes it.
   pub fn mouse(&mut self, ev: MouseEvent) {
     let at = Position::new(ev.column, ev.row);
-    let wheel = |app: &mut Self, up: bool| {
-      let (sel, len) = app.selection();
-      *sel = if up { sel.saturating_sub(1) } else { (*sel + 1).min(len.saturating_sub(1)) };
-    };
     match ev.kind {
-      MouseEventKind::ScrollUp => return wheel(self, true),
-      MouseEventKind::ScrollDown => return wheel(self, false),
+      MouseEventKind::ScrollUp => return self.wheel(-WHEEL_ROWS),
+      MouseEventKind::ScrollDown => return self.wheel(WHEEL_ROWS),
       MouseEventKind::Down(MouseButton::Left) => {}
       _ => return,
     }
@@ -434,6 +451,9 @@ impl App {
     self.refresh();
   }
 }
+
+/// Rows one wheel step moves the selection and scrolls the list, as macmon's.
+const WHEEL_ROWS: isize = 3;
 
 /// The row of `len` a navigation key moves the selection to from row `at`, with `page` rows on
 /// screen: ↑ / ↓ wrap around at the ends, the others stop there; `None` for other keys.
@@ -618,7 +638,10 @@ mod tests {
     assert_eq!(fg(&buf, sel, &row.label), Color::Reset);
     assert_eq!(fg(&buf, sel, &crate::output::duration(row.active.unwrap())), Color::Yellow);
     assert_eq!(fg(&buf, sel, "$"), Color::Green);
-    assert_eq!(fg(&buf, sel - 1, "Time"), Color::DarkGray);
+    // Headers bold, the sorted one in the text color, the others gray, as macmon's.
+    assert_eq!(fg(&buf, sel - 1, "Time ↓"), Color::Reset);
+    assert_eq!(fg(&buf, sel - 1, "Tokens"), Color::DarkGray);
+    assert!(buf[(col(&buf, sel - 1, "Tokens"), sel - 1)].modifier.contains(Modifier::BOLD));
     // Active period and tab: bold cyan text, others gray, no filled block; no metric.
     assert!((0..buf.area.width).all(|x| !buf[(x, 0)].modifier.contains(Modifier::REVERSED)));
     assert_eq!(fg(&buf, 0, "All"), Color::Cyan);
@@ -941,11 +964,19 @@ mod tests {
     // One bar per busy day with a gap after each, the selected one in the selection color, the
     // others in the time's.
     let base = find(&buf, "01-");
-    let bars = line(&buf, base - 1);
+    let bars = line(&buf, base - 2);
     let blocks = |t: &str| !t.is_empty() && t.chars().all(|c| "▁▂▃▄▅▆▇█".contains(c));
     let busy = app.list.iter().filter(|x| x.tokens > 0).count();
     assert_eq!(bars.split(' ').filter(|t| blocks(t)).count(), busy, "{out}");
-    assert_eq!(fg(&buf, base - 1, "█"), Color::Yellow);
+    assert_eq!(fg(&buf, base - 2, "█"), Color::Yellow);
+    // The newest bar ends at the right gutter; the newest day is empty, yet its slot is marked
+    // on the axis and its numbers are dashes.
+    let axis = line(&buf, base - 1);
+    assert_eq!(axis.trim_end().chars().count(), 98, "{out}");
+    assert!(axis.trim_end().ends_with('━') && fg(&buf, base - 1, "━") == Color::Cyan, "{out}");
+    assert_eq!(app.list[last].tokens, 0);
+    let numbers = cells(&line(&buf, find(&buf, "▶")));
+    assert_eq!(numbers[1..], ["–", "–", "–"], "{out}");
     // The dates under the bars end with the newest day; the numbers of the selected day and the
     // period's total under the chart.
     let newest = app.list[last].day.unwrap().strftime("%m-%d").to_string();
@@ -963,10 +994,10 @@ mod tests {
     press(&mut app, KeyCode::Char('s'));
     let buf = frame(&app);
     assert!(line(&buf, 3).contains("Cost by day"));
-    let bars = line(&buf, base - 1);
+    let bars = line(&buf, base - 2);
     let x = bars.chars().take_while(|x| *x != '█').count() as u16;
-    let cyan = (0..buf.area.width).filter(|x| buf[(*x, base - 1)].fg == Color::Cyan).count();
-    assert!(cyan > 0 && buf[(x, base - 1)].fg == Color::Green, "{}", screen_of(&buf));
+    let cyan = (0..buf.area.width).filter(|x| buf[(*x, base - 2)].fg == Color::Cyan).count();
+    assert!(cyan > 0 && buf[(x, base - 2)].fg == Color::Green, "{}", screen_of(&buf));
     assert_eq!(app.sel(), busy);
     // A click on a bar selects it, a second one opens its day.
     let (rect, i) = app
@@ -1003,5 +1034,38 @@ mod tests {
     assert!(screen(&app).contains("No activity in this period"));
     press(&mut app, KeyCode::Char('3'));
     assert!(screen(&app).contains("No activity in this period"));
+  }
+
+  #[test]
+  fn the_wheel_moves_three_rows_and_small_screens_say_so() {
+    let mut app = many();
+    // Four rows in a list three high: the wheel moves three rows and the list as much, the
+    // selected row keeping its place until the end.
+    frame_of(&app, 80, 10);
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    assert_eq!(app.sel(), 3);
+    let buf = frame_of(&app, 80, 10);
+    assert_eq!(app.hits.borrow().offset, 1);
+    assert!(line(&buf, 6).starts_with("▶ other"), "{}", screen_of(&buf));
+    // `other` stays last, faint, whatever the order.
+    press(&mut app, KeyCode::Char('S'));
+    let buf = frame_of(&app, 80, 24);
+    let y = find(&buf, "other (2 dirs)");
+    assert_eq!(y + 1, find(&buf, "total"), "{}", screen_of(&buf));
+    assert_eq!(buf[(2, y)].modifier, Modifier::DIM);
+    // A drill-down too low for a scrollbar shows arrows where there is more.
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Enter);
+    let buf = frame_of(&app, 80, 10);
+    let edge: String = (0..10).map(|y| buf[(79, y)].symbol().to_string()).collect();
+    assert!(edge.contains('↓'), "{}", screen_of(&buf));
+    // A terminal too small says so, the timeline sooner than the lists.
+    assert!(screen_of(&frame_of(&app, 80, 7)).contains("too small"));
+    press(&mut app, KeyCode::Char('3'));
+    assert!(screen_of(&frame_of(&app, 80, 14)).contains("too small"));
+    assert!(!screen_of(&frame_of(&app, 80, 16)).contains("too small"));
+    // The help has one line for `q`.
+    press(&mut app, KeyCode::Char('?'));
+    assert_eq!(screen(&app).matches(" q ").count(), 1, "{}", screen(&app));
   }
 }

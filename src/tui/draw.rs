@@ -133,7 +133,14 @@ pub fn loading(f: &mut Frame) {
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
-  let mut hits = Hits::default();
+  // Each list keeps its first visible row from the last frame.
+  let view = (app.tab, app.open.is_some());
+  let offset = app.hits.borrow().offset_of(view);
+  let mut hits = Hits { view: Some(view), offset, ..Default::default() };
+  if f.area().height < 8 || f.area().width < 40 {
+    too_small(f, f.area(), &mut hits);
+    return *app.hits.borrow_mut() = hits;
+  }
   let [head, tabs, body, rule, foot] = Layout::vertical([
     Constraint::Length(1),
     Constraint::Length(2),
@@ -234,11 +241,17 @@ fn head_label(sort: Sort, col: Col, label: &str) -> String {
   }
 }
 
-/// A column: its header, what a click on it sorts by, its width.
+/// A column: its header, what a click on it sorts by, its width, and whether it is sorted.
 struct Column {
   head: String,
   col: Col,
   width: Constraint,
+}
+
+/// The header of the sorted column in the text color, the others gray, all bold, as macmon's.
+fn head_style(head: &str) -> Style {
+  let sorted = head.ends_with('↓') || head.ends_with('↑');
+  Style::new().fg(if sorted { Color::Reset } else { Color::DarkGray }).add_modifier(Modifier::BOLD)
 }
 
 /// Lays out rows under a header, the `total` row right under them, both gutters and a scrollbar
@@ -271,15 +284,17 @@ fn grid(
   hits.head = Rect { height: 1, ..table };
   hits.rows = Rect { y: table.y + 1, height: height.saturating_sub(1), ..table };
   let head = columns.iter().enumerate().map(|(i, c)| match i {
-    0 => Cell::from(c.head.clone()).style(DIM),
-    _ => num(c.head.clone(), DIM),
+    0 => Cell::from(c.head.clone()).style(head_style(&c.head)),
+    _ => num(c.head.clone(), head_style(&c.head)),
   });
   let t = Table::new(lines, widths.clone())
     .header(TableRow::new(head))
     .row_highlight_style(SELECTED)
     .highlight_symbol("▶ ")
     .highlight_spacing(HighlightSpacing::Always);
-  let mut state = TableState::default().with_selected(Some(sel));
+  // From the last frame's first row, so the selection moves on screen as little as it can.
+  let offset = hits.offset.min(n.saturating_sub(usize::from(height.saturating_sub(1))));
+  let mut state = TableState::default().with_offset(offset).with_selected(Some(sel));
   f.render_stateful_widget(t, table, &mut state);
   hits.offset = state.offset();
   scrollbar(f, area, hits.rows, n, hits.offset);
@@ -296,7 +311,36 @@ fn grid(
 /// Where the visible rows are among `len`, in the last column of the right gutter, as macmon's.
 fn scrollbar(f: &mut Frame, area: Rect, rows: Rect, len: usize, offset: usize) {
   let page = usize::from(rows.height);
-  if len <= page || page < 3 || area.width < 2 {
+  if len <= page || page == 0 || area.width < 2 {
+    return;
+  }
+  // Too few rows for a bar: arrows where there is more.
+  if page < 3 {
+    let (up, down) = (offset > 0, offset + page < len);
+    let x = area.right() - 1;
+    let buf = f.buffer_mut();
+    match page {
+      1 => {
+        _ = buf[(x, rows.y)].set_symbol(if up && down {
+          "↕"
+        } else if up {
+          "↑"
+        } else {
+          "↓"
+        })
+      }
+      _ => {
+        if up {
+          buf[(x, rows.y)].set_symbol("↑");
+        }
+        if down {
+          buf[(x, rows.bottom() - 1)].set_symbol("↓");
+        }
+      }
+    }
+    for y in rows.y..rows.bottom() {
+      buf[(x, y)].set_style(DIM);
+    }
     return;
   }
   let bar = Rect { x: area.right() - 1, width: 1, ..rows };
@@ -320,6 +364,11 @@ fn layout(widths: &[Constraint], area: Rect) -> std::rc::Rc<[Rect]> {
     width: area.width.saturating_sub(GUTTER),
     ..area
   })
+}
+
+fn too_small(f: &mut Frame, area: Rect, hits: &mut Hits) {
+  hits.rows = Rect::default();
+  f.render_widget(Paragraph::new(dim("  The terminal is too small")), area);
 }
 
 fn empty(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
@@ -374,8 +423,10 @@ fn table(
   let of = sort.0.share();
   let share = shares(&rows.iter().map(|x| of.of(x)).collect::<Vec<_>>());
   let cells = |x: &Row, label: &str, share: String| {
+    // `other` stays last whatever the order: faint, so it doesn't read as one of the sorted rows.
+    let name = if x.key.is_empty() && label != "total" { NONE } else { TEXT };
     let mut cells = vec![
-      Cell::from(cut(label, name_width)).style(TEXT),
+      Cell::from(cut(label, name_width)).style(name),
       match x.active {
         Some(t) => num(duration(t), TIME),
         None => num("–".into(), NONE),
@@ -420,7 +471,10 @@ fn bar_cell(eighths: usize, line: usize) -> &'static str {
 fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let col = app.sort().0;
   let rows = &app.list;
-  if rows.iter().all(|x| col.of(x) == 0.0) || area.height < 8 {
+  if area.height < 11 {
+    return too_small(f, area, hits);
+  }
+  if rows.iter().all(|x| col.of(x) == 0.0) {
     return empty(f, app, area, hits);
   }
   let week = app.span.gran() == crate::metrics::Granularity::Week;
@@ -429,20 +483,21 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     vec![Text::raw("  "), Text::styled(name, KEY), dim(if week { " by week" } else { " by day" })];
   f.render_widget(Paragraph::new(Line::from(title)), area);
 
-  // Title, a blank line, the bars, their dates, a blank line, the numbers table.
-  let height = area.height - 7;
+  // Title, a blank line, the bars, the axis, the dates, a blank line, the numbers table.
+  let height = area.height - 8;
   let chart = Rect::new(area.x, area.y + 2, area.width, height);
   let max = rows.iter().map(|x| col.of(x)).fold(0.0, f64::max);
   let top = value(col, rows.iter().max_by(|a, b| col.of(a).total_cmp(&col.of(b))).unwrap()).0;
   let axis = top.chars().count() as u16 + 1;
   let x0 = area.x + GUTTER + axis;
-  let room = area.right().saturating_sub(GUTTER + x0) as usize;
-  // Each bar and the gap after it: at least two cells, at most eight, the same for all.
+  let room = usize::from(area.right().saturating_sub(GUTTER + x0));
+  // Bars with a one-cell gap between them over the whole width, the newest at the right edge:
+  // the leftover columns spread over the bars, at most seven cells each.
   let n = rows.len();
-  let shown = (room / 2).min(n).max(1);
-  let pitch = (room / shown).min(8);
-  let at = |i: usize| i * pitch;
-  let width = (pitch as u16 - 1).max(1);
+  let shown = room.div_ceil(2).min(n).max(1);
+  let used = (room + 1).min(shown * 8);
+  let at = |i: usize| room + 1 - used + i * used / shown;
+  let bar = |i: usize| (at(i), (at(i + 1) - at(i) - 1).max(1));
   let sel = app.sel().min(n - 1);
   let first = n.saturating_sub(shown).min(sel);
   let style = match col {
@@ -450,17 +505,10 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     Col::Cost => COST,
     _ => TIME,
   };
-  f.render_widget(
-    Paragraph::new(Line::from(dim(top)).right_aligned()),
-    Rect::new(area.x, chart.y, x0 - area.x - 1, 1),
-  );
-  f.render_widget(
-    Paragraph::new(Line::from(dim("0")).right_aligned()),
-    Rect::new(area.x, chart.bottom() - 1, x0 - area.x - 1, 1),
-  );
   let buf = f.buffer_mut();
   for (i, row) in rows.iter().enumerate().skip(first).take(shown) {
-    let x = x0 + at(i - first) as u16;
+    let (dx, width) = bar(i - first);
+    let x = x0 + dx as u16;
     let v = col.of(row);
     let eighths = match v > 0.0 {
       true => ((v / max * height as f64 * 8.0).round() as usize).max(1),
@@ -469,45 +517,53 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     let style = if i == sel { Style::new().fg(Color::Cyan) } else { style };
     for line in 0..height as usize {
       let y = chart.bottom() - 1 - line as u16;
-      for dx in 0..width {
-        buf[(x + dx, y)].set_symbol(bar_cell(eighths, line)).set_style(style);
+      for w in 0..width as u16 {
+        buf[(x + w, y)].set_symbol(bar_cell(eighths, line)).set_style(style);
       }
     }
-    hits.bars.push((Rect::new(x, chart.y, width, height), i));
+    hits.bars.push((Rect::new(x, chart.y, width as u16, height + 2), i));
   }
-  // Dates under every few bars, counted back from the newest so that it has one.
+  // The axis, the selected slot marked on it even when its day is empty.
+  let base = chart.bottom();
+  buf.set_string(x0, base, "─".repeat(room), DIM);
+  let (dx, width) = bar(sel - first);
+  buf.set_string(x0 + dx as u16, base, "━".repeat(width), Style::new().fg(Color::Cyan));
+  // Dates centred under their bars: the selected one, then every few counted back from the
+  // newest, two cells apart at least.
   let date = |x: &Row| {
     x.day
       .map_or(String::new(), |d| if week { d.to_string() } else { d.strftime("%m-%d").to_string() })
   };
   let wide: usize = if week { 10 } else { 5 };
-  let every = (wide + 1).div_ceil(pitch);
+  let place = |i: usize| {
+    let (dx, width) = bar(i - first);
+    (dx + width / 2).saturating_sub(wide / 2).min(room.saturating_sub(wide))
+  };
+  let every = ((wide + 2) * shown).div_ceil(used).max(1);
   let last = first + shown - 1;
-  // From the newest back, each under its bar (the newest kept on screen) and clear of the next.
-  let end = usize::from(area.right().saturating_sub(GUTTER + x0));
-  let mut marks: Vec<(usize, usize)> = vec![];
+  let mut marks = vec![(place(sel), sel)];
   for i in (first..=last).rev().step_by(every) {
-    let x = at(i - first).min(end.saturating_sub(wide));
-    if marks.last().is_none_or(|(next, _)| x + wide + 1 < *next) {
+    let x = place(i);
+    if marks.iter().all(|(m, _)| x + wide + 2 <= *m || *m + wide + 2 <= x) {
       marks.push((x, i));
     }
   }
-  let mut labels = vec![Text::raw(" ".repeat((x0 - area.x) as usize))];
-  let mut free = 0;
-  for (x, i) in marks.into_iter().rev() {
+  marks.sort();
+  for (x, i) in marks {
     let style = if i == sel { Style::new().fg(Color::Cyan) } else { DIM };
-    labels.push(Text::raw(" ".repeat(x - free)));
-    labels.push(Text::styled(date(&rows[i]), style));
-    free = x + wide;
+    buf.set_stringn(x0 + x as u16, base + 1, date(&rows[i]), wide, style);
   }
-  let labels = cut_spans(labels, area.width.saturating_sub(GUTTER) as usize);
   f.render_widget(
-    Paragraph::new(Line::from(labels)),
-    Rect::new(area.x, chart.bottom(), area.width, 1),
+    Paragraph::new(Line::from(dim(top)).right_aligned()),
+    Rect::new(area.x, chart.y, x0 - area.x - 1, 1),
+  );
+  f.render_widget(
+    Paragraph::new(Line::from(dim("0")).right_aligned()),
+    Rect::new(area.x, chart.bottom() - 1, x0 - area.x - 1, 1),
   );
 
   // The selected bar's numbers over the period's total, in the tables' columns.
-  let numbers = Rect { y: chart.bottom() + 2, height: 3, ..area };
+  let numbers = Rect { y: chart.bottom() + 3, height: 3, ..area };
   let head = if week { "Week" } else { "Day" };
   let columns = [
     Column { head: head.into(), col: Col::Name, width: Constraint::Fill(1) },
@@ -516,14 +572,16 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     Column { head: "Cost".into(), col: Col::Cost, width: Constraint::Length(10 + MARK) },
   ];
   let line = |x: &Row, label: &str| {
+    let dash = || num("–".into(), NONE);
+    let empty = x.tokens == 0 && x.active.unwrap_or(0) == 0;
     TableRow::new(vec![
       Cell::from(label.to_string()).style(TEXT),
       match x.active.filter(|x| *x > 0) {
         Some(t) => num(duration(t), TIME),
-        None => num("–".into(), NONE),
+        None => dash(),
       },
-      num(toks(x.tokens), TEXT),
-      num(money(x.cost), COST),
+      if empty { dash() } else { num(toks(x.tokens), TEXT) },
+      if empty { dash() } else { num(money(x.cost), COST) },
     ])
   };
   let row = &rows[sel];
@@ -562,14 +620,14 @@ fn help(f: &mut Frame, area: Rect) {
     ("PgUp PgDn", "a page up / down"),
     ("Home End", "the first / last row"),
     ("enter", "open: project → models, model → projects, day → projects"),
-    ("esc ⌫ q", "back"),
+    ("esc ⌫", "back"),
     ("s", "sort by the next column; on the timeline: bars of time / tokens / cost"),
     ("S", "reverse the sort"),
     ("p", "provider: both / claude / codex"),
     ("/", "filter by name"),
     ("mouse", "click a row or bar to select it, again to open it; a header sorts, again reverses"),
     ("?", "this help"),
-    ("q", "quit"),
+    ("q", "back; quits from a list"),
   ];
   const KEYS: usize = 11;
   let widest = keys.iter().map(|x| x.1.chars().count()).max().unwrap_or(0) + KEYS + 2;
