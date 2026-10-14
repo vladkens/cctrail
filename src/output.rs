@@ -301,20 +301,22 @@ pub fn here_text(title: &str, workdir: &str, rows: &[(&str, UsageSummary)], term
   title + &Table::new(vec!["Period", "Total tokens", "Cost", "Time"], rows).render(term)
 }
 
-pub fn unpriced_text(models: &[(String, u64)], term: &Term) -> String {
+/// The tokens left out of the cost; suggests `update-pricing` only when it may help.
+pub fn unpriced_text(models: &[(String, u64)], stale: bool, term: &Term) -> String {
   if models.is_empty() {
     return String::new();
   }
   let total = models.iter().map(|x| x.1).sum();
   let names: Vec<&str> = models.iter().map(|x| x.0.as_str()).collect();
-  format!(
-    "\n{} {}\n",
-    term.paint(
-      &format!("Cost excludes {} on unpriced models: {} · run", tokens(total), names.join(", ")),
-      &[DIM]
+  let text = format!("Cost excludes {} on unpriced models: {}", tokens(total), names.join(", "));
+  match stale {
+    true => format!(
+      "\n{} {}\n",
+      term.paint(&format!("{text} · run"), &[DIM]),
+      term.paint("cctrail update-pricing", &[CYAN])
     ),
-    term.paint("cctrail update-pricing", &[CYAN])
-  )
+    false => format!("\n{}\n", term.paint(&text, &[DIM])),
+  }
 }
 
 // MARK: JSON

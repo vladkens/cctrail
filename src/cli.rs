@@ -229,7 +229,7 @@ fn stats(args: &Args) -> Result<()> {
 
   let term = Term::detect();
   let mut out = output::stats_text(args.by, &stats, &total, path.as_deref(), &term);
-  out += &output::unpriced_text(&unpriced, &term);
+  out += &output::unpriced_text(&unpriced, pricing::stale(), &term);
   output::emit(&out);
   Ok(())
 }
@@ -272,7 +272,7 @@ fn usage(args: &Args, gran: Granularity) -> Result<()> {
 
   let term = Term::detect();
   let mut out = output::usage_text(gran, &buckets, &range, args.models, &total, &term);
-  out += &output::unpriced_text(&unpriced, &term);
+  out += &output::unpriced_text(&unpriced, pricing::stale(), &term);
   output::emit(&out);
   Ok(())
 }
@@ -334,7 +334,7 @@ fn here(args: &Args) -> Result<()> {
   let title = if project.is_some() { name.as_str() } else { config::UNMAPPED };
   let rows: Vec<(&str, UsageSummary)> = rows.into_iter().map(|(_, label, x)| (label, x)).collect();
   let mut out = output::here_text(title, &workdir, &rows, &term);
-  out += &output::unpriced_text(&unpriced, &term);
+  out += &output::unpriced_text(&unpriced, pricing::stale(), &term);
   output::emit(&out);
   Ok(())
 }

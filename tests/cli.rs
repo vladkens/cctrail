@@ -20,12 +20,19 @@ struct Run {
   codex: PathBuf,
   config: Option<PathBuf>,
   cwd: Option<PathBuf>,
+  cache: PathBuf,
 }
 
 impl Run {
   fn new(claude: &str, codex: &str) -> Self {
     let config = Some(fixtures().join("empty.toml"));
-    Self { claude: fixtures().join(claude), codex: fixtures().join(codex), config, cwd: None }
+    Self {
+      claude: fixtures().join(claude),
+      codex: fixtures().join(codex),
+      config,
+      cwd: None,
+      cache: fixtures().join("missing"),
+    }
   }
 
   fn config(mut self, path: impl AsRef<Path>) -> Self {
@@ -37,7 +44,7 @@ impl Run {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
     cmd.args(args).env("CLAUDE_CONFIG_DIR", &self.claude).env("CODEX_HOME", &self.codex);
     // The user's downloaded prices must not change the numbers.
-    cmd.env("XDG_CACHE_HOME", fixtures().join("missing")).env_remove("COLUMNS");
+    cmd.env("XDG_CACHE_HOME", &self.cache).env_remove("COLUMNS");
     match &self.config {
       Some(x) => cmd.env("CCTRAIL_CONFIG", x),
       None => cmd.env_remove("CCTRAIL_CONFIG"),
@@ -263,14 +270,19 @@ fn warns_about_unpriced_models() {
 
   let out = run.stdout(&["days"]);
   let value = run.json(&["--json"]);
+
+  // A fresh download lacks the model too: updating won't help.
+  run.cache = dir.join("cache");
+  std::fs::create_dir_all(run.cache.join("cctrail")).unwrap();
+  std::fs::write(run.cache.join("cctrail/pricing.json"), r#"{"anthropic": {}}"#).unwrap();
+  let fresh = run.stdout(&["days"]);
   std::fs::remove_dir_all(&dir).unwrap();
-  assert!(
-    out.contains(
-      "Cost excludes 1.5K on unpriced models: claude-from-the-future · run cctrail update-pricing"
-    ),
-    "{out}"
-  );
+
+  let warning = "Cost excludes 1.5K on unpriced models: claude-from-the-future";
+  assert!(out.contains(&format!("{warning} · run cctrail update-pricing")), "{out}");
   assert_eq!(value["unpriced_models"], json!(["claude-from-the-future"]));
+  assert!(fresh.contains(&format!("{warning}\n")), "{fresh}");
+  assert!(!fresh.contains("update-pricing"));
 }
 
 #[test]

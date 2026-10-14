@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -40,7 +41,12 @@ pub struct Price {
 /// Provider (`anthropic`, `openai`) to model id to price.
 pub type Catalog = BTreeMap<String, BTreeMap<String, Price>>;
 
-static CATALOG: LazyLock<Catalog> = LazyLock::new(|| load(cache_path().ok().as_deref()));
+/// The catalog in use and, when it is the downloaded one, when it was written.
+static CATALOG: LazyLock<(Catalog, Option<SystemTime>)> =
+  LazyLock::new(|| load(cache_path().ok().as_deref()));
+
+/// A download older than this may lack recent models.
+const STALE: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// Where `update-pricing` keeps the downloaded catalog, which wins over the bundled one.
 pub fn cache_path() -> Result<PathBuf> {
@@ -51,12 +57,24 @@ pub fn cache_path() -> Result<PathBuf> {
   Ok(home.join(".cache/cctrail/pricing.json"))
 }
 
-/// The cached catalog when it exists and parses, else the bundled one.
-fn load(cache: Option<&Path>) -> Catalog {
-  if let Some(x) = cache.filter(|x| x.is_file()).and_then(|x| read(x).ok()) {
-    return x;
+/// The cached catalog with its mtime when it exists and parses, else the bundled one.
+fn load(cache: Option<&Path>) -> (Catalog, Option<SystemTime>) {
+  if let Some(path) = cache.filter(|x| x.is_file())
+    && let Ok(x) = read(path)
+  {
+    let mtime = std::fs::metadata(path).and_then(|x| x.modified()).ok();
+    return (x, Some(mtime.unwrap_or(SystemTime::UNIX_EPOCH)));
   }
-  serde_json::from_str(BUNDLED).expect("bundled pricing.json")
+  (serde_json::from_str(BUNDLED).expect("bundled pricing.json"), None)
+}
+
+/// Whether `update-pricing` may bring new prices: the bundled catalog or an old download is in use.
+pub fn stale() -> bool {
+  is_stale(CATALOG.1, SystemTime::now())
+}
+
+fn is_stale(mtime: Option<SystemTime>, now: SystemTime) -> bool {
+  mtime.is_none_or(|x| now.duration_since(x).is_ok_and(|x| x > STALE))
 }
 
 fn read(path: &Path) -> Result<Catalog> {
@@ -66,7 +84,7 @@ fn read(path: &Path) -> Result<Catalog> {
 }
 
 pub fn price(provider: Provider, model: Option<&str>) -> Option<&'static Price> {
-  CATALOG.get(provider.pricing_key())?.get(model.unwrap_or(""))
+  CATALOG.0.get(provider.pricing_key())?.get(model.unwrap_or(""))
 }
 
 /// Estimated dollars; 0 for a model the catalog lacks.
@@ -264,18 +282,33 @@ mod tests {
     let path = dir.join("pricing.json");
 
     std::fs::write(&path, r#"{"openai": {"model": {"input": 2, "output": 10}}}"#).unwrap();
-    let catalog = load(Some(&path));
+    let (catalog, mtime) = load(Some(&path));
     assert_eq!(
       catalog["openai"]["model"],
       Price { input: 2.0, output: 10.0, ..Default::default() }
     );
     assert!(!catalog.contains_key("anthropic"));
+    assert!(!is_stale(mtime, SystemTime::now()));
 
+    let bundled = |path: &Path| {
+      let (catalog, mtime) = load(Some(path));
+      catalog.contains_key("anthropic") && mtime.is_none()
+    };
     std::fs::write(&path, "invalid").unwrap();
-    assert!(load(Some(&path)).contains_key("anthropic"));
+    assert!(bundled(&path));
     std::fs::write(&path, r#"{"openai": {"model": {"input": 2, "output": 10, "x": 1}}}"#).unwrap();
-    assert!(load(Some(&path)).contains_key("anthropic"));
-    assert!(load(Some(&dir.join("missing.json"))).contains_key("anthropic"));
+    assert!(bundled(&path));
+    assert!(bundled(&dir.join("missing.json")));
     std::fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn suggests_updates_for_bundled_or_old_catalogs() {
+    let now = SystemTime::now();
+    let day = Duration::from_secs(24 * 3600);
+    assert!(is_stale(None, now));
+    assert!(is_stale(Some(now - 8 * day), now));
+    assert!(!is_stale(Some(now - 6 * day), now));
+    assert!(!is_stale(Some(now + day), now));
   }
 }
