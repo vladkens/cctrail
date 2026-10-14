@@ -423,10 +423,8 @@ fn table(
   let of = sort.0.share();
   let share = shares(&rows.iter().map(|x| of.of(x)).collect::<Vec<_>>());
   let cells = |x: &Row, label: &str, share: String| {
-    // `other` stays last whatever the order: faint, so it doesn't read as one of the sorted rows.
-    let name = if x.key.is_empty() && label != "total" { NONE } else { TEXT };
     let mut cells = vec![
-      Cell::from(cut(label, name_width)).style(name),
+      Cell::from(cut(label, name_width)).style(TEXT),
       match x.active {
         Some(t) => num(duration(t), TIME),
         None => num("–".into(), NONE),
@@ -491,13 +489,16 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let axis = top.chars().count() as u16 + 1;
   let x0 = area.x + GUTTER + axis;
   let room = usize::from(area.right().saturating_sub(GUTTER + x0));
-  // Bars with a one-cell gap between them over the whole width, the newest at the right edge:
-  // the leftover columns spread over the bars, at most seven cells each.
+  // Bars of one width, at most seven cells, the newest at the right edge; the columns left over
+  // widen the gaps evenly, or stay left of the first bar when the bars are at their widest.
   let n = rows.len();
   let shown = room.div_ceil(2).min(n).max(1);
-  let used = (room + 1).min(shown * 8);
-  let at = |i: usize| room + 1 - used + i * used / shown;
-  let bar = |i: usize| (at(i), (at(i + 1) - at(i) - 1).max(1));
+  let width = ((room + 1) / shown - 1).clamp(1, 7);
+  let rest = room + 1 - shown * (width + 1);
+  let (left, spread) = if width == 7 || shown == 1 { (rest, 0) } else { (0, rest) };
+  let at =
+    |i: usize| left + i * (width + 1) + (i * spread).div_ceil((shown - 1).max(1)).min(spread);
+  let bar = |i: usize| (at(i), width);
   let sel = app.sel().min(n - 1);
   let first = n.saturating_sub(shown).min(sel);
   let style = match col {
@@ -539,12 +540,20 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     let (dx, width) = bar(i - first);
     (dx + width / 2).saturating_sub(wide / 2).min(room.saturating_sub(wide))
   };
-  let every = ((wide + 2) * shown).div_ceil(used).max(1);
+  // Every few bars, so that labels fit even over the narrowest gaps.
+  let every = (wide + 2).div_ceil(width + 1);
   let last = first + shown - 1;
-  let mut marks = vec![(place(sel), sel)];
-  for i in (first..=last).rev().step_by(every) {
+  // The selected and the newest always (the selected first); the others only as far from them
+  // as from each other, so a label close to a forced one is dropped, not squeezed in.
+  let usual = every * (width + 1);
+  let mut marks: Vec<(usize, usize)> = vec![];
+  for (i, forced) in [(sel, true), (last, true)]
+    .into_iter()
+    .chain((first..=last).rev().step_by(every).map(|i| (i, false)))
+  {
     let x = place(i);
-    if marks.iter().all(|(m, _)| x + wide + 2 <= *m || *m + wide + 2 <= x) {
+    let room = if forced { wide + 2 } else { usual };
+    if marks.iter().all(|(m, j)| *j != i && x.abs_diff(*m) >= room.max(wide + 2)) {
       marks.push((x, i));
     }
   }

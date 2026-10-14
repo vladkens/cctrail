@@ -968,6 +968,9 @@ mod tests {
     let blocks = |t: &str| !t.is_empty() && t.chars().all(|c| "▁▂▃▄▅▆▇█".contains(c));
     let busy = app.list.iter().filter(|x| x.tokens > 0).count();
     assert_eq!(bars.split(' ').filter(|t| blocks(t)).count(), busy, "{out}");
+    let widths: Vec<usize> =
+      bars.split(' ').filter(|t| blocks(t)).map(|t| t.chars().count()).collect();
+    assert!(widths.windows(2).all(|w| w[0] == w[1]), "{out}");
     assert_eq!(fg(&buf, base - 2, "█"), Color::Yellow);
     // The newest bar ends at the right gutter; the newest day is empty, yet its slot is marked
     // on the axis and its numbers are dashes.
@@ -1047,12 +1050,12 @@ mod tests {
     let buf = frame_of(&app, 80, 10);
     assert_eq!(app.hits.borrow().offset, 1);
     assert!(line(&buf, 6).starts_with("▶ other"), "{}", screen_of(&buf));
-    // `other` stays last, faint, whatever the order.
+    // `other` stays last whatever the order, a name like the others.
     press(&mut app, KeyCode::Char('S'));
     let buf = frame_of(&app, 80, 24);
     let y = find(&buf, "other (2 dirs)");
     assert_eq!(y + 1, find(&buf, "total"), "{}", screen_of(&buf));
-    assert_eq!(buf[(2, y)].modifier, Modifier::DIM);
+    assert_eq!((buf[(2, y)].fg, buf[(2, y)].modifier), (Color::Reset, Modifier::empty()));
     // A drill-down too low for a scrollbar shows arrows where there is more.
     press(&mut app, KeyCode::Char('2'));
     press(&mut app, KeyCode::Enter);
