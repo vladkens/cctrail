@@ -98,7 +98,7 @@ impl Config {
       let mut roots = vec![];
       for value in values {
         let Some(value) = value.as_str() else { bail!("project path must be a string: {label}") };
-        let root = expand_path(value, home)?;
+        let root = fold_case(&expand_path(value, home)?);
         if let Some(other) = seen.get(&root) {
           bail!("path belongs to both {other} and {label}: {}", root.display());
         }
@@ -112,7 +112,7 @@ impl Config {
 
   /// The project of a working directory: the one with the longest root containing it.
   pub fn find(&self, workdir: &str) -> Option<&Project> {
-    let path = Path::new(workdir);
+    let path = fold_case(Path::new(workdir));
     let mut best: Option<(usize, &Project)> = None;
     for project in &self.projects {
       for root in &project.roots {
@@ -161,6 +161,14 @@ fn expand_path(value: &str, home: Option<&Path>) -> Result<PathBuf> {
   Ok(path)
 }
 
+/// Windows paths compare case-insensitively, as Python's `Path` does there.
+fn fold_case(path: &Path) -> PathBuf {
+  match cfg!(windows) {
+    true => PathBuf::from(path.to_string_lossy().to_lowercase()),
+    false => path.to_path_buf(),
+  }
+}
+
 pub fn home_dir() -> Option<PathBuf> {
   ["HOME", "USERPROFILE"].iter().filter_map(env::var_os).find(|x| !x.is_empty()).map(PathBuf::from)
 }
@@ -197,6 +205,9 @@ mod tests {
     assert_eq!(config.map("/other", By::Group), "@unmapped");
     assert_eq!(config.map("/other", By::Project), "/other");
     assert_eq!(config.map("/other", By::Dir), "/other");
+
+    let other_case = config.map("/home/me/code/Tools/cli", By::Project);
+    assert_eq!(other_case, if cfg!(windows) { "oss/tools" } else { "/home/me/code/Tools/cli" });
   }
 
   #[test]
