@@ -94,9 +94,9 @@ pub fn cost(provider: Provider, model: Option<&str>, usage: &Usage, speed: Optio
 
 impl Price {
   pub fn cost(&self, usage: &Usage, speed: Option<Speed>) -> f64 {
-    let long = self
-      .long_context_threshold
-      .is_some_and(|x| usage.input + usage.cache_write() + usage.cache_read > x);
+    let long = self.long_context_threshold.is_some_and(|x| {
+      usage.input.saturating_add(usage.cache_write()).saturating_add(usage.cache_read) > x
+    });
     let pick = |long_price: Option<f64>| if long { long_price } else { None };
     let input = pick(self.long_context_input).unwrap_or(self.input);
     let output = pick(self.long_context_output).unwrap_or(self.output);
@@ -108,7 +108,7 @@ impl Price {
       + usage.cache_write_5m as f64 * write
       + usage.cache_write_1h as f64 * input * 2.0
       + usage.cache_read as f64 * read
-      + (usage.output + usage.reasoning) as f64 * output;
+      + usage.output.saturating_add(usage.reasoning) as f64 * output;
     let multiplier = match speed {
       Some(Speed::Fast) => self.fast_multiplier.unwrap_or(1.0),
       _ => 1.0,
@@ -266,6 +266,9 @@ mod tests {
     let usage =
       Usage { input: 1000, cache_write_5m: 100, cache_write_1h: 10, cache_read: 1, ..usage };
     assert_eq!(price.cost(&usage, None), (2500.0 + 312.5 + 50.0 + 0.25 + 15000.0) / 1e6);
+
+    let huge = Usage { input: u64::MAX, cache_read: 1, output: u64::MAX, reasoning: 1, ..usage };
+    assert!(price.cost(&huge, None).is_finite());
   }
 
   #[test]

@@ -90,7 +90,7 @@ impl RawUsage {
     let cache_1h = cache.map_or(0, |x| x.ephemeral_1h_input_tokens.int());
     let mut usage = Usage {
       input: self.input_tokens.int(),
-      cache_write_5m: match cache_5m + cache_1h {
+      cache_write_5m: match cache_5m.saturating_add(cache_1h) {
         0 => self.cache_creation_input_tokens.int(),
         _ => cache_5m,
       },
@@ -439,5 +439,12 @@ mod tests {
     assert_eq!(e.usage, Some(usage));
     assert_eq!(session.events[1].usage, Some(Usage::default()));
     assert_eq!(session.events[1].identity, None);
+
+    let max = u64::MAX;
+    let raw = format!(
+      r#"{{"cache_creation": {{"ephemeral_5m_input_tokens": {max}, "ephemeral_1h_input_tokens": 1}}}}"#
+    );
+    let usage = serde_json::from_str::<RawUsage>(&raw).unwrap().usage();
+    assert_eq!((usage.cache_write_5m, usage.cache_write_1h), (max, 1));
   }
 }
