@@ -20,14 +20,16 @@ build:
 	ls -lh target/release/cctrail
 
 # Prebuilt binaries as target/distrib/cctrail-dev-<target>.tar.gz (.zip for Windows), from an Apple
-# Silicon Mac: Linux (glibc 2.28) and Windows through cargo-cross, installed at a fixed version.
+# Silicon Mac: Linux (glibc 2.28) and Windows through cargo-cross, installed at a fixed version,
+# with its toolchains kept in ~/.cache/cargo-cross (CI caches that folder).
 # macOS keeps its file and line info in cctrail.dSYM, which has to stay next to the binary. Not
 # target/dist: cargo keeps the dist profile's build scripts there.
 dist: T := $(or $(CARGO_TARGET_DIR),target)
 dist:
 	cargo install --locked cargo-cross@1.6.0
 	CARGO_PROFILE_DIST_SPLIT_DEBUGINFO=packed cargo build --profile dist --locked --target aarch64-apple-darwin
-	cargo cross build --profile dist --locked --glibc-version 2.28 \
+	CROSS_COMPILER_DIR=$${CROSS_COMPILER_DIR:-$$HOME/.cache/cargo-cross} \
+		cargo cross build --profile dist --locked --glibc-version 2.28 \
 		--targets x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-pc-windows-gnu
 	rm -rf $(T)/distrib && mkdir -p $(T)/distrib
 	tar czhf $(T)/distrib/cctrail-dev-aarch64-apple-darwin.tar.gz readme.md LICENSE \
