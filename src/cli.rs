@@ -198,8 +198,8 @@ fn query(args: &Args, range: &DateRange) -> Map<String, Value> {
   }
 }
 
-fn print_json(value: &Value) {
-  output::emit(&format!("{value}\n"));
+fn print_json(value: &Value) -> Result<()> {
+  output::emit(&format!("{value}\n"))
 }
 
 fn stats(args: &Args) -> Result<()> {
@@ -216,7 +216,7 @@ fn stats(args: &Args) -> Result<()> {
   if args.json {
     let mut query = query(args, &range);
     query.insert("by".into(), json!(args.by.name()));
-    print_json(&json!({
+    return print_json(&json!({
       "schema_version": 1,
       "command": "stats",
       "query": query,
@@ -224,14 +224,12 @@ fn stats(args: &Args) -> Result<()> {
       "total": output::total_json(&total, stats.len(), args.by),
       "unpriced_models": output::unpriced_json(&unpriced),
     }));
-    return Ok(());
   }
 
   let term = Term::detect();
   let mut out = output::stats_text(args.by, &stats, &total, path.as_deref(), &term);
   out += &output::unpriced_text(&unpriced, pricing::stale(), &term);
-  output::emit(&out);
-  Ok(())
+  output::emit(&out)
 }
 
 fn usage(args: &Args, gran: Granularity) -> Result<()> {
@@ -259,7 +257,7 @@ fn usage(args: &Args, gran: Granularity) -> Result<()> {
     let mut query = query(args, &range);
     query.insert("granularity".into(), json!(gran.name()));
     query.insert("models".into(), json!(args.models));
-    print_json(&json!({
+    return print_json(&json!({
       "schema_version": 1,
       "command": args.cmd.name(),
       "query": query,
@@ -267,14 +265,12 @@ fn usage(args: &Args, gran: Granularity) -> Result<()> {
       "total": output::summary_json(&total),
       "unpriced_models": output::unpriced_json(&unpriced),
     }));
-    return Ok(());
   }
 
   let term = Term::detect();
   let mut out = output::usage_text(gran, &buckets, &range, args.models, &total, &term);
   out += &output::unpriced_text(&unpriced, pricing::stale(), &term);
-  output::emit(&out);
-  Ok(())
+  output::emit(&out)
 }
 
 fn here(args: &Args) -> Result<()> {
@@ -316,7 +312,7 @@ fn here(args: &Args) -> Result<()> {
         Value::Object(value)
       })
       .collect();
-    print_json(&json!({
+    return print_json(&json!({
       "schema_version": 1,
       "command": "here",
       "query": {"provider": args.provider.map(Provider::name), "workdir": workdir},
@@ -327,7 +323,6 @@ fn here(args: &Args) -> Result<()> {
       "periods": periods,
       "unpriced_models": output::unpriced_json(&unpriced),
     }));
-    return Ok(());
   }
 
   let term = Term::detect();
@@ -335,8 +330,7 @@ fn here(args: &Args) -> Result<()> {
   let rows: Vec<(&str, UsageSummary)> = rows.into_iter().map(|(_, label, x)| (label, x)).collect();
   let mut out = output::here_text(title, &workdir, &rows, &term);
   out += &output::unpriced_text(&unpriced, pricing::stale(), &term);
-  output::emit(&out);
-  Ok(())
+  output::emit(&out)
 }
 
 fn update_pricing(args: &Args) -> Result<()> {
@@ -345,8 +339,7 @@ fn update_pricing(args: &Args) -> Result<()> {
     None => pricing::cache_path()?,
   };
   pricing::update(&path)?;
-  output::emit(&format!("Updated {}\n", path.display()));
-  Ok(())
+  output::emit(&format!("Updated {}\n", path.display()))
 }
 
 pub fn help() -> String {

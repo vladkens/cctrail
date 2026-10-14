@@ -62,9 +62,15 @@ fn tty_width() -> Option<usize> {
   None
 }
 
-/// Writes to stdout, ignoring a closed pipe (`cctrail | head`).
-pub fn emit(text: &str) {
-  let _ = std::io::stdout().lock().write_all(text.as_bytes());
+/// Writes to stdout; a closed pipe (`cctrail | head`) is not an error.
+pub fn emit(text: &str) -> anyhow::Result<()> {
+  let mut out = std::io::stdout().lock();
+  match out.write_all(text.as_bytes()).and_then(|_| out.flush()) {
+    Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+      Err(anyhow::Error::new(e).context("failed to write to stdout"))
+    }
+    _ => Ok(()),
+  }
 }
 
 // MARK: Tables

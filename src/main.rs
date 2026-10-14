@@ -15,14 +15,8 @@ use cli::Parsed;
 fn main() -> ExitCode {
   let argv: Vec<String> = std::env::args().skip(1).collect();
   let res = match cli::parse(&argv) {
-    Ok(Parsed::Help) => {
-      output::emit(&cli::help());
-      Ok(())
-    }
-    Ok(Parsed::Version) => {
-      output::emit(&format!("cctrail {}\n", cli::VERSION));
-      Ok(())
-    }
+    Ok(Parsed::Help) => output::emit(&cli::help()),
+    Ok(Parsed::Version) => output::emit(&format!("cctrail {}\n", cli::VERSION)),
     Ok(Parsed::Run(args)) => cli::run(&args),
     Err(e) => Err(e),
   };
