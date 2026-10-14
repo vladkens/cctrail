@@ -49,9 +49,9 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 - The numbers are the product: tokens, sessions, active seconds and first/last activity must not
   drift between versions. Treat any change in them as a bug unless it is a fix the person approved;
   say in the PR body where it changes and why (which model, price, date or directory rule).
-- The repository is public: never put the person's own numbers (costs, tokens, hours, history
-  size) or private project names in PR bodies, review replies, commits or docs. Fixture numbers,
-  speed measurements and "identical to `main`" are fine; report the rest to the person directly.
+- The repository is public: never put the person's own numbers (costs, tokens, hours) or private
+  project names in PR bodies, review replies, commits or docs. Fixture numbers, data sizes, speed
+  measurements and "identical to `main`" are fine; report the rest to the person directly.
 - Until the port is done, the reference is the Python cctrail 0.2.1 (`uvx cctrail==0.2.1`).
   `make compare` runs both on the local history and diffs the JSON: tokens, sessions, seconds and
   timestamps exact, costs within 1e-9.
@@ -64,7 +64,8 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 
 ## Performance
 
-- Every command reads the full local history, gigabytes of logs. Measure with `make bench` (hyperfine, warm cache), A/B/A back to back; when the two A runs
+- The full local history is ~10 GB of Codex and ~1 GB of Claude logs; every command reads all of
+  it. Measure with `make bench` (hyperfine, warm cache), A/B/A back to back; when the two A runs
   differ by more than 5%, rerun later instead of concluding.
 - Log every speed attempt in [docs/perf.md](docs/perf.md): what was tried, the result, kept or
   reverted and why. Keep a change only when `make compare` still matches and the gain is clear.
