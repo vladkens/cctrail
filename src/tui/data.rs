@@ -1,5 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use jiff::civil::Date;
@@ -53,13 +54,20 @@ pub struct Row {
   pub label: String,
   /// Unconfigured directories and `other` are drawn dim.
   pub dim: bool,
-  /// Microseconds; none where time can't be split (models).
+  /// Microseconds.
   pub active: Option<i64>,
   pub tokens: u64,
   pub cost: f64,
   pub sessions: Option<usize>,
   pub day: Option<Date>,
+  /// A model without a price: its cost is unknown, not 0.
+  pub unpriced: bool,
 }
+
+/// Time per project and model, for one span and provider.
+type Times = HashMap<(String, String), i64>;
+/// `Times` with the span and provider they are for.
+type Cached = Option<((Span, Option<Provider>), Times)>;
 
 /// The parsed history and what each session maps to.
 pub struct Data {
@@ -69,6 +77,8 @@ pub struct Data {
   /// The project of each session and whether it is a configured one.
   names: Vec<(String, bool)>,
   pub today: Date,
+  /// `model_times` of the last span and provider asked for.
+  times: RefCell<Cached>,
 }
 
 impl Data {
@@ -87,7 +97,7 @@ impl Data {
           .clone()
       })
       .collect();
-    Self { sessions, events, config, names, today }
+    Self { sessions, events, config, names, today, times: RefCell::default() }
   }
 
   fn events(&self, prov: Option<Provider>) -> Vec<(usize, usize)> {
@@ -110,14 +120,15 @@ impl Data {
       tokens: x.usage.total(),
       cost: x.cost,
       sessions: Some(x.sessions),
-      day: None,
+      ..Default::default()
     };
     let mut rows: Vec<Row> =
       stats.iter().zip(&small).filter(|x| !x.1).map(|(x, _)| row(x, !x.mapped)).collect();
     let other: Vec<&metrics::Stat> =
       stats.iter().zip(&small).filter(|x| *x.1).map(|x| x.0).collect();
     if !other.is_empty() {
-      let label = format!("other ({} dirs)", other.len());
+      let dirs = if other.len() == 1 { "dir" } else { "dirs" };
+      let label = format!("other ({} {dirs})", other.len());
       rows.push(Row { key: String::new(), ..row(&metrics::combine_stats(&label, other), true) });
       rows.last_mut().unwrap().label = label;
     }
@@ -142,44 +153,62 @@ impl Data {
       let usage = e.usage.unwrap_or_default();
       row.tokens = row.tokens.saturating_add(usage.total());
       row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
+      row.unpriced |= pricing::price(s.provider, e.model.as_deref(), e.ts).is_none();
     }
-    if let Some(project) = project {
-      let times = self.model_times(span, prov, project);
-      for row in rows.values_mut() {
-        row.active = Some(times.get(&row.key).copied().unwrap_or(0));
-      }
+    let times = self.times(span, prov);
+    for row in rows.values_mut() {
+      let time = |(p, m): &(String, String)| m == &row.key && project.is_none_or(|x| x == p);
+      row.active = Some(times.iter().filter(|x| time(x.0)).map(|x| *x.1).sum());
     }
     rows.into_values().collect()
   }
 
-  /// A project's active time split between its models, summing to the project's time: each
+  /// Active time split between models within each project, summing to the project's time: each
   /// activity stamp belongs to the model of the session's last response (its first one before
-  /// any), simultaneous time is divided as between projects, and the parts are scaled to the
-  /// project's share of the time.
-  fn model_times(&self, span: Span, prov: Option<Provider>, project: &str) -> HashMap<String, i64> {
+  /// any), simultaneous time is divided as between projects, and each project's parts are scaled
+  /// to its time. Kept for the last span and provider.
+  fn times(&self, span: Span, prov: Option<Provider>) -> std::cell::Ref<'_, Times> {
+    let fresh = self.times.borrow().as_ref().is_some_and(|x| x.0 == (span, prov));
+    if !fresh {
+      *self.times.borrow_mut() = Some(((span, prov), self.model_times(span, prov)));
+    }
+    std::cell::Ref::map(self.times.borrow(), |x| &x.as_ref().unwrap().1)
+  }
+
+  fn model_times(&self, span: Span, prov: Option<Provider>) -> Times {
     let range = span.range(self.today);
-    let total = self.projects(span, prov, true).0.into_iter().find(|x| x.key == project);
-    let total = total.and_then(|x| x.active).unwrap_or(0) / MICROS;
+    let (projects, _) = self.projects(span, prov, true);
+    let totals: HashMap<String, i64> =
+      projects.into_iter().map(|x| (x.key, x.active.unwrap_or(0) / MICROS)).collect();
     let mut stamps: HashMap<String, Vec<Ts>> = HashMap::new();
     for (si, s) in self.sessions.iter().enumerate() {
-      if self.names[si].0 != project || prov.is_some_and(|p| s.provider != p) {
+      if prov.is_some_and(|p| s.provider != p) {
         continue;
       }
       let key = |e: &Event| e.model.as_deref().map(|m| model_key(s.provider, m, is_fast(e)));
       let Some(mut model) = s.events.iter().find_map(key) else { continue };
+      let project = &self.names[si].0;
       for e in &s.events {
         model = key(e).unwrap_or(model);
         if let Some(ts) = e.ts.filter(|x| !e.failed && (!range.bounded() || range.contains(*x))) {
-          stamps.entry(model.clone()).or_default().push(ts);
+          stamps.entry(format!("{project}\0{model}")).or_default().push(ts);
         }
       }
     }
     let by: HashMap<&str, Vec<Ts>> = stamps.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-    let parts = metrics::active_by_name(&by, &range);
-    scale(parts.into_iter().map(|(k, v)| (k.to_string(), v)).collect(), total)
-      .into_iter()
-      .map(|(k, v)| (k, v * MICROS))
-      .collect()
+    let mut per: HashMap<&str, Vec<(String, i64)>> = HashMap::new();
+    for (k, v) in metrics::active_by_name(&by, &range) {
+      let (project, model) = k.split_once('\0').unwrap();
+      per.entry(project).or_default().push((model.to_string(), v));
+    }
+    let mut out = Times::new();
+    for (project, parts) in per {
+      let total = totals.get(project).copied().unwrap_or(0);
+      for (model, v) in scale(parts, total) {
+        out.insert((project.to_string(), model), v * MICROS);
+      }
+    }
+    out
   }
 
   /// The projects that used a model, by its tokens and cost there.
@@ -203,6 +232,10 @@ impl Data {
       let usage = e.usage.unwrap_or_default();
       row.tokens = row.tokens.saturating_add(usage.total());
       row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
+    }
+    let times = self.times(span, prov);
+    for row in rows.values_mut() {
+      row.active = Some(times.get(&(row.key.clone(), model.to_string())).copied().unwrap_or(0));
     }
     rows.into_values().collect()
   }
@@ -265,7 +298,7 @@ impl Data {
         tokens: x.usage.total(),
         cost: x.cost,
         sessions: Some(x.sessions),
-        day: None,
+        ..Default::default()
       })
       .collect()
   }
@@ -330,7 +363,7 @@ pub fn model_key(provider: Provider, model: &str, fast: bool) -> String {
 fn label(day: Date, gran: Granularity) -> String {
   match gran {
     Granularity::Day => format!("{day} {}", &format!("{:?}", day.weekday())[..2]),
-    _ => format!("{day} week"),
+    _ => day.to_string(),
   }
 }
 
@@ -365,6 +398,44 @@ pub mod tests {
 
   pub fn data() -> Data {
     data_of(sessions())
+  }
+
+  /// Projects of every size, a model without a price and two unconfigured dirs small enough to
+  /// fold into `other`, over the three days before 2026-01-10.
+  pub fn many() -> Data {
+    let long = "/w/a-project-with-a-name-too-long-for-a-narrow-terminal";
+    let dirs = [("/w/api", 40), ("/w/web", 20), (long, 10), ("/tmp/a", 1), ("/tmp/b", 1)];
+    let models = [
+      (Provider::Claude, "claude-sonnet-5"),
+      (Provider::Claude, "claude-unknown-1"),
+      (Provider::Codex, "gpt-5.4"),
+    ];
+    let tz = jiff::tz::TimeZone::system();
+    let mut sessions = vec![];
+    for d in 1..=3 {
+      let day = jiff::civil::date(2026, 1, 6 + d);
+      for (dir, weight) in dirs {
+        for (i, (prov, model)) in models.iter().enumerate() {
+          let mut s = Session::new(&format!("{dir}-{d}-{i}"), true, dir, *prov);
+          let start = day.at(9 + 3 * i as i8, 0, 0, 0).to_zoned(tz.clone()).unwrap();
+          for k in 0..weight * (i as i64 + d as i64) {
+            let input = 1000 * weight as u64 * (i as u64 + 1);
+            s.events.push(Event {
+              ts: Some(start.timestamp().as_microsecond() + k * 60_000_000),
+              usage: Some(crate::model::Usage { input, ..Default::default() }),
+              model: Some(model.to_string()),
+              ..Default::default()
+            });
+          }
+          sessions.push(s);
+        }
+      }
+    }
+    let config = format!(
+      "[projects]\n\"w/api\" = [\"/w/api\"]\n\"w/web\" = [\"/w/web\"]\n\"w/{}\" = [{long:?}]\n",
+      &long[3..]
+    );
+    Data::new(sessions, Config::parse(&config, None).unwrap(), jiff::civil::date(2026, 1, 10))
   }
 
   #[test]
@@ -419,5 +490,27 @@ pub mod tests {
     let days = data().timeline(Span::Days30, None, None);
     assert_eq!(days.len(), 30);
     assert!(days.windows(2).all(|x| x[0].day < x[1].day));
+  }
+
+  #[test]
+  fn model_times_add_up_everywhere() {
+    let data = many();
+    let (projects, total) = data.projects(Span::All, None, false);
+    assert!(projects.iter().any(|x| x.label == "other (2 dirs)"));
+    let models = data.models(Span::All, None, None);
+    let time = |rows: &[Row]| rows.iter().map(|x| x.active.unwrap()).sum::<i64>();
+    assert_eq!(time(&models), total.active.unwrap());
+    assert!(models.iter().any(|x| x.unpriced) && models.iter().any(|x| !x.unpriced));
+    for p in projects.iter().filter(|x| !x.key.is_empty()) {
+      assert_eq!(time(&data.models(Span::All, None, Some(&p.key))), p.active.unwrap(), "{}", p.key);
+    }
+    for m in &models {
+      assert_eq!(
+        time(&data.model_projects(Span::All, None, &m.key)),
+        m.active.unwrap(),
+        "{}",
+        m.key
+      );
+    }
   }
 }

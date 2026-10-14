@@ -105,6 +105,8 @@ pub struct App {
   /// Tokens on models without a price in the period: their cost counts as 0.
   pub unpriced: Vec<(String, u64)>,
   pub hits: RefCell<Hits>,
+  /// The tab `list` was built for.
+  shown: Option<Tab>,
   pub quit: bool,
 }
 
@@ -127,6 +129,7 @@ impl App {
       total: Row::default(),
       unpriced: vec![],
       hits: RefCell::default(),
+      shown: None,
       quit: false,
     };
     app.refresh();
@@ -138,6 +141,10 @@ impl App {
   }
 
   fn refresh(&mut self) {
+    // The selection follows its row across sorting, period, metric and provider changes.
+    let kept =
+      self.shown.filter(|t| *t == self.tab).and(self.list.get(self.sel())).map(|x| x.key.clone());
+    let okept = self.open.as_ref().and_then(|d| d.rows.get(self.osel)).map(|x| x.key.clone());
     let (projects, total) = self.data.projects(self.span, self.prov, false);
     self.total = total;
     self.unpriced = self.data.unpriced(self.span, self.prov);
@@ -152,14 +159,28 @@ impl App {
     }
     let needle = self.filter.to_lowercase();
     list.retain(|x| x.label.to_lowercase().contains(&needle));
+    // With a filter, the total is of the rows shown.
+    if !needle.is_empty() {
+      self.total = sum(&list);
+    }
+    let last = list.len().saturating_sub(1);
+    let found = kept.and_then(|k| list.iter().position(|x| x.key == k));
     let sel = &mut self.sel[self.tab as usize];
-    *sel = (*sel).min(list.len().saturating_sub(1));
+    *sel = match found {
+      Some(i) => i,
+      // The timeline opens on its newest day.
+      None if self.tab == Tab::Timeline && self.sort.is_none() => last,
+      None => (*sel).min(last),
+    };
     self.list = list;
+    self.shown = Some(self.tab);
     // An open drill-down follows the period and provider: its row as it is now, or closed.
     if let Some(open) = &self.open {
       let row = self.list.iter().find(|x| x.key == open.row.key).cloned();
       self.open = row.map(|x| self.detail(x));
-      self.osel = self.osel.min(self.open.as_ref().map_or(0, |x| x.rows.len().saturating_sub(1)));
+      let rows = self.open.as_ref().map_or(&[][..], |x| &x.rows);
+      let found = okept.and_then(|k| rows.iter().position(|x| x.key == k));
+      self.osel = found.unwrap_or(self.osel).min(rows.len().saturating_sub(1));
     }
   }
 
@@ -172,6 +193,10 @@ impl App {
     };
     sort(&mut rows, self.metric, self.sort);
     let project = self.tab == Tab::Projects;
+    let mut row = row;
+    if self.tab == Tab::Timeline {
+      row.sessions = Some(rows.iter().filter_map(|x| x.sessions).sum());
+    }
     Detail {
       days: if project { self.data.timeline(span, prov, Some(&row.key)) } else { vec![] },
       paths: if project { self.data.paths(&row.key) } else { vec![] },
@@ -279,7 +304,9 @@ impl App {
         _ => Some((col, false)),
       };
       if let Some(d) = &mut self.open {
+        let key = d.rows.get(self.osel).map(|x| x.key.clone());
         sort(&mut d.rows, self.metric, self.sort);
+        self.osel = d.rows.iter().position(|x| Some(&x.key) == key.as_ref()).unwrap_or(0);
         return;
       }
     } else if hits.rows.contains(at) {
@@ -301,6 +328,20 @@ impl App {
       return;
     }
     self.refresh();
+  }
+}
+
+/// The sum of rows: time, tokens, cost and sessions where they have them.
+fn sum(rows: &[Row]) -> Row {
+  let opt = |f: fn(&Row) -> Option<i64>| rows.iter().map(f).sum::<Option<i64>>();
+  Row {
+    key: "total".into(),
+    label: "total".into(),
+    active: opt(|x| x.active),
+    tokens: rows.iter().fold(0, |a, x| a.saturating_add(x.tokens)),
+    cost: rows.iter().map(|x| x.cost).sum(),
+    sessions: opt(|x| x.sessions.map(|x| x as i64)).map(|x| x as usize),
+    ..Default::default()
   }
 }
 
@@ -362,7 +403,11 @@ mod tests {
   }
 
   fn frame(app: &App) -> ratatui::buffer::Buffer {
-    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    frame_of(app, 100, 30)
+  }
+
+  fn frame_of(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
     term.draw(|f| draw::draw(f, app)).unwrap();
     term.backend().buffer().clone()
   }
@@ -385,8 +430,9 @@ mod tests {
     (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
   }
 
+  /// The first line under the header and tabs with `text`.
   fn find(buf: &ratatui::buffer::Buffer, text: &str) -> u16 {
-    (0..buf.area.height)
+    (3..buf.area.height)
       .find(|y| line(buf, *y).contains(text))
       .unwrap_or_else(|| panic!("{text:?}"))
   }
@@ -413,21 +459,27 @@ mod tests {
       assert_eq!(l.chars().count() - l.trim_end().chars().count(), 2, "gutter on {l:?}");
     }
     assert!(line(&buf, sel - 1).trim_end().ends_with("Share"));
-    // Selected row: one dark gray bar, nothing reversed, colors kept: name default, time yellow,
+    // Selected row: one subtle bar, nothing reversed, colors kept: name default, time yellow,
     // cost green.
     for x in 0..buf.area.width {
-      assert_eq!(buf[(x, sel)].bg, Color::DarkGray, "column {x}");
+      assert_eq!(buf[(x, sel)].bg, Color::Indexed(236), "column {x}");
       assert!(!buf[(x, sel)].modifier.contains(Modifier::REVERSED), "column {x}");
     }
     let row = &app.list[0];
     assert_eq!(fg(&buf, sel, &row.label), Color::Reset);
     assert_eq!(fg(&buf, sel, &crate::output::duration(row.active.unwrap())), Color::Yellow);
-    assert_eq!(fg(&buf, sel, &crate::output::cost(row.cost)), Color::Green);
+    assert_eq!(fg(&buf, sel, "$"), Color::Green);
     assert_eq!(fg(&buf, sel - 1, "Time"), Color::DarkGray);
     // Active period: bold cyan text, others gray, no filled block.
     assert!((0..buf.area.width).all(|x| !buf[(x, 0)].modifier.contains(Modifier::REVERSED)));
     assert_eq!(fg(&buf, 0, "All"), Color::Cyan);
     assert_eq!(fg(&buf, 0, "Week"), Color::DarkGray);
+    assert_eq!(fg(&buf, 0, "claude+codex"), Color::Reset);
+    assert_eq!(fg(&buf, 0, "cctrail v"), Color::Reset);
+    // The tab and the metric look like the period.
+    assert_eq!(fg(&buf, 1, "1 Projects"), Color::Cyan);
+    assert_eq!(fg(&buf, 1, "time"), Color::Cyan);
+    assert_eq!(fg(&buf, 1, "2 Models"), Color::DarkGray);
 
     // A project's drill-down takes the screen: models with time summing to the project's.
     press(&mut app, KeyCode::Enter);
@@ -449,7 +501,7 @@ mod tests {
     // The help is a box over the screen.
     press(&mut app, KeyCode::Char('?'));
     let out = screen(&app);
-    assert!(out.contains('┌') && out.contains("help") && out.contains("Model"), "{out}");
+    assert!(out.contains('╭') && out.contains("help") && out.contains("Model"), "{out}");
   }
 
   fn click(app: &mut App, x: u16, y: u16) {
@@ -483,10 +535,10 @@ mod tests {
     assert!(app.list.windows(2).all(|w| w[0].tokens <= w[1].tokens));
     // A row selects; the selected row opens.
     let buf = frame(&app);
-    let first = find(&buf, "▶");
-    click(&mut app, 4, first + 1);
+    let head = find(&buf, "Tokens");
+    click(&mut app, 4, head + 2);
     assert_eq!(app.sel(), 1);
-    click(&mut app, 4, first + 1);
+    click(&mut app, 4, head + 2);
     assert!(app.open.is_some());
     // The wheel scrolls the drill-down.
     use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
@@ -567,5 +619,150 @@ mod tests {
     assert!(!app.list.is_empty() && app.list.iter().all(|x| x.label.contains("mini")));
     press(&mut app, KeyCode::Esc);
     assert!(app.filter.is_empty());
+  }
+
+  fn many() -> App {
+    let mut app = App::new(data::tests::many());
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Right);
+    app
+  }
+
+  /// Minutes in `1d 2h 03m`.
+  fn minutes(text: &str) -> i64 {
+    let unit = |x: &str, u: char| x.strip_suffix(u).map(|n| n.parse::<i64>().unwrap());
+    text
+      .split(' ')
+      .map(|x| unit(x, 'd').map(|n| n * 1440).or(unit(x, 'h').map(|n| n * 60)).or(unit(x, 'm')))
+      .map(|x| x.unwrap_or_else(|| panic!("{text:?}")))
+      .sum()
+  }
+
+  /// The cells of a table line: runs split by two or more spaces.
+  fn cells(line: &str) -> Vec<String> {
+    let line = line.trim_start_matches('▶');
+    line.split("  ").map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect()
+  }
+
+  #[test]
+  fn lays_out_many_projects_at_every_width() {
+    use ratatui::style::{Color, Modifier};
+
+    for (width, height) in [(80, 24), (100, 30), (140, 30)] {
+      let mut app = many();
+      let buf = frame_of(&app, width, height);
+      let head = find(&buf, "Project");
+      let total = find(&buf, "total");
+      assert_eq!(
+        cells(&line(&buf, head)),
+        ["Project", "Time", "Tokens", "Cost", "Sessions", "Share"]
+      );
+      for y in head..=total {
+        let l = line(&buf, y);
+        assert_eq!(l.chars().count() - l.trim_end().chars().count(), 2, "{width}: {l:?}");
+      }
+      // Shares add up to 100; the long name is cut where it doesn't fit.
+      let shares: i64 = (head + 1..total)
+        .map(|y| cells(&line(&buf, y)).pop().unwrap())
+        .map(|x| x.trim_end_matches('%').parse::<i64>().unwrap_or(0))
+        .sum();
+      assert_eq!(shares, 100, "{width}");
+      assert!(screen_of(&buf).contains("other (2 dirs)"));
+      let long = "w/a-project-with-a-name-too-long-for-a-narrow-terminal";
+      assert_eq!(screen_of(&buf).contains(long), width == 140, "{width}");
+      assert!(width == 140 || line(&buf, find(&buf, "w/a-project-with-")).contains('…'));
+      // A separator over the footer, which keeps whole hints only.
+      assert!(line(&buf, height - 2).chars().all(|x| x == '─'));
+      let foot = line(&buf, height - 1);
+      assert!(["quit", "help", "filter", "provider"].iter().any(|x| foot.trim_end().ends_with(x)));
+      // A sort mark fits its column and keeps the headers apart.
+      let x = line(&buf, head).find("Tokens").unwrap() as u16;
+      click(&mut app, x, head);
+      let buf = frame_of(&app, width, height);
+      let labels = cells(&line(&buf, head));
+      assert_eq!(labels, ["Project", "Time", "Tokens ▼", "Cost", "Sessions", "Share"], "{width}");
+
+      // A model without a price has no cost, shown faint.
+      press(&mut app, KeyCode::Char('2'));
+      let buf = frame_of(&app, width, height);
+      let y = find(&buf, "claude-unknown-1");
+      let l = line(&buf, y);
+      let x = l.chars().position(|x| x == '–').unwrap() as u16;
+      assert_eq!((buf[(x, y)].fg, buf[(x, y)].modifier), (Color::Reset, Modifier::DIM));
+      assert!(!line(&buf, find(&buf, "Model")).contains("Sessions"));
+
+      // A project's models show minutes that add up to the project's.
+      press(&mut app, KeyCode::Char('1'));
+      press(&mut app, KeyCode::Enter);
+      let buf = frame_of(&app, width, height);
+      let head = find(&buf, "Model");
+      let total = find(&buf, "total");
+      let time = |y| minutes(&cells(&line(&buf, y))[1]);
+      assert_eq!((head + 1..total).map(time).sum::<i64>(), time(total), "{}", screen_of(&buf));
+      assert!(!line(&buf, head).contains("Sessions"));
+    }
+  }
+
+  fn screen_of(buf: &ratatui::buffer::Buffer) -> String {
+    (0..buf.area.height).map(|y| line(buf, y) + "\n").collect()
+  }
+
+  #[test]
+  fn keeps_the_selection_and_sums_the_filter() {
+    let mut app = many();
+    press(&mut app, KeyCode::Down);
+    let key = app.list[app.sel()].key.clone();
+    let buf = frame(&app);
+    let head = find(&buf, "Tokens");
+    let x = line(&buf, head).find("Tokens").unwrap() as u16;
+    for change in ["sort", "reverse", "metric", "provider", "period"] {
+      match change {
+        "sort" | "reverse" => click(&mut app, x, head),
+        "metric" => press(&mut app, KeyCode::Char('m')),
+        "provider" => press(&mut app, KeyCode::Char('p')),
+        _ => press(&mut app, KeyCode::Left),
+      }
+      assert_eq!(app.list[app.sel()].key, key, "after {change}");
+    }
+
+    let mut app = many();
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('w'));
+    press(&mut app, KeyCode::Enter);
+    assert!(app.list.len() > 1 && app.list.len() < many().list.len());
+    assert_eq!(app.total.tokens, app.list.iter().map(|x| x.tokens).sum::<u64>());
+    // The typed filter shows before the unpriced note.
+    let tabs = line(&frame(&app), 1);
+    assert!(tabs.find("filter w").unwrap() < tabs.find("unpriced").unwrap(), "{tabs}");
+  }
+
+  #[test]
+  fn timeline_starts_at_the_newest_day_and_empty_periods_say_so() {
+    use ratatui::style::Color;
+
+    let mut app = many();
+    press(&mut app, KeyCode::Char('3'));
+    assert_eq!(app.sel(), app.list.len() - 1);
+    let buf = frame(&app);
+    let head = find(&buf, "Week");
+    assert_eq!(cells(&line(&buf, head)), ["Week", "Time"]);
+    let sel = find(&buf, "▶");
+    assert!(line(&buf, sel).contains(&app.list.last().unwrap().label));
+    assert_eq!(fg(&buf, sel, "█"), Color::Yellow);
+    press(&mut app, KeyCode::Char('m'));
+    press(&mut app, KeyCode::Char('m'));
+    let buf = frame(&app);
+    assert_eq!(cells(&line(&buf, head))[1], "Cost");
+    assert_eq!(fg(&buf, find(&buf, "▶"), "█"), Color::Green);
+    // A day's drill-down counts its sessions.
+    press(&mut app, KeyCode::Enter);
+    let d = app.open.as_ref().unwrap();
+    assert_eq!(d.row.sessions, Some(d.rows.iter().filter_map(|x| x.sessions).sum()));
+
+    let mut app = App::new(data::tests::data());
+    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.span, Span::Today);
+    assert!(screen(&app).contains("No activity in this period"));
   }
 }
