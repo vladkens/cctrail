@@ -41,8 +41,17 @@ def price_of(data: dict) -> dict | None:
         if (x := num(cost.get(key))) is not None:
             price[key] = x
 
-    for tier in cost.get("tiers") or []:
-        rule = tier.get("tier") if isinstance(tier, dict) else None
+    # Long-context prices had three layouts: `[cost.context_over_200k]` until 2026-05-11, then
+    # `[[cost.tiers]]` with `context = { min = N }`, since 2026-05-12 `tier = { size = N }`.
+    tiers = list(cost.get("tiers") or [])
+    if isinstance(cost.get("context_over_200k"), dict):
+        tiers.append({**cost["context_over_200k"], "tier": {"size": 200_000}})
+    for tier in tiers:
+        if not isinstance(tier, dict):
+            continue
+        rule = tier.get("tier")
+        if rule is None and isinstance(tier.get("context"), dict):
+            rule = {"size": tier["context"].get("min")}
         if not isinstance(rule, dict) or rule.get("type", "context") != "context":
             continue
         size = rule.get("size")
@@ -204,6 +213,28 @@ def test() -> None:
         "long_context_input": 4.0,
         "long_context_output": 12.0,
         "fast_multiplier": 2.0,
+    }
+    # The two older long-context layouts.
+    long = {"long_context_input": 5.0, "long_context_output": 22.5}
+    old = {"cost": {"input": 2.5, "output": 15, "context_over_200k": {"input": 5, "output": 22.5}}}
+    assert price_of(old) == {
+        "input": 2.5,
+        "output": 15.0,
+        "long_context_threshold": 200_000,
+        **long,
+    }
+    mid = {
+        "cost": {
+            "input": 2.5,
+            "output": 15,
+            "tiers": [{"context": {"min": 272_000}, "input": 5, "output": 22.5}],
+        }
+    }
+    assert price_of(mid) == {
+        "input": 2.5,
+        "output": 15.0,
+        "long_context_threshold": 272_000,
+        **long,
     }
     assert price_of({"cost": {"output": 1}}) is None
     assert price_of({"cost": {"input": True, "output": 1}}) is None

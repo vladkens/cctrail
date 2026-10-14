@@ -239,8 +239,20 @@
         "cache_read": 0.5,
         "cache_write": 6.25,
         "input": 5.0,
+        "long_context_cache_read": 1.0,
+        "long_context_cache_write": 12.5,
+        "long_context_input": 10.0,
+        "long_context_output": 37.5,
+        "long_context_threshold": 200000,
         "output": 25.0,
         "since": "2026-02-05"
+      },
+      {
+        "cache_read": 0.5,
+        "cache_write": 6.25,
+        "input": 5.0,
+        "output": 25.0,
+        "since": "2026-03-13"
       },
       {
         "cache_read": 0.5,
@@ -263,6 +275,11 @@
         "cache_read": 0.5,
         "cache_write": 6.25,
         "input": 5.0,
+        "long_context_cache_read": 1.0,
+        "long_context_cache_write": 12.5,
+        "long_context_input": 10.0,
+        "long_context_output": 37.5,
+        "long_context_threshold": 200000,
         "output": 25.0,
         "since": "2026-02-05"
       }
@@ -369,8 +386,20 @@
         "cache_read": 0.3,
         "cache_write": 3.75,
         "input": 3.0,
+        "long_context_cache_read": 0.6,
+        "long_context_cache_write": 7.5,
+        "long_context_input": 6.0,
+        "long_context_output": 22.5,
+        "long_context_threshold": 200000,
         "output": 15.0,
         "since": "2026-02-17"
+      },
+      {
+        "cache_read": 0.3,
+        "cache_write": 3.75,
+        "input": 3.0,
+        "output": 15.0,
+        "since": "2026-03-13"
       }
     ],
     "claude-sonnet-5": [
@@ -776,6 +805,10 @@
       {
         "cache_read": 0.25,
         "input": 2.5,
+        "long_context_cache_read": 0.5,
+        "long_context_input": 5.0,
+        "long_context_output": 22.5,
+        "long_context_threshold": 200000,
         "output": 15.0,
         "since": "2026-03-05"
       },
@@ -783,6 +816,10 @@
         "cache_read": 0.25,
         "fast_multiplier": 2.0,
         "input": 2.5,
+        "long_context_cache_read": 0.5,
+        "long_context_input": 5.0,
+        "long_context_output": 22.5,
+        "long_context_threshold": 200000,
         "output": 15.0,
         "since": "2026-04-08"
       },
@@ -795,7 +832,7 @@
         "long_context_output": 22.5,
         "long_context_threshold": 272000,
         "output": 15.0,
-        "since": "2026-05-12"
+        "since": "2026-05-11"
       }
     ],
     "gpt-5.4-mini": [
@@ -824,6 +861,9 @@
     "gpt-5.4-pro": [
       {
         "input": 30.0,
+        "long_context_input": 60.0,
+        "long_context_output": 270.0,
+        "long_context_threshold": 200000,
         "output": 180.0,
         "since": "2026-03-05"
       },
@@ -833,7 +873,7 @@
         "long_context_output": 270.0,
         "long_context_threshold": 272000,
         "output": 180.0,
-        "since": "2026-05-12"
+        "since": "2026-05-11"
       }
     ],
     "gpt-5.5": [
@@ -841,6 +881,10 @@
         "cache_read": 0.5,
         "fast_multiplier": 2.5,
         "input": 5.0,
+        "long_context_cache_read": 1.0,
+        "long_context_input": 10.0,
+        "long_context_output": 45.0,
+        "long_context_threshold": 200000,
         "output": 30.0,
         "since": "2026-04-23"
       },
@@ -853,22 +897,17 @@
         "long_context_output": 45.0,
         "long_context_threshold": 272000,
         "output": 30.0,
-        "since": "2026-05-12"
+        "since": "2026-05-11"
       }
     ],
     "gpt-5.5-pro": [
-      {
-        "input": 30.0,
-        "output": 180.0,
-        "since": "2026-04-27"
-      },
       {
         "input": 30.0,
         "long_context_input": 60.0,
         "long_context_output": 270.0,
         "long_context_threshold": 272000,
         "output": 180.0,
-        "since": "2026-05-12"
+        "since": "2026-04-27"
       }
     ],
     "gpt-5.6": [
