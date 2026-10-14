@@ -77,9 +77,13 @@ fn homes() -> Vec<String> {
     crate::parser::history_roots("CLAUDE_CONFIG_DIR", ".claude"),
   ];
   let defaults = [".codex", ".claude"].into_iter().filter_map(|x| Some(home.as_ref()?.join(x)));
-  // Logged directories are absolute: a relative override (`CODEX_HOME=./.codex`) must be too.
-  let absolute = |x: std::path::PathBuf| std::path::absolute(&x).unwrap_or(x);
-  let homes = roots.into_iter().flatten().chain(defaults).map(absolute);
+  // Logged directories are absolute and resolved: a relative override (`CODEX_HOME=./.codex`) or a
+  // profile linked elsewhere is compared by both its absolute and its real path.
+  let both = |x: std::path::PathBuf| {
+    let real = std::fs::canonicalize(&x).ok();
+    [Some(std::path::absolute(&x).unwrap_or(x)), real].into_iter().flatten()
+  };
+  let homes = roots.into_iter().flatten().chain(defaults).flat_map(both);
   homes.map(|x| x.to_string_lossy().to_string()).collect()
 }
 
