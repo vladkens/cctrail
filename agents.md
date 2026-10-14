@@ -19,9 +19,9 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 - Keep the build fast: prefer a small own routine to a generic dependency that compiles far more
   code than cctrail uses (`cargo build --timings`). The dependencies are serde/serde_json (history
   and JSON output), toml (config), jiff (local time zones), rayon (parallel parsing), anyhow, ureq
-  (`update-pricing`) and libc (terminal width). No clap, table or color crates: arguments, tables and ANSI colors are
-  hand-rolled. Change dependencies only with `cargo add` / `cargo remove` / `cargo upgrade`, never
-  by hand.
+  (`update-pricing`) and libc (terminal width). No clap, table or color crates: arguments, tables
+  and ANSI colors are hand-rolled. Change dependencies only with `cargo add` / `cargo remove` /
+  `cargo upgrade`, never by hand.
 - The CLI is what `cctrail --help` shows and the JSON output carries `schema_version`: change
   either only with the person's approval.
 - Run on macOS, Linux and Windows.
@@ -29,7 +29,7 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 ## Code
 
 - One binary crate, flat modules: `cli` (arguments, commands), `config`, `model`,
-  `parser/{claude,codex}`, `metrics`, `output` (tables, JSON), `pricing`. Keep it within ~2500
+  `parser/{claude,codex}`, `metrics`, `output` (tables, JSON), `pricing`. Keep it within ~3000
   lines of Rust, tests excluded; simplify before growing past it.
 - Treat history as untrusted input: harnesses change formats and leave truncated lines. Skip what
   doesn't parse, never panic or fail the run on it.
