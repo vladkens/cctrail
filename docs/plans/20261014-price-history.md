@@ -35,7 +35,7 @@ anything.
 
 ## Tasks
 
-- [ ] `scripts/pricing-history.py` (`uv run`): walks the models.dev git log for the two providers,
+- [x] `scripts/pricing-history.py` (`uv run`): walks the models.dev git log for the two providers,
       parses each version of each model file, applies the correction rule, writes the dated
       catalog. Unit-test the rules on a tiny synthetic git repo or on parsed inputs.
 - [ ] Dated catalog in Rust: parse the list format, pick the entry for an event's local date, fast
