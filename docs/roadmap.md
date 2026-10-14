@@ -17,6 +17,8 @@ Code and Codex. Tick a phase when done.
       [Plan](plans/completed/20261014-workdirs.md)
 - [x] **6. Hybrid stats:** unconfigured repositories beside the projects, the small tail in one
       row (#6). [Plan](plans/completed/20261014-hybrid-stats.md)
+- [x] **7. Clones by name and --all:** same-named directories fold into the one used last; `--all`
+      lists every row (#7). [Plan](plans/completed/20261014-clones.md)
 
 Later, only on request: a cache of parsed sessions keyed by file size and mtime, so a run reads
 only new history; other harnesses (Gemini CLI, opencode).

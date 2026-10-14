@@ -135,14 +135,20 @@ fn groups_by_dir_without_config() {
 }
 
 #[test]
-fn folds_worktrees_into_the_repository() {
-  let value = Run::new("", "").config("missing.toml").json(&["--by", "dir", "--json"]);
+fn folds_worktrees_and_clones_into_the_repository() {
+  let run = Run::new("", "").config("missing.toml");
+  let value = run.json(&["--by", "dir", "--json"]);
   let groups = value["groups"].as_array().unwrap();
   assert_eq!(groups.len(), 1, "{value}");
+  // The worktree folds by its path, the older clone `/old/repo` by its name.
   let worktree = format!("{REPO}/.claude/worktrees/flag");
   assert_eq!(groups[0]["workdir"], REPO);
-  assert_eq!(groups[0]["paths"], json!([REPO, worktree]));
-  assert_eq!(groups[0]["usage"]["total"], 977);
+  assert_eq!(groups[0]["paths"], json!(["/old/repo", REPO, worktree]));
+  assert_eq!(groups[0]["usage"]["total"], 992);
+
+  // `--all` lists every row; nothing is small here either way.
+  let out = run.stdout(&["--by", "dir", "--all"]);
+  assert!(out.contains(REPO) && !out.contains("other"), "{out}");
 }
 
 #[test]
@@ -160,7 +166,8 @@ fn maps_worktrees_with_the_repository_unless_configured() {
     .iter()
     .map(|x| (&x["project"], &x["usage"]["total"]))
     .collect();
-  assert_eq!(totals, [(&json!("demo"), &json!(962)), (&json!("flag"), &json!(15))], "{value}");
+  // The clone `/old/repo` maps with the repository it folds into.
+  assert_eq!(totals, [(&json!("demo"), &json!(977)), (&json!("flag"), &json!(15))], "{value}");
 }
 
 #[test]
@@ -321,14 +328,14 @@ fn stats_json_over_all_fixtures() {
   assert_eq!(value["groups"].as_array().unwrap().len(), 1);
   let group = &value["groups"][0];
   assert_eq!((&group["group"], &group["project"]), (&json!("oss"), &json!("demo")));
-  assert_eq!(group["sessions"], 6);
-  assert_eq!(group["usage"]["total"], 977);
-  assert_eq!(group["active_seconds"], 1532);
+  assert_eq!(group["sessions"], 7);
+  assert_eq!(group["usage"]["total"], 992);
+  assert_eq!(group["active_seconds"], 1837);
   assert_eq!(value["total"]["projects"], 1);
 
   let value = Run::new("", "").config("config.toml").json(&["--by", "group", "--json"]);
   assert_eq!(value["groups"][0]["group"], "oss");
-  assert_eq!(value["groups"][0]["usage"]["total"], 977);
+  assert_eq!(value["groups"][0]["usage"]["total"], 992);
   assert_eq!(value["total"]["groups"], 1);
 }
 

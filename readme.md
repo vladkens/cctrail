@@ -26,6 +26,7 @@ Or take a prebuilt binary for macOS, Linux or Windows from the
 cctrail                    # statistics per project and unconfigured repository
 cctrail this-month         # for a period
 cctrail --by group         # per group, or --by dir per working directory
+cctrail --all              # every row, nothing summed up as other
 cctrail here               # the current directory's project: today, this week, this month…
 cctrail days               # tokens, cost and time per day; also weeks, months
 cctrail weeks --models     # broken down by model
@@ -39,9 +40,9 @@ output with full paths and token counts.
 ### Projects
 
 Without a config, `cctrail` lists every repository by its directory, dimmed, until the rows cover
-95% of the time; the rest is summed up as `other` (`--json` lists them all; `--by dir` folds the
-same way). A config is optional: it names
-repositories, merges several into one project and puts projects in groups for `--by group`. It
+95% of the time; the rest is summed up as `other` (`--all` lists them all; `--by dir` folds the
+same way). A config is optional: it names repositories, merges several into one project and puts
+projects in groups for `--by group`. It
 lives in `~/.config/cctrail/config.toml`; `XDG_CONFIG_HOME` changes the config root and
 `CCTRAIL_CONFIG` overrides the complete path.
 
@@ -60,16 +61,18 @@ the `@unmapped` group in `--by group` and in JSON.
 
 Agent worktrees count as their repository, recognized by their path:
 `<repo>/.claude/worktrees/<name>` (any `<repo>/.<tool>/worktrees/<name>`),
-`<repo>/.worktrees/<name>` and `<repo>-worktrees/<name>`. A path configured for a single worktree still maps it on its own.
-Clones of a repository at other paths are separate directories: list each clone's path in the
-project. `--json --by dir` lists the folded paths of each directory.
+`<repo>/.worktrees/<name>` and `<repo>-worktrees/<name>`. A path configured for a single worktree
+still maps it on its own. Clones of a repository at other paths (directories of the same name)
+count as the one used last, except temp directories, directories holding other projects
+(`~/Code`) and clones Codex saw with different git remotes. `--json --by dir` lists the folded
+paths of each directory.
 
 ## How it counts
 
 Claude history is read from `~/.claude/projects` and Codex history from `~/.codex/sessions` and
 `~/.codex/archived_sessions`, and the same from every profile beside them (`~/.claude-work`,
-`~/.codex-personal`); `CLAUDE_CONFIG_DIR` and `CODEX_HOME` replace all of those with one root. Claude Code
-deletes sessions older than 30 days at startup by default: raise
+`~/.codex-personal`); `CLAUDE_CONFIG_DIR` and `CODEX_HOME` replace all of those with one root.
+Claude Code deletes sessions older than 30 days at startup by default: raise
 [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically) to
 keep a long history.
 

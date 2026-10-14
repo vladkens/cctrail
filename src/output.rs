@@ -210,6 +210,7 @@ pub fn stats_text(
   stats: &[Stat],
   total: &Stat,
   config: Option<&Path>,
+  all: bool,
   term: &Term,
 ) -> String {
   let label = match by {
@@ -242,7 +243,7 @@ pub fn stats_text(
   let small: Vec<bool> = stats
     .iter()
     .map(|x| {
-      let small = by != By::Group && !x.mapped && covered * 100 >= total.active * 95;
+      let small = !all && by != By::Group && !x.mapped && covered * 100 >= total.active * 95;
       covered += x.active;
       small && total.active > 0
     })
@@ -269,7 +270,7 @@ pub fn stats_text(
   let mut out = table.render(term);
   let mut notes = String::new();
   if !other.is_empty() {
-    let all = if by_project { "cctrail --json" } else { "cctrail --by dir --json" };
+    let all = if by_project { "cctrail --all" } else { "cctrail --by dir --all" };
     notes += &format!(
       "{} {} {}\n",
       term.paint(&format!("{} small {dirs} in other · run", other.len()), &[DIM]),
@@ -566,36 +567,47 @@ mod tests {
     };
 
     // Past 95% of the time, unconfigured dirs fold into `other`; configured projects never do.
-    let out = stats_text(By::Project, &stats, &total, None, &Term::default());
+    let out = stats_text(By::Project, &stats, &total, None, false, &Term::default());
     let expected = ["Project", "oss/demo", "C:/repo", "oss/tiny", "other (2 dirs)", "total"];
     assert!(rows(&out, &expected), "{out}");
-    assert!(out.contains("\n2 small dirs in other · run cctrail --json for all\n"), "{out}");
+    assert!(out.contains("\n2 small dirs in other · run cctrail --all for all\n"), "{out}");
 
     // By dir the same tail folds, configured or not (nothing is mapped there); by group nothing.
     let dirs = stats.clone().map(|x| Stat { mapped: false, ..x });
-    let out = stats_text(By::Dir, &dirs, &total, None, &Term::default());
+    let out = stats_text(By::Dir, &dirs, &total, None, false, &Term::default());
     let expected = ["Directory", "oss/demo", "C:/repo", "other (3 dirs)", "total"];
     assert!(rows(&out, &expected), "{out}");
     assert!(
-      out.ends_with("\n\n3 small dirs in other · run cctrail --by dir --json for all\n"),
+      out.ends_with("\n\n3 small dirs in other · run cctrail --by dir --all for all\n"),
       "{out}"
     );
-    let out = stats_text(By::Group, &dirs, &total, None, &Term::default());
+    let out = stats_text(By::Group, &dirs, &total, None, false, &Term::default());
     assert!(!out.contains("other") && !out.contains("small"), "{out}");
 
+    // `--all` lists every row, by project and by dir.
+    let out = stats_text(By::Project, &stats, &total, None, true, &Term::default());
+    let expected = ["Project", "oss/demo", "C:/repo", "a/b", "/tmp/x", "oss/tiny", "total"];
+    assert!(rows(&out, &expected), "{out}");
+    assert!(!out.contains("other") && !out.contains("small"), "{out}");
+    let out = stats_text(By::Dir, &dirs, &total, None, true, &Term::default());
+    assert!(!out.contains("other"), "{out}");
+
     // Unconfigured labels are dim, configured ones cyan.
-    let out = stats_text(By::Project, &stats, &total, None, &Term { color: true, width: None });
+    let out =
+      stats_text(By::Project, &stats, &total, None, false, &Term { color: true, width: None });
     assert!(out.contains("\x1b[2mC:/repo") && out.contains("\x1b[36moss/demo"), "{out}");
 
     // Coverage, not a share per row: rows of 4% and 3% stay while the first 95% isn't covered.
     let wide = [stat("/a", false, 9000), stat("/b", false, 400), stat("/c", false, 300)];
     let wide = [wide[0].clone(), wide[1].clone(), wide[2].clone(), stat("/d", false, 300)];
-    let out = stats_text(By::Dir, &wide, &combine_stats("total", &wide), None, &Term::default());
+    let out =
+      stats_text(By::Dir, &wide, &combine_stats("total", &wide), None, false, &Term::default());
     assert!(rows(&out, &["Directory", "/a", "/b", "/c", "other (1 dir)", "total"]), "{out}");
 
     // Nothing small: no `other` row and no hint.
     let big = [stat("oss/demo", true, 100), stat("/repo", false, 100)];
-    let out = stats_text(By::Project, &big, &combine_stats("total", &big), None, &Term::default());
+    let out =
+      stats_text(By::Project, &big, &combine_stats("total", &big), None, false, &Term::default());
     assert!(rows(&out, &["Project", "oss/demo", "/repo", "total"]), "{out}");
     assert!(!out.contains("other"), "{out}");
 

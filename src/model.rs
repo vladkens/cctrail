@@ -124,6 +124,8 @@ pub struct Session {
   pub workdir: String,
   /// The working directory as logged.
   pub cwd: String,
+  /// The git remote Codex logged for the working directory, normalized; Claude logs none.
+  pub remote: Option<String>,
   pub provider: Provider,
   pub events: Vec<Event>,
 }
@@ -136,6 +138,7 @@ impl Session {
       is_main,
       workdir: workdir.to_string(),
       cwd: workdir.to_string(),
+      remote: None,
       provider,
       events: vec![],
     }

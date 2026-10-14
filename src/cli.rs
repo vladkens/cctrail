@@ -63,6 +63,8 @@ pub struct Args {
   pub by: By,
   pub models: bool,
   pub json: bool,
+  /// Every row, no `other` collapse.
+  pub all: bool,
 }
 
 #[derive(Debug)]
@@ -82,6 +84,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
     by: By::Project,
     models: false,
     json: false,
+    all: false,
   };
   let mut cmd = None;
   let mut flags = vec![];
@@ -113,6 +116,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
       }
       "--models" => args.models = true,
       "--json" => args.json = true,
+      "--all" => args.all = true,
       x if x.starts_with('-') => bail!("unknown option: {x}"),
       x => {
         if cmd.is_none()
@@ -136,7 +140,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
 
   args.cmd = cmd.unwrap_or(Cmd::Stats);
   let allowed: &[&str] = match args.cmd {
-    Cmd::Stats => &["--since", "--until", "--provider", "--json", "--by"],
+    Cmd::Stats => &["--since", "--until", "--provider", "--json", "--by", "--all"],
     Cmd::Days | Cmd::Weeks | Cmd::Months => {
       &["--since", "--until", "--provider", "--json", "--models"]
     }
@@ -225,7 +229,7 @@ fn stats(args: &Args) -> Result<()> {
   }
 
   let term = Term::detect();
-  let mut out = output::stats_text(args.by, &stats, &total, path.as_deref(), &term);
+  let mut out = output::stats_text(args.by, &stats, &total, path.as_deref(), args.all, &term);
   out += &output::unpriced_text(&unpriced, pricing::stale(), &term);
   output::emit(&out)
 }
@@ -365,7 +369,8 @@ pub fn help() -> String {
     "Time, tokens and cost per project from local Claude Code and Codex history.
 
 Usage:
-  cctrail [period] [--by project|group|dir]   statistics per project
+  cctrail [period] [--by project|group|dir] [--all]
+                                              statistics per project
   cctrail here                                the current directory's project
   cctrail days|weeks|months [period] [--models]
   cctrail update-pricing                      download the latest model prices
@@ -377,6 +382,7 @@ Options:
   --until YYYY-MM-DD   last day to include
   --provider NAME      claude or codex only
   --by NAME            group statistics by project, group or dir
+  --all                list every row instead of folding the small ones into `other`
   --models             break each period down by model
   --json               machine-readable output
   -h, --help           show this help
@@ -406,6 +412,8 @@ mod tests {
     let x = run(&[]).unwrap();
     assert_eq!((x.cmd, x.period, x.by), (Cmd::Stats, None, By::Project));
 
+    assert!(run(&["--all"]).unwrap().all && !run(&[]).unwrap().all);
+
     let x = run(&["this-month", "--by", "dir", "--json"]).unwrap();
     assert_eq!(
       (x.cmd, x.period, x.by, x.json),
@@ -429,6 +437,7 @@ mod tests {
     assert!(err(&["here", "today"]).contains("takes no period"));
     assert!(err(&["days", "--by", "dir"]).contains("--by is not an option"));
     assert!(err(&["--models"]).contains("--models is not an option"));
+    assert!(err(&["days", "--all"]).contains("--all is not an option"));
     assert!(err(&["nope"]).contains("unknown command or period"));
     assert!(err(&["--since", "2026-1-1"]).contains("YYYY-MM-DD"));
     assert!(err(&["--since"]).contains("needs a value"));
