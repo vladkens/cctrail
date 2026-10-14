@@ -258,7 +258,9 @@ pub fn refresh() -> Option<Refresh> {
   let mtime = |x: &Path| std::fs::metadata(x).and_then(|x| x.modified()).ok();
   let attempt = path.with_file_name(".pricing.attempt");
   let tried = mtime(&attempt).is_some_and(|x| now.duration_since(x).is_ok_and(|x| x < RETRY));
-  if tried || !is_stale(mtime(&path), now) {
+  // A cached file that doesn't parse counts as missing, so a broken download gets replaced.
+  let valid = std::fs::read_to_string(&path).is_ok_and(|x| parse(&x).is_ok());
+  if tried || (valid && !is_stale(mtime(&path), now)) {
     return None;
   }
   write(&attempt, "").ok()?;

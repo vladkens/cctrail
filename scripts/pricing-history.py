@@ -5,9 +5,9 @@
 
 Every version of providers/{anthropic,openai}/models/<model>.toml is a price that takes effect on
 its commit's date (committer date, UTC): one TSV row per model and `since` date, dollars per
-million tokens, an empty cell where a price is not set. An edit within
-14 days of the model's first commit is a data fix and replaces the earlier price for all dates. A
-model removed from models.dev keeps its last price.
+million tokens, an empty cell where a price is not set. An edit within 14 days of the model's
+first usable price is a data fix and replaces the earlier price for all dates. A model removed
+from models.dev keeps its last price.
 
     uv run scripts/pricing-history.py [--repo 3rd/models.dev] [--output src/pricing.tsv]
     uv run scripts/pricing-history.py --test

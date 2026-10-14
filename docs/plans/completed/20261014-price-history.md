@@ -14,8 +14,8 @@ anything.
   <model>.toml` (`[cost]`, `[[cost.tiers]]`, `[experimental.modes.fast].cost`). A price takes effect
   on the date of the commit that set it (committer date, UTC). models.dev lags real changes by a
   few days (gpt-5.6-sol: cut on 2026-08-22, committed 2026-08-25); that is accepted.
-- Corrections: an edit within 14 days of the model's first commit replaces the earlier price for
-  all dates (a data fix, not a price change). Later edits start a new period.
+- Corrections: an edit within 14 days of the model's first usable price replaces the earlier price
+  for all dates (a data fix, not a price change). Later edits start a new period.
 - The first known price also applies before its date; a model removed from models.dev keeps its
   last price.
 - Fast mode: price it from the fast `cost` table when present (per field), else from the standard
