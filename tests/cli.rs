@@ -9,6 +9,11 @@ fn fixtures() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
+/// A line with this start and end: paths in between are `~/…` or absolute, native separators.
+fn has_line(out: &str, start: &str, end: &str) -> bool {
+  out.lines().any(|x| x.starts_with(start) && x.ends_with(end))
+}
+
 fn tmp(name: &str) -> PathBuf {
   let dir = std::env::temp_dir().join(format!("cctrail-cli-{}-{name}", std::process::id()));
   std::fs::create_dir_all(&dir).unwrap();
@@ -104,8 +109,7 @@ fn reports_unmapped_section_total() {
   let out = Run::new("claude/projects", "missing").stdout(&["--provider", "claude"]);
   assert!(out.lines().any(|x| x.starts_with("@unmapped") && x.contains("427")), "{out}");
   assert!(out.contains("1 unmapped dir · run cctrail --by dir"));
-  assert!(out.contains("Project config:"));
-  assert!(out.contains("tests/fixtures/empty.toml"));
+  assert!(has_line(&out, "Project config: ", "empty.toml"), "{out}");
   assert!(!out.lines().any(|x| x.starts_with("/repo")));
 }
 
@@ -121,7 +125,7 @@ fn explains_missing_project_config() {
   std::fs::remove_dir_all(&dir).unwrap();
 
   assert!(out.contains("No project config found"), "{out}");
-  assert!(out.contains(&format!("Create: {}", dir.join("cctrail/config.toml").display())));
+  assert!(has_line(&out, "Create: ", "config.toml"), "{out}");
   assert!(out.contains("Setup guide: https://github.com/vladkens/cctrail#projects"));
 }
 
@@ -145,8 +149,14 @@ fn unmapped_json_is_always_complete() {
 #[test]
 fn help_explains_project_config() {
   let out = Run::new("missing", "missing").stdout(&["--help"]);
-  assert!(out.contains("Project mappings:"));
-  assert!(out.contains("tests/fixtures/empty.toml"));
+  assert!(
+    has_line(
+      &out,
+      "Project mappings: ",
+      "empty.toml. Setup guide: https://github.com/vladkens/cctrail#projects"
+    ),
+    "{out}"
+  );
   assert!(out.contains("https://github.com/vladkens/cctrail#projects"));
   assert!(out.contains("update-pricing"));
 }
@@ -155,7 +165,8 @@ fn help_explains_project_config() {
 fn reports_current_project() {
   let dir = tmp("here");
   let config = dir.join("config.toml");
-  let cwd = dir.canonicalize().unwrap();
+  // macOS: the temp dir is behind a symlink. Windows: `canonicalize` gives a `\\?\` path.
+  let cwd = if cfg!(windows) { dir.clone() } else { dir.canonicalize().unwrap() };
   std::fs::write(&config, format!("[projects]\n\"oss/demo\" = [\"/repo\", {:?}]\n", cwd)).unwrap();
   let mut run = Run::new("claude/projects", "missing").config(&config);
   run.cwd = Some(cwd);

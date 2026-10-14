@@ -155,7 +155,8 @@ fn expand_path(value: &str, home: Option<&Path>) -> Result<PathBuf> {
     }
     _ => PathBuf::from(value),
   };
-  if !path.is_absolute() {
+  // `has_root`, not `is_absolute`: on Windows `\repo` is a root of the current drive.
+  if !path.has_root() {
     bail!("project path must be absolute: {value}");
   }
   Ok(path)
