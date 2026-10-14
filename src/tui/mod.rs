@@ -6,9 +6,16 @@
 mod data;
 mod draw;
 
+use std::cell::RefCell;
+
 use anyhow::Result;
 pub use data::{Data, Row, Span};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+  self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+  KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::crossterm::execute;
+use ratatui::layout::{Position, Rect};
 
 use crate::config::Config;
 use crate::model::Provider;
@@ -43,6 +50,18 @@ impl Metric {
   }
 }
 
+/// A sortable column; a click on its header sorts by it, a second click reverses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Col {
+  Name,
+  Time,
+  Tokens,
+  Cost,
+  Sessions,
+  /// The metric's share.
+  Share,
+}
+
 /// A drill-down: the opened row and what it shows.
 pub struct Detail {
   pub row: Row,
@@ -52,11 +71,26 @@ pub struct Detail {
   pub paths: Vec<String>,
 }
 
+/// Where the last frame put what a click can hit.
+#[derive(Clone, Debug, Default)]
+pub struct Hits {
+  pub periods: Vec<(Rect, Span)>,
+  pub tabs: Vec<(Rect, Tab)>,
+  /// The header row of the table and the columns' x ranges.
+  pub head: Rect,
+  pub cols: Vec<(u16, u16, Col)>,
+  /// The rows' area and the first row shown in it.
+  pub rows: Rect,
+  pub offset: usize,
+}
+
 pub struct App {
   pub data: Data,
   pub span: Span,
   pub prov: Option<Provider>,
   pub metric: Metric,
+  /// A clicked column and whether reversed; none sorts by the metric, most first.
+  pub sort: Option<(Col, bool)>,
   pub tab: Tab,
   sel: [usize; 3],
   pub open: Option<Detail>,
@@ -70,6 +104,7 @@ pub struct App {
   pub total: Row,
   /// Tokens on models without a price in the period: their cost counts as 0.
   pub unpriced: Vec<(String, u64)>,
+  pub hits: RefCell<Hits>,
   pub quit: bool,
 }
 
@@ -80,6 +115,7 @@ impl App {
       span: Span::Month,
       prov: None,
       metric: Metric::Time,
+      sort: None,
       tab: Tab::Projects,
       sel: [0; 3],
       open: None,
@@ -90,6 +126,7 @@ impl App {
       list: vec![],
       total: Row::default(),
       unpriced: vec![],
+      hits: RefCell::default(),
       quit: false,
     };
     app.refresh();
@@ -109,8 +146,9 @@ impl App {
       Tab::Models => self.data.models(self.span, self.prov, None),
       Tab::Timeline => self.data.timeline(self.span, self.prov, None),
     };
-    if self.tab != Tab::Timeline {
-      sort(&mut list, self.metric);
+    // The timeline keeps its days in order unless a column was clicked.
+    if self.tab != Tab::Timeline || self.sort.is_some() {
+      sort(&mut list, self.metric, self.sort);
     }
     let needle = self.filter.to_lowercase();
     list.retain(|x| x.label.to_lowercase().contains(&needle));
@@ -132,7 +170,7 @@ impl App {
       Tab::Models => self.data.model_projects(span, prov, &row.key),
       Tab::Timeline => self.data.bucket_projects(span, prov, row.day.unwrap_or(self.data.today)),
     };
-    sort(&mut rows, self.metric);
+    sort(&mut rows, self.metric, self.sort);
     let project = self.tab == Tab::Projects;
     Detail {
       days: if project { self.data.timeline(span, prov, Some(&row.key)) } else { vec![] },
@@ -140,6 +178,24 @@ impl App {
       rows,
       row,
     }
+  }
+
+  /// Opens the selected row; `other` and empty days open nothing.
+  fn open(&mut self) {
+    let row = self.list.get(self.sel()).filter(|x| !x.key.is_empty());
+    if let Some(row) = row.filter(|x| x.tokens > 0 || x.active.unwrap_or(0) > 0) {
+      self.open = Some(self.detail(row.clone()));
+      self.osel = 0;
+    }
+  }
+
+  /// Moves the selection of the list or the drill-down by `by` rows.
+  fn step(&mut self, by: isize) {
+    let (sel, len) = match &self.open {
+      Some(d) => (&mut self.osel, d.rows.len()),
+      None => (&mut self.sel[self.tab as usize], self.list.len()),
+    };
+    *sel = sel.saturating_add_signed(by).min(len.saturating_sub(1));
   }
 
   pub fn key(&mut self, key: KeyEvent) {
@@ -159,25 +215,21 @@ impl App {
       }
       return self.refresh();
     }
-    let len = self.list.len();
-    let olen = self.open.as_ref().map_or(0, |x| x.rows.len());
-    let sel = &mut self.sel[self.tab as usize];
+    let back = matches!(key.code, KeyCode::Esc | KeyCode::Backspace);
     match key.code {
       // Moves and toggles that change no data return without rebuilding the rows.
       KeyCode::Char('q') => return self.quit = true,
       KeyCode::Char('?') => return self.help = !self.help,
-      KeyCode::Esc if self.help => return self.help = false,
-      KeyCode::Esc if self.open.is_some() => return self.open = None,
-      KeyCode::Esc if self.filter.is_empty() => return,
-      KeyCode::Esc => self.filter.clear(),
-      KeyCode::Char(c @ '1'..='3') => {
-        self.tab = [Tab::Projects, Tab::Models, Tab::Timeline][c as usize - '1' as usize];
-        (self.open, self.help) = (None, false);
-      }
+      _ if back && self.help => return self.help = false,
+      _ if back && self.open.is_some() => return self.open = None,
+      _ if back && self.filter.is_empty() => return,
+      _ if back => self.filter.clear(),
+      KeyCode::Char(c @ '1'..='3') => self.tab(c as usize - '1' as usize),
       KeyCode::Left => self.span = Span::ALL[(self.span as usize).saturating_sub(1)],
       KeyCode::Right => self.span = Span::ALL[(self.span as usize + 1).min(Span::ALL.len() - 1)],
       KeyCode::Char('m') => {
-        self.metric = [Metric::Tokens, Metric::Cost, Metric::Time][self.metric as usize]
+        self.metric = [Metric::Tokens, Metric::Cost, Metric::Time][self.metric as usize];
+        self.sort = None;
       }
       KeyCode::Char('p') => {
         self.prov = match self.prov {
@@ -187,41 +239,96 @@ impl App {
         }
       }
       KeyCode::Char('/') => return self.typing = true,
-      KeyCode::Up if self.open.is_some() => return self.osel = self.osel.saturating_sub(1),
-      KeyCode::Down if self.open.is_some() => {
-        return self.osel = (self.osel + 1).min(olen.saturating_sub(1));
-      }
-      KeyCode::Up => return *sel = sel.saturating_sub(1),
-      KeyCode::Down => return *sel = (*sel + 1).min(len.saturating_sub(1)),
-      KeyCode::Enter if self.open.is_none() => {
-        // `other` and empty days open nothing.
-        if let Some(row) = self
-          .list
-          .get(*sel)
-          .filter(|x| !x.key.is_empty() && (x.tokens > 0 || x.active.unwrap_or(0) > 0))
-        {
-          self.open = Some(self.detail(row.clone()));
-          self.osel = 0;
-        }
+      KeyCode::Up => return self.step(-1),
+      KeyCode::Down => return self.step(1),
+      KeyCode::Enter if self.open.is_none() => return self.open(),
+      _ => return,
+    }
+    self.refresh();
+  }
+
+  fn tab(&mut self, i: usize) {
+    self.tab = [Tab::Projects, Tab::Models, Tab::Timeline][i];
+    (self.open, self.help, self.sort) = (None, false, None);
+  }
+
+  /// Clicks on periods, tabs, column headers and rows; the wheel scrolls; a click on the selected
+  /// row opens it (so does a double click), anywhere while the help is open closes it.
+  pub fn mouse(&mut self, ev: MouseEvent) {
+    let at = Position::new(ev.column, ev.row);
+    match ev.kind {
+      MouseEventKind::ScrollUp => return self.step(-1),
+      MouseEventKind::ScrollDown => return self.step(1),
+      MouseEventKind::Down(MouseButton::Left) => {}
+      _ => return,
+    }
+    if self.help {
+      return self.help = false;
+    }
+    let hits = self.hits.borrow().clone();
+    if let Some((_, span)) = hits.periods.iter().find(|x| x.0.contains(at)) {
+      self.span = *span;
+    } else if let Some((_, tab)) = hits.tabs.iter().find(|x| x.0.contains(at)) {
+      self.tab(*tab as usize);
+    } else if hits.head.contains(at) {
+      let Some(&(_, _, col)) = hits.cols.iter().find(|x| (x.0..x.1).contains(&at.x)) else {
+        return;
+      };
+      self.sort = match self.sort {
+        Some((c, rev)) if c == col => Some((col, !rev)),
+        _ => Some((col, false)),
+      };
+      if let Some(d) = &mut self.open {
+        sort(&mut d.rows, self.metric, self.sort);
         return;
       }
-      _ => return,
+    } else if hits.rows.contains(at) {
+      let i = hits.offset + usize::from(at.y - hits.rows.y);
+      let (sel, len) = match &self.open {
+        Some(d) => (self.osel, d.rows.len()),
+        None => (self.sel(), self.list.len()),
+      };
+      if i >= len {
+        return;
+      }
+      match (&self.open, i == sel) {
+        (None, true) => self.open(),
+        (None, false) => self.sel[self.tab as usize] = i,
+        (Some(_), _) => self.osel = i,
+      }
+      return;
+    } else {
+      return;
     }
     self.refresh();
   }
 }
 
-/// Rows by the metric, most first, ties by name; `other` stays last whatever the metric.
-fn sort(rows: &mut [Row], m: Metric) {
+/// Rows by a clicked column (names A to Z, numbers most first; reversed on a second click), else
+/// by the metric, most first; ties by name, `other` last whatever the order.
+fn sort(rows: &mut [Row], m: Metric, by: Option<(Col, bool)>) {
+  let value = |x: &Row| match by.map(|x| x.0) {
+    Some(Col::Time) => x.active.unwrap_or(0) as f64,
+    Some(Col::Tokens) => x.tokens as f64,
+    Some(Col::Cost) => x.cost,
+    Some(Col::Sessions) => x.sessions.unwrap_or(0) as f64,
+    _ => m.of(x),
+  };
+  let rev = by.is_some_and(|x| x.1);
   rows.sort_by(|a, b| {
-    let key = |x: &Row| (x.key.is_empty(), -m.of(x));
-    key(a).partial_cmp(&key(b)).unwrap().then_with(|| a.label.cmp(&b.label))
+    let order = match by.map(|x| x.0) {
+      Some(Col::Name) => a.label.cmp(&b.label),
+      _ => value(b).partial_cmp(&value(a)).unwrap().then_with(|| a.label.cmp(&b.label)),
+    };
+    let order = if rev { order.reverse() } else { order };
+    a.key.is_empty().cmp(&b.key.is_empty()).then(order)
   });
 }
 
 /// Runs the interface until `q`: a loading frame while the history is parsed, then the app.
 pub fn run() -> Result<()> {
   let mut term = ratatui::init();
+  execute!(std::io::stdout(), EnableMouseCapture)?;
   let res = (|| -> Result<()> {
     term.draw(draw::loading)?;
     let config = Config::load()?;
@@ -230,12 +337,15 @@ pub fn run() -> Result<()> {
     let mut app = App::new(Data::new(sessions, config, today));
     while !app.quit {
       term.draw(|f| draw::draw(f, &app))?;
-      if let Event::Key(key) = event::read()? {
-        app.key(key);
+      match event::read()? {
+        Event::Key(key) => app.key(key),
+        Event::Mouse(ev) => app.mouse(ev),
+        _ => {}
       }
     }
     Ok(())
   })();
+  _ = execute!(std::io::stdout(), DisableMouseCapture);
   ratatui::restore();
   res
 }
@@ -264,54 +374,129 @@ mod tests {
       .collect()
   }
 
+  /// The fg of the first cell of `text` on line `y`.
+  fn fg(buf: &ratatui::buffer::Buffer, y: u16, text: &str) -> ratatui::style::Color {
+    let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+    let x = line.find(text).unwrap_or_else(|| panic!("{text:?} not in {line:?}"));
+    buf[(line[..x].chars().count() as u16, y)].fg
+  }
+
+  fn line(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+    (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+  }
+
+  fn find(buf: &ratatui::buffer::Buffer, text: &str) -> u16 {
+    (0..buf.area.height)
+      .find(|y| line(buf, *y).contains(text))
+      .unwrap_or_else(|| panic!("{text:?}"))
+  }
+
   #[test]
-  fn draws_one_even_selection_and_no_bars() {
+  fn draws_the_look_of_the_checklist() {
     use ratatui::style::{Color, Modifier};
 
     let mut app = app();
     let buf = frame(&app);
     let out = screen(&app);
-    assert!(!out.contains('█') && !out.contains('░') && out.contains('%'), "{out}");
-    // The selected row (the first under the header) is one dark gray bar, nothing reversed.
-    let y = (0..buf.area.height).find(|y| buf[(0, *y)].symbol() == "▶").unwrap();
-    for x in 0..buf.area.width {
-      let cell = &buf[(x, y)];
-      assert_eq!(cell.bg, Color::DarkGray, "column {x}");
-      assert!(!cell.modifier.contains(Modifier::REVERSED), "column {x}");
-    }
-    // The active period is marked by its text, not a filled block.
-    assert!((0..buf.area.width).all(|x| !buf[(x, 0)].modifier.contains(Modifier::REVERSED)));
-
-    // Colors as the text report, kept on the selected row: name cyan, time yellow, cost green.
-    let row = y;
-    let line: String = (0..buf.area.width).map(|x| buf[(x, row)].symbol()).collect();
-    let fg_at = |text: &str| {
-      let x = line.find(text).unwrap();
-      buf[(line[..x].chars().count() as u16, row)].fg
-    };
-    let second = &app.list[0];
-    assert_eq!(fg_at(&second.label[..3]), if second.dim { Color::DarkGray } else { Color::Cyan });
-    assert_eq!(fg_at(&crate::output::cost(second.cost)), Color::Green);
-    assert_eq!(fg_at(&crate::output::duration(second.active.unwrap())), Color::Yellow);
-    // Numbers are right-aligned: the share ends at the last column.
-    assert!(
-      line.trim_end().ends_with('%') && line.trim_end().chars().count() == line.chars().count(),
-      "{line}"
-    );
-    // The version sits at the right of the header.
-    let head: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+    // Version top right, totals not in the header but as the last `total` row.
+    let head = line(&buf, 0);
     assert!(head.trim_end().ends_with(concat!("cctrail v", env!("CARGO_PKG_VERSION"))), "{head}");
+    assert!(!head.contains('$'), "{head}");
+    let sel = find(&buf, "▶");
+    let total = find(&buf, "total");
+    assert_eq!(total, sel + app.list.len() as u16, "{out}");
+    assert!(buf[(2, total)].modifier.contains(Modifier::BOLD));
+    // No bars, percentages only; numbers right-aligned up to an equal right gutter.
+    assert!(!out.contains('█') && !out.contains('░') && out.contains('%'), "{out}");
+    for y in [sel - 1, sel, total] {
+      let l = line(&buf, y);
+      assert_eq!(l.chars().count() - l.trim_end().chars().count(), 2, "gutter on {l:?}");
+    }
+    assert!(line(&buf, sel - 1).trim_end().ends_with("Share"));
+    // Selected row: one dark gray bar, nothing reversed, colors kept: name default, time yellow,
+    // cost green.
+    for x in 0..buf.area.width {
+      assert_eq!(buf[(x, sel)].bg, Color::DarkGray, "column {x}");
+      assert!(!buf[(x, sel)].modifier.contains(Modifier::REVERSED), "column {x}");
+    }
+    let row = &app.list[0];
+    assert_eq!(fg(&buf, sel, &row.label), Color::Reset);
+    assert_eq!(fg(&buf, sel, &crate::output::duration(row.active.unwrap())), Color::Yellow);
+    assert_eq!(fg(&buf, sel, &crate::output::cost(row.cost)), Color::Green);
+    assert_eq!(fg(&buf, sel - 1, "Time"), Color::DarkGray);
+    // Active period: bold cyan text, others gray, no filled block.
+    assert!((0..buf.area.width).all(|x| !buf[(x, 0)].modifier.contains(Modifier::REVERSED)));
+    assert_eq!(fg(&buf, 0, "All"), Color::Cyan);
+    assert_eq!(fg(&buf, 0, "Week"), Color::DarkGray);
 
-    // A drill-down takes the screen; the help is a box over it.
+    // A project's drill-down takes the screen: models with time summing to the project's.
     press(&mut app, KeyCode::Enter);
+    let buf = frame(&app);
     let out = screen(&app);
-    assert!(!out.contains('┌') && out.contains("claude/claude-sonnet-5"), "{out}");
+    assert!(!out.contains('┌'), "{out}");
+    let d = app.open.as_ref().unwrap();
+    let times: i64 = d.rows.iter().map(|x| x.active.unwrap()).sum();
+    assert_eq!(times, d.row.active.unwrap(), "{out}");
+    let y = find(&buf, "claude/claude-sonnet-5");
+    assert_eq!(fg(&buf, y, "claude/claude-sonnet-5"), Color::Reset);
+    // Backspace goes back; the same model looks the same in the models tab.
+    press(&mut app, KeyCode::Backspace);
+    assert!(app.open.is_none());
+    press(&mut app, KeyCode::Char('2'));
+    let buf = frame(&app);
+    let y = find(&buf, "claude/claude-sonnet-5");
+    assert_eq!(fg(&buf, y, "claude/claude-sonnet-5"), Color::Reset);
+    // The help is a box over the screen.
     press(&mut app, KeyCode::Char('?'));
     let out = screen(&app);
-    assert!(
-      out.contains('┌') && out.contains("help") && out.contains("claude/claude-sonnet-5"),
-      "{out}"
-    );
+    assert!(out.contains('┌') && out.contains("help") && out.contains("Model"), "{out}");
+  }
+
+  fn click(app: &mut App, x: u16, y: u16) {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let kind = MouseEventKind::Down(MouseButton::Left);
+    app.mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE });
+  }
+
+  #[test]
+  fn clicks_tabs_periods_headers_and_rows() {
+    let mut app = app();
+    let buf = frame(&app);
+    // A period, then a tab, by their text.
+    let x = line(&buf, 0).find("Week").unwrap() as u16;
+    click(&mut app, x, 0);
+    assert_eq!(app.span, Span::Week);
+    click(&mut app, line(&buf, 0).find("All").unwrap() as u16, 0);
+    let x = line(&buf, 1).find("2 Models").unwrap() as u16;
+    click(&mut app, x, 1);
+    assert_eq!(app.tab, Tab::Models);
+    // A header sorts by its column; again reverses.
+    let buf = frame(&app);
+    let y = find(&buf, "Tokens");
+    let x = line(&buf, y).find("Tokens").unwrap() as u16;
+    click(&mut app, x, y);
+    assert_eq!(app.sort, Some((Col::Tokens, false)));
+    assert!(app.list.windows(2).all(|w| w[0].tokens >= w[1].tokens));
+    frame(&app);
+    click(&mut app, x, y);
+    assert_eq!(app.sort, Some((Col::Tokens, true)));
+    assert!(app.list.windows(2).all(|w| w[0].tokens <= w[1].tokens));
+    // A row selects; the selected row opens.
+    let buf = frame(&app);
+    let first = find(&buf, "▶");
+    click(&mut app, 4, first + 1);
+    assert_eq!(app.sel(), 1);
+    click(&mut app, 4, first + 1);
+    assert!(app.open.is_some());
+    // The wheel scrolls the drill-down.
+    use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+    let ev = MouseEvent {
+      kind: MouseEventKind::ScrollDown,
+      column: 0,
+      row: 0,
+      modifiers: KeyModifiers::NONE,
+    };
+    app.mouse(ev);
   }
 
   fn app() -> App {
@@ -355,6 +540,7 @@ mod tests {
     assert!(app.list.iter().all(|x| x.day.is_some()));
     press(&mut app, KeyCode::Char('?'));
     assert!(screen(&app).contains("provider"));
+    press(&mut app, KeyCode::Char('?'));
   }
 
   #[test]

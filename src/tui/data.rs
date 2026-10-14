@@ -6,7 +6,7 @@ use jiff::civil::Date;
 
 use crate::config::{By, Config};
 use crate::metrics::{self, DateRange, Granularity, Period};
-use crate::model::{Event, Provider, Session, Speed};
+use crate::model::{Event, Provider, Session, Speed, Ts};
 use crate::output::{self, workdir_label};
 use crate::pricing;
 
@@ -124,7 +124,7 @@ impl Data {
     (rows, row(&total, false))
   }
 
-  /// Models by tokens and cost; time doesn't split between models.
+  /// Models by tokens and cost; within a project also by time (see `model_times`).
   pub fn models(&self, span: Span, prov: Option<Provider>, project: Option<&str>) -> Vec<Row> {
     let range = span.range(self.today);
     let mut rows: HashMap<String, Row> = HashMap::new();
@@ -143,7 +143,43 @@ impl Data {
       row.tokens = row.tokens.saturating_add(usage.total());
       row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
     }
+    if let Some(project) = project {
+      let times = self.model_times(span, prov, project);
+      for row in rows.values_mut() {
+        row.active = Some(times.get(&row.key).copied().unwrap_or(0));
+      }
+    }
     rows.into_values().collect()
+  }
+
+  /// A project's active time split between its models, summing to the project's time: each
+  /// activity stamp belongs to the model of the session's last response (its first one before
+  /// any), simultaneous time is divided as between projects, and the parts are scaled to the
+  /// project's share of the time.
+  fn model_times(&self, span: Span, prov: Option<Provider>, project: &str) -> HashMap<String, i64> {
+    let range = span.range(self.today);
+    let total = self.projects(span, prov, true).0.into_iter().find(|x| x.key == project);
+    let total = total.and_then(|x| x.active).unwrap_or(0) / MICROS;
+    let mut stamps: HashMap<String, Vec<Ts>> = HashMap::new();
+    for (si, s) in self.sessions.iter().enumerate() {
+      if self.names[si].0 != project || prov.is_some_and(|p| s.provider != p) {
+        continue;
+      }
+      let key = |e: &Event| e.model.as_deref().map(|m| model_key(s.provider, m, is_fast(e)));
+      let Some(mut model) = s.events.iter().find_map(key) else { continue };
+      for e in &s.events {
+        model = key(e).unwrap_or(model);
+        if let Some(ts) = e.ts.filter(|x| !e.failed && (!range.bounded() || range.contains(*x))) {
+          stamps.entry(model.clone()).or_default().push(ts);
+        }
+      }
+    }
+    let by: HashMap<&str, Vec<Ts>> = stamps.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+    let parts = metrics::active_by_name(&by, &range);
+    scale(parts.into_iter().map(|(k, v)| (k.to_string(), v)).collect(), total)
+      .into_iter()
+      .map(|(k, v)| (k, v * MICROS))
+      .collect()
   }
 
   /// The projects that used a model, by its tokens and cost there.
@@ -253,6 +289,29 @@ impl Data {
     paths
   }
 }
+
+/// Seconds per name scaled to sum to `total`; the largest remainders get the rest.
+fn scale(parts: Vec<(String, i64)>, total: i64) -> HashMap<String, i64> {
+  let sum: i64 = parts.iter().map(|x| x.1).sum();
+  if sum == 0 {
+    return parts.into_iter().map(|(k, _)| (k, 0)).collect();
+  }
+  let mut out: Vec<(String, i64, i64)> = parts
+    .into_iter()
+    .map(|(k, v)| {
+      let x = v as i128 * total as i128;
+      (k, (x / sum as i128) as i64, (x % sum as i128) as i64)
+    })
+    .collect();
+  let rest = total - out.iter().map(|x| x.1).sum::<i64>();
+  out.sort_by(|a, b| (b.2, &a.0).cmp(&(a.2, &b.0)));
+  for x in out.iter_mut().take(rest.max(0) as usize) {
+    x.1 += 1;
+  }
+  out.into_iter().map(|(k, v, _)| (k, v)).collect()
+}
+
+const MICROS: i64 = 1_000_000;
 
 /// An event counts in a span as `stats_by` counts it: by its day, and always for all time, even
 /// without a timestamp.

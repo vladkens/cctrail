@@ -521,7 +521,7 @@ fn active_by_day(stamps: Vec<Ts>) -> BTreeMap<Date, i64> {
 }
 
 /// Seconds per name; time when several names are active at once is divided between them.
-fn active_by_name<'a>(
+pub fn active_by_name<'a>(
   stamps: &HashMap<&'a str, Vec<Ts>>,
   range: &DateRange,
 ) -> HashMap<&'a str, i64> {
