@@ -38,13 +38,13 @@ anything.
 - [x] `scripts/pricing-history.py` (`uv run`): walks the models.dev git log for the two providers,
       parses each version of each model file, applies the correction rule, writes the dated
       catalog. Unit-test the rules on a tiny synthetic git repo or on parsed inputs.
-- [ ] Dated catalog in Rust: parse the list format, pick the entry for an event's local date, fast
+- [x] Dated catalog in Rust: parse the list format, pick the entry for an event's local date, fast
       table; unit tests for before-first, between, after-last, removed model, correction.
       Regenerate `src/pricing.json`.
-- [ ] Auto-update and `update-pricing` from the `pricing` release asset; `CCTRAIL_NO_UPDATE`;
+- [x] Auto-update and `update-pricing` from the `pricing` release asset; `CCTRAIL_NO_UPDATE`;
       the unpriced warning's update hint adapts; the end-to-end tests never touch the network.
-- [ ] `.github/workflows/pricing.yml` and `make update`; run the workflow once by
+- [x] `.github/workflows/pricing.yml` and `make update`; run the workflow once by
       `workflow_dispatch` from the branch to prove it publishes the asset.
-- [ ] Readme ("How it counts"), agents.md network rule, roadmap entry.
-- [ ] Numbers: tokens, sessions and active time identical to `main` on the full history; the PR
+- [x] Readme ("How it counts"), agents.md network rule, roadmap entry.
+- [x] Numbers: tokens, sessions and active time identical to `main` on the full history; the PR
       body lists the cost per month before and after.
