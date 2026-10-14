@@ -3,93 +3,176 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use jiff::civil::Date;
 
 use crate::config::home_dir;
-use crate::model::{Provider, Speed, Usage};
+use crate::metrics::local_date;
+use crate::model::{Provider, Speed, Ts, Usage};
 
-const BUNDLED: &str = include_str!("pricing.json");
+const BUNDLED: &str = include_str!("pricing.tsv");
 
-/// Dollars per million tokens. Fields in alphabetical order: the catalog file's key order.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+/// Dollars per million tokens from a day on: the models.dev price set on that day.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Price {
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub cache_read: Option<f64>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub cache_write: Option<f64>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub fast_multiplier: Option<f64>,
+  pub since: Date,
   pub input: f64,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub long_context_cache_read: Option<f64>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub long_context_cache_write: Option<f64>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub long_context_input: Option<f64>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub long_context_output: Option<f64>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub long_context_threshold: Option<u64>,
   pub output: f64,
+  pub cache_read: Option<f64>,
+  pub cache_write: Option<f64>,
+  pub long_context_threshold: Option<u64>,
+  pub long_context_input: Option<f64>,
+  pub long_context_output: Option<f64>,
+  pub long_context_cache_read: Option<f64>,
+  pub long_context_cache_write: Option<f64>,
+  pub fast_multiplier: Option<f64>,
 }
 
-/// Provider (`anthropic`, `openai`) to model id to price.
-pub type Catalog = BTreeMap<String, BTreeMap<String, Price>>;
+/// Provider (`anthropic`, `openai`) to model id to its prices, oldest first.
+pub type Catalog = BTreeMap<String, BTreeMap<String, Vec<Price>>>;
 
 /// The catalog in use and, when it is the downloaded one, when it was written.
-static CATALOG: LazyLock<(Catalog, Option<SystemTime>)> =
-  LazyLock::new(|| load(cache_path().ok().as_deref()));
+type Loaded = (Catalog, Option<SystemTime>);
 
-/// A download older than this may lack recent models.
-const STALE: Duration = Duration::from_secs(7 * 24 * 3600);
+static CATALOG: OnceLock<Loaded> = OnceLock::new();
 
-/// Where `update-pricing` keeps the downloaded catalog, which wins over the bundled one.
+fn catalog() -> &'static Loaded {
+  CATALOG.get_or_init(|| load(cache_path().ok().as_deref()))
+}
+
+/// A download older than this may lack recent models or price changes.
+const STALE: Duration = Duration::from_secs(24 * 3600);
+
+/// Where the downloaded catalog lives; it wins over the bundled one.
 pub fn cache_path() -> Result<PathBuf> {
   if let Some(x) = env::var_os("XDG_CACHE_HOME").filter(|x| !x.is_empty()) {
-    return Ok(PathBuf::from(x).join("cctrail/pricing.json"));
+    return Ok(PathBuf::from(x).join("cctrail/pricing.tsv"));
   }
   let Some(home) = home_dir() else { bail!("cannot find pricing cache without HOME") };
-  Ok(home.join(".cache/cctrail/pricing.json"))
+  Ok(home.join(".cache/cctrail/pricing.tsv"))
 }
 
 /// The cached catalog with its mtime when it exists and parses, else the bundled one.
-fn load(cache: Option<&Path>) -> (Catalog, Option<SystemTime>) {
+fn load(cache: Option<&Path>) -> Loaded {
   if let Some(path) = cache.filter(|x| x.is_file())
-    && let Ok(x) = read(path)
+    && let Ok(x) =
+      std::fs::read_to_string(path).map_err(anyhow::Error::from).and_then(|x| parse(&x))
   {
     let mtime = std::fs::metadata(path).and_then(|x| x.modified()).ok();
     return (x, Some(mtime.unwrap_or(SystemTime::UNIX_EPOCH)));
   }
-  (serde_json::from_str(BUNDLED).expect("bundled pricing.json"), None)
+  (parse(BUNDLED).expect("bundled pricing.tsv"), None)
+}
+
+/// The catalog's columns, in order (`scripts/pricing-history.py` writes them).
+const COLUMNS: [&str; 13] = [
+  "provider",
+  "model",
+  "since",
+  "input",
+  "output",
+  "cache_read",
+  "cache_write",
+  "long_context_threshold",
+  "long_context_input",
+  "long_context_output",
+  "long_context_cache_read",
+  "long_context_cache_write",
+  "fast_multiplier",
+];
+
+/// A catalog file: the header, then one row per model and date; both providers present.
+fn parse(text: &str) -> Result<Catalog> {
+  let mut lines = text.lines().enumerate().filter(|(_, x)| !x.is_empty());
+  match lines.next() {
+    Some((_, x)) if x.split('\t').eq(COLUMNS) => {}
+    _ => bail!("pricing catalog: line 1 must be the header {}", COLUMNS.join(" ")),
+  }
+
+  let mut catalog = Catalog::new();
+  for (i, line) in lines {
+    let row = parse_row(line).with_context(|| format!("pricing catalog: line {}", i + 1))?;
+    let (provider, model, price) = row;
+    catalog.entry(provider.into()).or_default().entry(model.into()).or_default().push(price);
+  }
+  for provider in ["anthropic", "openai"] {
+    if catalog.get(provider).is_none_or(|x| x.is_empty()) {
+      bail!("pricing catalog has no {provider} prices");
+    }
+  }
+  catalog.values_mut().flat_map(|x| x.values_mut()).for_each(|x| x.sort_by_key(|x| x.since));
+  Ok(catalog)
+}
+
+fn parse_row(line: &str) -> Result<(&str, &str, Price)> {
+  let cells: Vec<&str> = line.split('\t').collect();
+  if cells.len() != COLUMNS.len() {
+    bail!("{} cells, expected {}", cells.len(), COLUMNS.len());
+  }
+  let num = |i: usize| -> Result<Option<f64>> {
+    match cells[i] {
+      "" => Ok(None),
+      x => x.parse().map(Some).with_context(|| format!("{}: not a number: {x}", COLUMNS[i])),
+    }
+  };
+  let required = |i: usize| num(i)?.with_context(|| format!("{} is required", COLUMNS[i]));
+  let (provider, model) = (cells[0], cells[1]);
+  if provider.is_empty() || model.is_empty() {
+    bail!("provider and model are required");
+  }
+  let threshold = match cells[7] {
+    "" => None,
+    x => Some(x.parse().with_context(|| format!("long_context_threshold: not a count: {x}"))?),
+  };
+  let price = Price {
+    since: cells[2].parse().with_context(|| format!("since: not a date: {}", cells[2]))?,
+    input: required(3)?,
+    output: required(4)?,
+    cache_read: num(5)?,
+    cache_write: num(6)?,
+    long_context_threshold: threshold,
+    long_context_input: num(8)?,
+    long_context_output: num(9)?,
+    long_context_cache_read: num(10)?,
+    long_context_cache_write: num(11)?,
+    fast_multiplier: num(12)?,
+  };
+  Ok((provider, model, price))
 }
 
 /// Whether `update-pricing` may bring new prices: the bundled catalog or an old download is in use.
 pub fn stale() -> bool {
-  is_stale(CATALOG.1, SystemTime::now())
+  is_stale(catalog().1, SystemTime::now())
 }
 
 fn is_stale(mtime: Option<SystemTime>, now: SystemTime) -> bool {
   mtime.is_none_or(|x| now.duration_since(x).is_ok_and(|x| x > STALE))
 }
 
-fn read(path: &Path) -> Result<Catalog> {
-  let data = std::fs::read(path)?;
-  serde_json::from_slice(&data)
-    .with_context(|| format!("invalid pricing catalog: {}", path.display()))
+/// The price of a model at a moment: the latest set by its local day (the day the reports show
+/// it under), the first one before that, the latest for an event without a time.
+pub fn price(provider: Provider, model: Option<&str>, ts: Option<Ts>) -> Option<&'static Price> {
+  pick(catalog().0.get(provider.pricing_key())?.get(model.unwrap_or(""))?, ts.map(local_date))
 }
 
-pub fn price(provider: Provider, model: Option<&str>) -> Option<&'static Price> {
-  CATALOG.0.get(provider.pricing_key())?.get(model.unwrap_or(""))
+fn pick(prices: &[Price], day: Option<Date>) -> Option<&Price> {
+  let i = day.map_or(prices.len(), |day| prices.partition_point(|x| x.since <= day));
+  prices.get(i.saturating_sub(1))
 }
 
-/// Estimated dollars; 0 for a model the catalog lacks.
-pub fn cost(provider: Provider, model: Option<&str>, usage: &Usage, speed: Option<Speed>) -> f64 {
-  price(provider, model).map_or(0.0, |x| x.cost(usage, speed))
+/// Estimated dollars at the price of the event's day; 0 for a model the catalog lacks.
+pub fn cost(
+  provider: Provider,
+  model: Option<&str>,
+  ts: Option<Ts>,
+  usage: &Usage,
+  speed: Option<Speed>,
+) -> f64 {
+  price(provider, model, ts).map_or(0.0, |x| x.cost(usage, speed))
 }
 
 impl Price {
@@ -118,131 +201,165 @@ impl Price {
 }
 
 // MARK: Updates
+//
+// A daily workflow rebuilds the catalog from the models.dev git history
+// (`scripts/pricing-history.py`) and publishes it as the `pricing` release's asset.
 
-const CATALOG_URL: &str = "https://models.dev/api.json";
+const CATALOG_URL: &str =
+  "https://github.com/vladkens/cctrail/releases/download/pricing/pricing.tsv";
 
-/// Downloads the models.dev catalog and writes its prices to `path`, replacing it atomically.
-pub fn update(path: &Path) -> Result<()> {
+/// A failed automatic download waits this long before the next try.
+const RETRY: Duration = Duration::from_secs(24 * 3600);
+
+fn download(timeout: Duration) -> Result<String> {
   let mut rep = ureq::get(CATALOG_URL)
-    .header("User-Agent", "cctrail")
+    .header("User-Agent", concat!("cctrail/", env!("CARGO_PKG_VERSION")))
     .config()
-    .timeout_global(Some(std::time::Duration::from_secs(30)))
+    .timeout_global(Some(timeout))
     .build()
     .call()
     .with_context(|| format!("failed to download {CATALOG_URL}"))?;
-  let data = rep.body_mut().with_config().limit(64 << 20).read_to_vec()?;
-  let raw: serde_json::Value = serde_json::from_slice(&data)?;
-  let catalog = from_models_dev(&raw)?;
+  let data = rep.body_mut().with_config().limit(64 << 20).read_to_string()?;
+  parse(&data).context("downloaded pricing catalog")?;
+  Ok(data)
+}
 
-  let mut data = serde_json::to_vec_pretty(&catalog)?;
-  data.push(b'\n');
+/// Writes through a temporary file, so a reader never sees half a catalog.
+fn write(path: &Path, data: &str) -> Result<()> {
   if let Some(dir) = path.parent().filter(|x| !x.as_os_str().is_empty()) {
     std::fs::create_dir_all(dir)?;
   }
   let name = path.file_name().map(|x| x.to_string_lossy()).unwrap_or_default();
   let tmp = path.with_file_name(format!(".{name}.tmp"));
-  let res = std::fs::write(&tmp, &data).and_then(|_| std::fs::rename(&tmp, path));
+  let res = std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, path));
   let _ = std::fs::remove_file(&tmp);
   res.with_context(|| format!("failed to write {}", path.display()))
 }
 
-/// Anthropic and OpenAI prices from a models.dev `api.json`.
-fn from_models_dev(raw: &serde_json::Value) -> Result<Catalog> {
-  let Some(raw) = raw.as_object() else { bail!("models.dev response must be an object") };
-  let mut catalog = Catalog::new();
-  for provider in ["anthropic", "openai"] {
-    let models = raw.get(provider).and_then(|x| x.get("models")).and_then(|x| x.as_object());
-    let Some(models) = models else { bail!("models.dev response has no {provider} models") };
-    let prices = catalog.entry(provider.to_string()).or_default();
-    for (key, model) in models {
-      let Some(price) = price_of(model) else { continue };
-      let id = model.get("id").and_then(|x| x.as_str()).unwrap_or(key);
-      prices.insert(id.to_string(), price);
-    }
-  }
-  Ok(catalog)
+/// `cctrail update-pricing`: downloads the catalog into the cache now.
+pub fn update() -> Result<PathBuf> {
+  let path = cache_path()?;
+  write(&path, &download(Duration::from_secs(30))?)?;
+  Ok(path)
 }
 
-fn price_of(model: &serde_json::Value) -> Option<Price> {
-  let num = |x: Option<&serde_json::Value>| x.and_then(|x| x.as_f64());
-  let cost = model.get("cost")?.as_object()?;
-  let input = num(cost.get("input"))?;
-  let mut price = Price {
-    input,
-    output: num(cost.get("output"))?,
-    cache_read: num(cost.get("cache_read")),
-    cache_write: num(cost.get("cache_write")),
-    ..Default::default()
-  };
+/// A download running beside the history parsing, started by `refresh`.
+pub struct Refresh(Receiver<Catalog>);
 
-  let tiers = cost.get("tiers").and_then(|x| x.as_array()).map_or(&[][..], |x| x.as_slice());
-  for tier in tiers {
-    let Some(rule) = tier.get("tier").filter(|x| x.is_object()) else { continue };
-    if rule.get("type").and_then(|x| x.as_str()) != Some("context") {
-      continue;
+/// Starts downloading the catalog when the cached one is missing or a day old and no attempt
+/// failed in the last day. `CCTRAIL_NO_UPDATE=1` turns it off. Never fails: the bundled or cached
+/// prices stay in use.
+pub fn refresh() -> Option<Refresh> {
+  if env::var_os("CCTRAIL_NO_UPDATE").is_some_and(|x| !x.is_empty() && x != "0") {
+    return None;
+  }
+  let path = cache_path().ok()?;
+  let now = SystemTime::now();
+  let mtime = |x: &Path| std::fs::metadata(x).and_then(|x| x.modified()).ok();
+  let attempt = path.with_file_name(".pricing.attempt");
+  let tried = mtime(&attempt).is_some_and(|x| now.duration_since(x).is_ok_and(|x| x < RETRY));
+  // A cached file that doesn't parse counts as missing, so a broken download gets replaced.
+  let valid = std::fs::read_to_string(&path).is_ok_and(|x| parse(&x).is_ok());
+  if tried || (valid && !is_stale(mtime(&path), now)) {
+    return None;
+  }
+  write(&attempt, "").ok()?;
+
+  let (tx, rx) = mpsc::channel();
+  std::thread::spawn(move || {
+    let Ok(data) = download(Duration::from_secs(10)) else { return };
+    if write(&path, &data).is_ok() {
+      let _ = std::fs::remove_file(&attempt);
     }
-    let Some(size) = rule.get("size").and_then(|x| x.as_u64()) else { continue };
-    price.long_context_threshold = Some(size);
-    price.long_context_input = num(tier.get("input"));
-    price.long_context_output = num(tier.get("output"));
-    price.long_context_cache_read = num(tier.get("cache_read"));
-    price.long_context_cache_write = num(tier.get("cache_write"));
-    break;
-  }
+    if let Ok(x) = parse(&data) {
+      let _ = tx.send(x);
+    }
+  });
+  Some(Refresh(rx))
+}
 
-  let fast = model.pointer("/experimental/modes/fast/cost/input");
-  if let Some(x) = num(fast).filter(|_| input != 0.0) {
-    price.fast_multiplier = Some(x / input);
+/// Uses the refreshed catalog when it arrives within a moment; a slower one is still saved for
+/// the next run if the process lives long enough.
+pub fn finish(refresh: Option<Refresh>) {
+  let Some(Refresh(rx)) = refresh else { return };
+  if let Ok(x) = rx.recv_timeout(Duration::from_millis(1500)) {
+    let _ = CATALOG.set((x, Some(SystemTime::now())));
   }
-  Some(price)
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
 
-  #[test]
-  fn reads_models_dev_catalog() {
-    let raw = serde_json::json!({
-      "anthropic": {"models": {
-        "key": {
-          "id": "model",
-          "cost": {
-            "input": 2, "output": 10, "cache_read": 0.2,
-            "tiers": [
-              {"input": 1, "tier": {"type": "other", "size": 1}},
-              {"input": 4, "output": 15, "cache_read": 0.4, "tier": {"type": "context", "size": 200_000}},
-            ],
-          },
-          "experimental": {"modes": {"fast": {"cost": {"input": 6}}}},
-        },
-        "free": {"cost": {"input": 0, "output": 0, "cache_read": true}},
-        "unpriced": {"cost": {"output": 1}},
-        "bare": {},
-      }},
-      "openai": {"models": {}},
-    });
-    let catalog = from_models_dev(&raw).unwrap();
-    let expected = Price {
-      input: 2.0,
-      output: 10.0,
-      cache_read: Some(0.2),
-      long_context_threshold: Some(200_000),
-      long_context_input: Some(4.0),
-      long_context_output: Some(15.0),
-      long_context_cache_read: Some(0.4),
-      fast_multiplier: Some(3.0),
-      ..Default::default()
-    };
-    assert_eq!(catalog["anthropic"]["model"], expected);
-    assert_eq!(catalog["anthropic"]["free"], Price::default());
-    assert_eq!(catalog["anthropic"].len(), 2);
-    assert!(catalog["openai"].is_empty());
+  const HEADER: &str = "provider\tmodel\tsince\tinput\toutput\tcache_read\tcache_write\t\
+    long_context_threshold\tlong_context_input\tlong_context_output\tlong_context_cache_read\t\
+    long_context_cache_write\tfast_multiplier";
 
-    let json = serde_json::to_string(&catalog["anthropic"]["free"]).unwrap();
-    assert_eq!(json, r#"{"input":0.0,"output":0.0}"#);
-    assert!(from_models_dev(&serde_json::json!(null)).is_err());
-    assert!(from_models_dev(&serde_json::json!({"anthropic": {"models": {}}})).is_err());
+  /// A catalog from rows of `provider model since input output`, the other cells empty.
+  fn tsv(rows: &[&str]) -> String {
+    let rows = rows.iter().map(|x| format!("{}\t\t\t\t\t\t\t\t", x.replace(' ', "\t")));
+    std::iter::once(HEADER.to_string()).chain(rows).collect::<Vec<_>>().join("\n")
+  }
+
+  #[test]
+  fn picks_the_price_of_the_day() {
+    let text = tsv(&[
+      "anthropic m 2026-03-01 3 10",
+      "anthropic m 2026-01-01 5 10",
+      "openai n 2026-01-01 1 2",
+    ]);
+    let catalog = parse(&text).unwrap();
+    let prices = &catalog["anthropic"]["m"];
+    let input = |x: Option<&str>| pick(prices, x.map(|x| x.parse().unwrap())).unwrap().input;
+
+    assert_eq!(input(Some("2025-06-01")), 5.0); // before the first: the first
+    assert_eq!(input(Some("2026-02-28")), 5.0);
+    assert_eq!(input(Some("2026-03-01")), 3.0);
+    assert_eq!(input(Some("2027-01-01")), 3.0); // after the last: the last
+    assert_eq!(input(None), 3.0);
+    assert!(pick(&[], None).is_none());
+  }
+
+  #[test]
+  fn reads_every_column() {
+    let text = format!(
+      "{HEADER}\nanthropic\tm\t2026-01-01\t2.5\t15\t0.25\t3.125\t272000\t5\t22.5\t0.5\t6.25\t\
+       1.7499999999999998\nopenai\tn\t2026-01-01\t1\t2\t\t\t\t\t\t\t\t\n"
+    );
+    let catalog = parse(&text).unwrap();
+    let expected = Price {
+      since: "2026-01-01".parse().unwrap(),
+      input: 2.5,
+      output: 15.0,
+      cache_read: Some(0.25),
+      cache_write: Some(3.125),
+      long_context_threshold: Some(272_000),
+      long_context_input: Some(5.0),
+      long_context_output: Some(22.5),
+      long_context_cache_read: Some(0.5),
+      long_context_cache_write: Some(6.25),
+      fast_multiplier: Some(1.7499999999999998),
+    };
+    assert_eq!(catalog["anthropic"]["m"], [expected]);
+    assert_eq!(catalog["openai"]["n"][0].cache_read, None);
+  }
+
+  #[test]
+  fn rejects_incomplete_catalogs() {
+    let ok = ["anthropic m 2026-01-01 1 2", "openai n 2026-01-01 1 2"];
+    assert!(parse(&tsv(&ok)).is_ok());
+    let err = |rows: &[&str]| parse(&tsv(rows)).unwrap_err().to_string();
+    let chain = |rows: &[&str]| format!("{:#}", parse(&tsv(rows)).unwrap_err());
+
+    assert!(err(&ok[..1]).contains("no openai prices"));
+    assert!(chain(&[ok[0], "openai n soon 1 2"]).contains("line 3: since: not a date: soon"));
+    assert!(chain(&[ok[0], "openai n 2026-01-01 x 2"]).contains("line 3: input: not a number"));
+    assert!(chain(&[ok[0], "openai n 2026-01-01  2"]).contains("line 3: input is required"));
+    let short = format!("{HEADER}\nanthropic\tm\t2026-01-01\t1\t2");
+    assert!(format!("{:#}", parse(&short).unwrap_err()).contains("line 2: 5 cells, expected 13"));
+    assert!(parse("provider\tmodel\n").unwrap_err().to_string().contains("line 1 must be"));
+    // The JSON catalog of the first dated builds is not a catalog any more.
+    assert!(parse(r#"{"anthropic": {}, "openai": {}}"#).is_err());
   }
 
   #[test]
@@ -273,35 +390,34 @@ mod tests {
 
   #[test]
   fn bundled_catalog_parses() {
-    let catalog: Catalog = serde_json::from_str(BUNDLED).unwrap();
-    assert!(!catalog["anthropic"].is_empty());
-    assert!(!catalog["openai"].is_empty());
+    let catalog = parse(BUNDLED).unwrap();
+    assert!(catalog["anthropic"].contains_key("claude-opus-5-5"));
+
+    // GPT-5.6 Sol's price cut, as models.dev recorded it on 2026-08-25.
+    let sol = &catalog["openai"]["gpt-5.6-sol"];
+    let input = |day: &str| pick(sol, Some(day.parse().unwrap())).unwrap().input;
+    assert_eq!((input("2026-08-01"), input("2026-09-01")), (5.0, 4.0));
   }
 
   #[test]
   fn prefers_valid_cache() {
     let dir = std::env::temp_dir().join(format!("cctrail-pricing-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("pricing.json");
+    let path = dir.join("pricing.tsv");
 
-    std::fs::write(&path, r#"{"openai": {"model": {"input": 2, "output": 10}}}"#).unwrap();
+    std::fs::write(&path, tsv(&["anthropic a 2026-01-01 2 10", "openai m 2026-01-01 2 10"]))
+      .unwrap();
     let (catalog, mtime) = load(Some(&path));
-    assert_eq!(
-      catalog["openai"]["model"],
-      Price { input: 2.0, output: 10.0, ..Default::default() }
-    );
-    assert!(!catalog.contains_key("anthropic"));
+    assert_eq!((catalog["openai"]["m"][0].input, catalog["anthropic"].len()), (2.0, 1));
     assert!(!is_stale(mtime, SystemTime::now()));
 
     let bundled = |path: &Path| {
       let (catalog, mtime) = load(Some(path));
-      catalog.contains_key("anthropic") && mtime.is_none()
+      catalog["anthropic"].len() > 1 && mtime.is_none()
     };
     std::fs::write(&path, "invalid").unwrap();
     assert!(bundled(&path));
-    std::fs::write(&path, r#"{"openai": {"model": {"input": 2, "output": 10, "x": 1}}}"#).unwrap();
-    assert!(bundled(&path));
-    assert!(bundled(&dir.join("missing.json")));
+    assert!(bundled(&dir.join("missing.tsv")));
     std::fs::remove_dir_all(&dir).unwrap();
   }
 
@@ -310,8 +426,9 @@ mod tests {
     let now = SystemTime::now();
     let day = Duration::from_secs(24 * 3600);
     assert!(is_stale(None, now));
-    assert!(is_stale(Some(now - 8 * day), now));
-    assert!(!is_stale(Some(now - 6 * day), now));
+    let hour = Duration::from_secs(3600);
+    assert!(is_stale(Some(now - 25 * hour), now));
+    assert!(!is_stale(Some(now - 23 * hour), now));
     assert!(!is_stale(Some(now + day), now));
   }
 }

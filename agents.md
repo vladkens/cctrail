@@ -6,13 +6,17 @@ right. Agents carry out each change end to end by following this file; plan in
 [docs/roadmap.md](docs/roadmap.md).
 
 Each fact has one source, which this file points to: the CLI is `cctrail --help`, the config format
-and history locations the readme, prices `src/pricing.json`, dependencies `Cargo.toml`, checks and
+and history locations the readme, prices `src/pricing.tsv`, dependencies `Cargo.toml`, checks and
 CI the `Makefile` and `.github/workflows/main.yml`.
 
 ## Scope
 
 - Read history only: never write into `~/.claude` or `~/.codex`. cctrail writes only under
-  `~/.cache/cctrail`, and only `cctrail update-pricing` uses the network.
+  `~/.cache/cctrail`, and uses the network only to fetch the price catalog from the `pricing`
+  release: on `cctrail update-pricing`, and in the background when the cached one is a day old
+  (`CCTRAIL_NO_UPDATE=1` turns that off; tests set it).
+- Prices are dated: `scripts/pricing-history.py` builds them from the models.dev git history, the
+  daily `pricing.yml` workflow publishes them. Price an event at its day's rate, never at today's.
 - Support Claude Code (`~/.claude/projects`, `CLAUDE_CONFIG_DIR`) and Codex (`~/.codex/sessions`
   and `archived_sessions`, `CODEX_HOME`). Add another harness only on request, as its own
   `src/parser/<harness>.rs`.
@@ -44,7 +48,10 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 
 - The numbers are the product: tokens, sessions, active seconds and first/last activity must not
   drift between versions. Treat any change in them as a bug unless it is a fix the person approved;
-  say it in the PR body with before/after numbers.
+  say in the PR body where it changes and why (which model, price, date or directory rule).
+- The repository is public: never put the person's own numbers (costs, tokens, hours) or private
+  project names in PR bodies, review replies, commits or docs. Fixture numbers, data sizes, speed
+  measurements and "identical to `main`" are fine; report the rest to the person directly.
 - Until the port is done, the reference is the Python cctrail 0.2.1 (`uvx cctrail==0.2.1`).
   `make compare` runs both on the local history and diffs the JSON: tokens, sessions, seconds and
   timestamps exact, costs within 1e-9.
@@ -71,7 +78,7 @@ CI the `Makefile` and `.github/workflows/main.yml`.
   1. Agree the plan with the person. For multi-step work keep a checklist in
      `docs/plans/yyyymmdd-<name>.md` and during the work only tick its checkboxes, with no progress
      prose. The PR that finishes the plan's last item, in its own commits, adds a first line
-     `Done: yyyy-mm-dd, PR #N` and a short final `## Result` section with the key numbers, and
+     `Done: yyyy-mm-dd, PR #N` and a short final `## Result` section with the key results, and
      moves it to `docs/plans/completed/` (fixing links to it). Plans stay; never delete them.
   2. Branch from `main` as `feat/<name>`, in the agent's own git worktree under
      `.claude/worktrees/`. A small change that fits an open PR's topic goes into that PR instead of

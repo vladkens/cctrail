@@ -271,7 +271,8 @@ pub fn usage_by_period(
     let Some(ts) = event.ts.filter(|x| range.contains(*x)) else { continue };
     let bucket = gran.bucket(local_date(ts));
     let usage = event.usage.unwrap_or_default();
-    let cost = pricing::cost(session.provider, event.model.as_deref(), &usage, event.speed);
+    let cost =
+      pricing::cost(session.provider, event.model.as_deref(), Some(ts), &usage, event.speed);
     let summary = summaries.entry(bucket).or_default();
     summary.usage += usage;
     summary.cost += cost;
@@ -380,7 +381,8 @@ pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By
     let stat = stats.entry(name).or_insert_with(|| new_stat(si));
     let usage = event.usage.unwrap_or_default();
     stat.usage += usage;
-    stat.cost += pricing::cost(session.provider, event.model.as_deref(), &usage, event.speed);
+    let model = event.model.as_deref();
+    stat.cost += pricing::cost(session.provider, model, event.ts, &usage, event.speed);
   }
 
   for (name, seconds) in active_by_name(&stamps, range) {
@@ -426,7 +428,7 @@ pub fn unpriced(sessions: &[Session], range: &DateRange) -> Vec<(String, u64)> {
     if range.bounded() && !event.ts.is_some_and(|x| range.contains(x)) {
       continue;
     }
-    if pricing::price(session.provider, event.model.as_deref()).is_none() {
+    if pricing::price(session.provider, event.model.as_deref(), event.ts).is_none() {
       let model = event.model.as_deref().unwrap_or("unknown");
       let x = models.entry(model).or_default();
       *x = x.saturating_add(event.usage.map_or(0, |x| x.total()));

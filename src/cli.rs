@@ -1,14 +1,12 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
-use std::path::PathBuf;
-
 use anyhow::{Result, bail};
 use jiff::civil::Date;
 use serde_json::{Map, Value, json};
 
 use crate::config::{self, By, Config};
 use crate::metrics::{self, DateRange, Granularity, Period, UsageSummary};
-use crate::model::Provider;
+use crate::model::{Provider, Session};
 use crate::output::{self, Term};
 use crate::parser::parse_history;
 use crate::pricing;
@@ -63,8 +61,6 @@ pub struct Args {
   pub by: By,
   pub models: bool,
   pub json: bool,
-  /// Hidden: where `update-pricing` writes, for `make update`.
-  pub output: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -84,7 +80,6 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
     by: By::Project,
     models: false,
     json: false,
-    output: None,
   };
   let mut cmd = None;
   let mut flags = vec![];
@@ -114,7 +109,6 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
         let Some(x) = By::parse(&v) else { bail!("--by must be project, group or dir: {v}") };
         args.by = x;
       }
-      "--output" => args.output = Some(PathBuf::from(value()?)),
       "--models" => args.models = true,
       "--json" => args.json = true,
       x if x.starts_with('-') => bail!("unknown option: {x}"),
@@ -145,7 +139,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
       &["--since", "--until", "--provider", "--json", "--models"]
     }
     Cmd::Here => &["--provider", "--json"],
-    Cmd::UpdatePricing => &["--output"],
+    Cmd::UpdatePricing => &[],
   };
   if let Some(x) = flags.iter().find(|x| !allowed.contains(&x.as_str())) {
     bail!("{x} is not an option of `cctrail {}`", args.cmd.name());
@@ -180,7 +174,7 @@ pub fn run(args: &Args) -> Result<()> {
     Cmd::Days => usage(args, Granularity::Day),
     Cmd::Weeks => usage(args, Granularity::Week),
     Cmd::Months => usage(args, Granularity::Month),
-    Cmd::UpdatePricing => update_pricing(args),
+    Cmd::UpdatePricing => update_pricing(),
   }
 }
 
@@ -208,7 +202,7 @@ fn stats(args: &Args) -> Result<()> {
     By::Dir => (Config::default(), None),
     _ => (Config::load()?, config::config_path()),
   };
-  let sessions = parse_history(args.provider);
+  let sessions = sessions(args.provider);
   let stats = metrics::stats_by(&sessions, &range, &config, args.by);
   let total = metrics::combine_stats("total", &stats);
   let unpriced = metrics::unpriced(&sessions, &range);
@@ -234,7 +228,7 @@ fn stats(args: &Args) -> Result<()> {
 
 fn usage(args: &Args, gran: Granularity) -> Result<()> {
   let range = DateRange::resolve(args.period, args.since, args.until);
-  let sessions = parse_history(args.provider);
+  let sessions = sessions(args.provider);
   let buckets = metrics::usage_by_period(&sessions, gran, &range);
   let mut total = UsageSummary::default();
   buckets.values().for_each(|x| total.add(x));
@@ -287,7 +281,7 @@ fn here(args: &Args) -> Result<()> {
   let workdir = std::env::current_dir()?.to_string_lossy().to_string();
   let project = config.find(&workdir);
   let name = project.map_or(workdir.clone(), |x| x.label());
-  let mut sessions = parse_history(args.provider);
+  let mut sessions = sessions(args.provider);
   sessions.retain(|x| config.map(&x.workdir, By::Project) == name);
   let days = metrics::usage_by_period(&sessions, Granularity::Day, &DateRange::default());
   let unpriced = metrics::unpriced(&sessions, &DateRange::default());
@@ -333,13 +327,17 @@ fn here(args: &Args) -> Result<()> {
   output::emit(&out)
 }
 
-fn update_pricing(args: &Args) -> Result<()> {
-  let path = match &args.output {
-    Some(x) => x.clone(),
-    None => pricing::cache_path()?,
-  };
-  pricing::update(&path)?;
+fn update_pricing() -> Result<()> {
+  let path = pricing::update()?;
   output::emit(&format!("Updated {}\n", path.display()))
+}
+
+/// The sessions, with the price catalog refreshed beside the parsing when it is due.
+fn sessions(provider: Option<Provider>) -> Vec<Session> {
+  let refresh = pricing::refresh();
+  let sessions = parse_history(provider);
+  pricing::finish(refresh);
+  sessions
 }
 
 pub fn help() -> String {

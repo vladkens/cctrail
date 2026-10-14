@@ -40,9 +40,10 @@ dist:
 		$(T)/x86_64-pc-windows-gnu/dist/cctrail.exe
 	ls -lh $(T)/distrib
 
+# Dependencies, then the bundled prices from a models.dev checkout in 3rd/ (see the script).
 update:
 	cargo upgrade -i
-	cargo run $(CARGO_FLAGS) -- update-pricing --output src/pricing.json
+	uv run scripts/pricing-history.py
 
 # The numbers against the Python cctrail 0.2.1 on the local history (see the script).
 compare: build

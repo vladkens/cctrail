@@ -43,6 +43,15 @@ fn has_line(out: &str, start: &str, end: &str) -> bool {
   out.lines().any(|x| x.starts_with(start) && x.ends_with(end))
 }
 
+/// A price catalog from `provider model since input output` rows, the other cells empty.
+fn catalog(rows: &[&str]) -> String {
+  let header = "provider\tmodel\tsince\tinput\toutput\tcache_read\tcache_write\t\
+    long_context_threshold\tlong_context_input\tlong_context_output\tlong_context_cache_read\t\
+    long_context_cache_write\tfast_multiplier";
+  let rows = rows.iter().map(|x| format!("{x}\t\t\t\t\t\t\t\t\n"));
+  format!("{header}\n{}", rows.collect::<String>())
+}
+
 fn tmp(name: &str) -> PathBuf {
   let dir = std::env::temp_dir().join(format!("cctrail-cli-{}-{name}", std::process::id()));
   std::fs::create_dir_all(&dir).unwrap();
@@ -77,8 +86,8 @@ impl Run {
   fn exec(&self, args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
     cmd.args(args).env("CLAUDE_CONFIG_DIR", &self.claude).env("CODEX_HOME", &self.codex);
-    // The user's downloaded prices must not change the numbers.
-    cmd.env("XDG_CACHE_HOME", &self.cache).env_remove("COLUMNS");
+    // The user's downloaded prices must not change the numbers, and tests never download.
+    cmd.env("XDG_CACHE_HOME", &self.cache).env("CCTRAIL_NO_UPDATE", "1").env_remove("COLUMNS");
     match &self.config {
       Some(x) => cmd.env("CCTRAIL_CONFIG", x),
       None => cmd.env_remove("CCTRAIL_CONFIG"),
@@ -150,6 +159,7 @@ fn explains_missing_project_config() {
   let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
   cmd.args(["--provider", "claude"]).env("XDG_CONFIG_HOME", &dir).env_remove("CCTRAIL_CONFIG");
   cmd.env("CLAUDE_CONFIG_DIR", &run.claude).env("XDG_CACHE_HOME", fixtures().join("missing"));
+  cmd.env("CCTRAIL_NO_UPDATE", "1");
   let out = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
   std::fs::remove_dir_all(&dir).unwrap();
 
@@ -314,7 +324,8 @@ fn warns_about_unpriced_models() {
   // A fresh download lacks the model too: updating won't help.
   run.cache = dir.join("cache");
   std::fs::create_dir_all(run.cache.join("cctrail")).unwrap();
-  std::fs::write(run.cache.join("cctrail/pricing.json"), r#"{"anthropic": {}}"#).unwrap();
+  let catalog = catalog(&["anthropic\ta\t2026-01-01\t1\t2", "openai\tb\t2026-01-01\t1\t2"]);
+  std::fs::write(run.cache.join("cctrail/pricing.tsv"), catalog).unwrap();
   let fresh = run.stdout(&["days"]);
   std::fs::remove_dir_all(&dir).unwrap();
 
@@ -323,6 +334,52 @@ fn warns_about_unpriced_models() {
   assert_eq!(value["unpriced_models"], json!(["claude-from-the-future"]));
   assert!(fresh.contains(&format!("{warning}\n")), "{fresh}");
   assert!(!fresh.contains("update-pricing"));
+}
+
+#[test]
+fn prices_each_day_at_its_rate() {
+  let dir = tmp("dated");
+  let line = |day: &str, id: &str| {
+    format!(
+      r#"{{"type": "assistant", "timestamp": "{day}T12:00:00Z", "cwd": "/repo", "message": {{"id": "{id}", "model": "m", "usage": {{"input_tokens": 1000000}}}}}}"#
+    )
+  };
+  // 20:00 UTC on 2026-01-31 is 2026-02-01 in Tokyo: the day the report shows, and its price.
+  let late = line("2026-01-31", "c").replace("T12:00", "T20:00");
+  let lines = [line("2026-01-10", "a"), line("2026-02-10", "b"), late].join("\n");
+  std::fs::write(dir.join("s.jsonl"), lines).unwrap();
+  std::fs::create_dir_all(dir.join("cache/cctrail")).unwrap();
+  let catalog = catalog(&[
+    "anthropic\tm\t2026-01-01\t5\t25",
+    "anthropic\tm\t2026-02-01\t3\t15",
+    "openai\tn\t2026-01-01\t1\t2",
+  ]);
+  std::fs::write(dir.join("cache/cctrail/pricing.tsv"), catalog).unwrap();
+  let mut run = Run::new("missing", "missing");
+  run.claude = dir.clone();
+  run.cache = dir.join("cache");
+
+  // Days in a given time zone, with their costs.
+  let days = |tz: &str| {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
+    cmd.args(["days", "--json"]).env("TZ", tz).env("CCTRAIL_NO_UPDATE", "1");
+    cmd.env("CLAUDE_CONFIG_DIR", &run.claude).env("CODEX_HOME", &run.codex);
+    cmd.env("XDG_CACHE_HOME", &run.cache).env("CCTRAIL_CONFIG", fixtures().join("empty.toml"));
+    let value: Value = serde_json::from_slice(&cmd.output().unwrap().stdout).unwrap();
+    value["periods"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|x| (x["start"].as_str().unwrap().to_string(), x["cost_usd"].as_f64().unwrap()))
+      .collect::<Vec<_>>()
+  };
+  let utc = days("UTC");
+  let tokyo = days("Asia/Tokyo");
+  std::fs::remove_dir_all(&dir).unwrap();
+
+  let day = |d: &str, cost: f64| (d.to_string(), cost);
+  assert_eq!(utc, [day("2026-01-10", 5.0), day("2026-01-31", 5.0), day("2026-02-10", 3.0)]);
+  assert_eq!(tokyo, [day("2026-01-10", 5.0), day("2026-02-01", 3.0), day("2026-02-10", 3.0)]);
 }
 
 #[test]

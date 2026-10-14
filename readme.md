@@ -65,9 +65,15 @@ keep a long history.
 Active time treats every user or assistant event as a five-minute window. Overlapping windows
 merge, and time spent in several projects at once is divided between them.
 
-Costs are estimates from the [models.dev](https://models.dev) prices bundled with the release.
-`cctrail update-pricing` downloads the latest ones to `~/.cache/cctrail/pricing.json`, which then
-take precedence. Tokens on models without a price are listed below the report.
+Costs are estimates from [models.dev](https://models.dev) prices, each request at the price of its
+day: a later price cut doesn't reprice old usage, and a model models.dev drops keeps its last
+price. The dated prices come from the models.dev git history, so a change counts from the day
+models.dev recorded it, usually a few days after the provider's announcement.
+
+The prices bundled with the release are refreshed in the background once a day into
+`~/.cache/cctrail/pricing.tsv`, while the history is read; `cctrail update-pricing` does it now,
+and `CCTRAIL_NO_UPDATE=1` turns the daily check off. Tokens on models without a price are listed
+below the report.
 
 ## License
 

@@ -1,0 +1,40 @@
+name: pricing
+
+# Every day: rebuild the dated price catalog from the models.dev git history and publish it as the
+# `pricing` release's asset, which cctrail downloads when its copy is a day old (src/pricing.rs).
+# It runs no third-party code: the script only reads models.dev's TOML files.
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  # A change to the builder publishes at once, so the first merge seeds the asset too.
+  push:
+    branches: [main]
+    paths: [scripts/pricing-history.py, .github/workflows/pricing.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+
+jobs:
+  pricing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # the `pricing` release
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: uv run scripts/pricing-history.py --test
+      - run: uv run scripts/pricing-history.py --output target/pricing.tsv
+      - name: Publish the catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view pricing >/dev/null 2>&1; then
+            gh release create pricing --target main --prerelease --title "Prices" \
+              --notes "Dated model prices for cctrail, rebuilt daily from the models.dev git history."
+          fi
+          gh release upload pricing target/pricing.tsv --clobber
