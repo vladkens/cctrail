@@ -1,3 +1,5 @@
+Done: 2026-10-14, PR #3
+
 # Price history
 
 A cost must not change when the history is recounted later. Today `src/pricing.json` holds one
@@ -48,3 +50,11 @@ anything.
 - [x] Readme ("How it counts"), agents.md network rule, roadmap entry.
 - [x] Numbers: tokens, sessions and active time identical to `main` on the full history; the PR
       body lists the cost per month before and after.
+
+## Result
+
+Tokens, sessions and active time identical to `main` on the full history. Cost by month
+(main → dated): 2026-07 $2996.73 → $3354.50, 2026-08 $2720.00 → $3236.70, other months unchanged
+but for $2.75 of gpt-5.4 in April–May; total $21397.40 → $22274.62. All of it is GPT-5.6 before
+models.dev recorded its price cut on 2026-08-25, and gpt-5.4 long-context prices from the older
+catalog layouts.

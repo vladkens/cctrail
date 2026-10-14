@@ -10,8 +10,9 @@ Code and Codex. Tick a phase when done.
 - [ ] **3. Release v0.3.0** on crates.io and as GitHub release binaries (macOS, Linux, Windows).
       The person publishes the first version by hand and sets up crates.io Trusted Publishing;
       PyPI stays at 0.2.1.
-- [ ] **4. Dated prices:** every request at its day's price from the models.dev git history,
-      refreshed weekly without the person's help. [Plan](plans/20261014-price-history.md)
+- [x] **4. Dated prices:** every request at its day's price from the models.dev git history,
+      refreshed weekly without the person's help (#3).
+      [Plan](plans/completed/20261014-price-history.md)
 
 Later, only on request: a cache of parsed sessions keyed by file size and mtime, so a run reads
 only new history; other harnesses (Gemini CLI, opencode).
