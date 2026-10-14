@@ -77,8 +77,8 @@ impl Run {
   fn exec(&self, args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
     cmd.args(args).env("CLAUDE_CONFIG_DIR", &self.claude).env("CODEX_HOME", &self.codex);
-    // The user's downloaded prices must not change the numbers.
-    cmd.env("XDG_CACHE_HOME", &self.cache).env_remove("COLUMNS");
+    // The user's downloaded prices must not change the numbers, and tests never download.
+    cmd.env("XDG_CACHE_HOME", &self.cache).env("CCTRAIL_NO_UPDATE", "1").env_remove("COLUMNS");
     match &self.config {
       Some(x) => cmd.env("CCTRAIL_CONFIG", x),
       None => cmd.env_remove("CCTRAIL_CONFIG"),
@@ -150,6 +150,7 @@ fn explains_missing_project_config() {
   let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
   cmd.args(["--provider", "claude"]).env("XDG_CONFIG_HOME", &dir).env_remove("CCTRAIL_CONFIG");
   cmd.env("CLAUDE_CONFIG_DIR", &run.claude).env("XDG_CACHE_HOME", fixtures().join("missing"));
+  cmd.env("CCTRAIL_NO_UPDATE", "1");
   let out = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
   std::fs::remove_dir_all(&dir).unwrap();
 
@@ -314,7 +315,9 @@ fn warns_about_unpriced_models() {
   // A fresh download lacks the model too: updating won't help.
   run.cache = dir.join("cache");
   std::fs::create_dir_all(run.cache.join("cctrail")).unwrap();
-  std::fs::write(run.cache.join("cctrail/pricing.json"), r#"{"anthropic": {}}"#).unwrap();
+  let one = r#"[{"since": "2026-01-01", "input": 1, "output": 2}]"#;
+  let catalog = format!(r#"{{"anthropic": {{"a": {one}}}, "openai": {{"b": {one}}}}}"#);
+  std::fs::write(run.cache.join("cctrail/pricing.json"), catalog).unwrap();
   let fresh = run.stdout(&["days"]);
   std::fs::remove_dir_all(&dir).unwrap();
 
@@ -323,6 +326,34 @@ fn warns_about_unpriced_models() {
   assert_eq!(value["unpriced_models"], json!(["claude-from-the-future"]));
   assert!(fresh.contains(&format!("{warning}\n")), "{fresh}");
   assert!(!fresh.contains("update-pricing"));
+}
+
+#[test]
+fn prices_each_day_at_its_rate() {
+  let dir = tmp("dated");
+  let line = |day: &str, id: &str| {
+    format!(
+      r#"{{"type": "assistant", "timestamp": "{day}T12:00:00Z", "cwd": "/repo", "message": {{"id": "{id}", "model": "m", "usage": {{"input_tokens": 1000000}}}}}}"#
+    )
+  };
+  let lines = [line("2026-01-10", "a"), line("2026-02-10", "b")].join("\n");
+  std::fs::write(dir.join("s.jsonl"), lines).unwrap();
+  std::fs::create_dir_all(dir.join("cache/cctrail")).unwrap();
+  let catalog = r#"{"anthropic": {"m": [
+    {"since": "2026-01-01", "input": 5, "output": 25},
+    {"since": "2026-02-01", "input": 3, "output": 15}
+  ]}, "openai": {"n": [{"since": "2026-01-01", "input": 1, "output": 2}]}}"#;
+  std::fs::write(dir.join("cache/cctrail/pricing.json"), catalog).unwrap();
+  let mut run = Run::new("missing", "missing");
+  run.claude = dir.clone();
+  run.cache = dir.join("cache");
+
+  let value = run.json(&["months", "--json"]);
+  std::fs::remove_dir_all(&dir).unwrap();
+
+  let costs: Vec<&Value> =
+    value["periods"].as_array().unwrap().iter().map(|x| &x["cost_usd"]).collect();
+  assert_eq!(costs, [&json!(5.0), &json!(3.0)], "{value}");
 }
 
 #[test]
