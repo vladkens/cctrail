@@ -30,7 +30,7 @@ pub fn parse_history(provider: Option<Provider>) -> Vec<Session> {
   sessions
 }
 
-fn history_root(var: &str, fallback: &str) -> PathBuf {
+pub fn history_root(var: &str, fallback: &str) -> PathBuf {
   match std::env::var_os(var) {
     Some(x) if x.is_empty() => PathBuf::from("."),
     Some(x) => PathBuf::from(x),

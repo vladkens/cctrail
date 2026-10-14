@@ -110,27 +110,38 @@ impl Config {
     Ok(Self { projects })
   }
 
-  /// The project of a working directory: the one with the longest root containing it.
-  pub fn find(&self, workdir: &str) -> Option<&Project> {
-    let path = fold_case(Path::new(workdir));
-    let mut best: Option<(usize, &Project)> = None;
+  /// The project of a session from its logged directory (`cwd`) and the repository it folds into
+  /// (`workdir`): a root matching the logged directory but not the repository is the worktree's
+  /// own and wins; otherwise the repository's project.
+  pub fn find(&self, cwd: &str, workdir: &str) -> Option<&Project> {
+    let repo = fold_case(Path::new(workdir));
+    match self.deepest(cwd) {
+      Some((root, x)) if !repo.starts_with(root) => Some(x),
+      raw => self.deepest(workdir).or(raw).map(|x| x.1),
+    }
+  }
+
+  /// The project with the longest root containing a directory, and that root.
+  fn deepest(&self, dir: &str) -> Option<(&Path, &Project)> {
+    let path = fold_case(Path::new(dir));
+    let mut best: Option<(usize, &Path, &Project)> = None;
     for project in &self.projects {
       for root in &project.roots {
         let depth = root.components().count();
-        if path.starts_with(root) && best.is_none_or(|(x, _)| depth > x) {
-          best = Some((depth, project));
+        if path.starts_with(root) && best.is_none_or(|(x, ..)| depth > x) {
+          best = Some((depth, root, project));
         }
       }
     }
-    best.map(|(_, x)| x)
+    best.map(|(_, root, x)| (root, x))
   }
 
-  /// The name statistics group a working directory under.
-  pub fn map(&self, workdir: &str, by: By) -> String {
+  /// The name statistics group a session under, from its logged and folded directories.
+  pub fn map(&self, cwd: &str, workdir: &str, by: By) -> String {
     if by == By::Dir {
       return workdir.to_string();
     }
-    match (self.find(workdir), by) {
+    match (self.find(cwd, workdir), by) {
       (Some(x), By::Project) => x.label(),
       (None, By::Project) => workdir.to_string(),
       (Some(x), _) => x.group.clone(),
@@ -202,7 +213,7 @@ mod tests {
     "#;
     let home = abs("/home/me");
     let config = Config::parse(text, Some(Path::new(&home))).unwrap();
-    let map = |path: &str, by| config.map(&abs(path), by);
+    let map = |path: &str, by| config.map(&abs(path), &abs(path), by);
 
     assert_eq!(map("/home/me/Code/tools/cli", By::Project), "oss/tools");
     assert_eq!(map("/home/me/Code/tools", By::Project), "oss/tools");
@@ -216,6 +227,24 @@ mod tests {
     let other_case = map("/home/me/code/Tools/cli", By::Project);
     let expected = if cfg!(windows) { "oss/tools".into() } else { abs("/home/me/code/Tools/cli") };
     assert_eq!(other_case, expected);
+  }
+
+  #[test]
+  fn maps_worktrees_with_their_repository_unless_configured() {
+    let text = format!(
+      "[projects]\n'misc/code' = ['{}']\n'oss/app' = ['{}']\n'try/tui' = ['{}']\n'try/flag' = ['{}']",
+      abs("/code"),
+      abs("/code/app"),
+      abs("/code/app/.worktrees/tui"),
+      abs("/code/app-worktrees/flag"),
+    );
+    let config = Config::parse(&text, None).unwrap();
+    let map = |cwd: &str| config.map(&abs(cwd), &abs("/code/app"), By::Project);
+    assert_eq!(map("/code/app/.worktrees/x"), "oss/app");
+    assert_eq!(map("/code/app/.worktrees/tui/src"), "try/tui");
+    assert_eq!(map("/code/app-worktrees/flag"), "try/flag");
+    // A catch-all root above the repository yields to the repository's project.
+    assert_eq!(map("/code/app-worktrees/other"), "oss/app");
   }
 
   #[test]
