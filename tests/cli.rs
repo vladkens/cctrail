@@ -336,7 +336,9 @@ fn prices_each_day_at_its_rate() {
       r#"{{"type": "assistant", "timestamp": "{day}T12:00:00Z", "cwd": "/repo", "message": {{"id": "{id}", "model": "m", "usage": {{"input_tokens": 1000000}}}}}}"#
     )
   };
-  let lines = [line("2026-01-10", "a"), line("2026-02-10", "b")].join("\n");
+  // 20:00 UTC on 2026-01-31 is 2026-02-01 in Tokyo: the day the report shows, and its price.
+  let late = line("2026-01-31", "c").replace("T12:00", "T20:00");
+  let lines = [line("2026-01-10", "a"), line("2026-02-10", "b"), late].join("\n");
   std::fs::write(dir.join("s.jsonl"), lines).unwrap();
   std::fs::create_dir_all(dir.join("cache/cctrail")).unwrap();
   let catalog = r#"{"anthropic": {"m": [
@@ -348,12 +350,27 @@ fn prices_each_day_at_its_rate() {
   run.claude = dir.clone();
   run.cache = dir.join("cache");
 
-  let value = run.json(&["months", "--json"]);
+  // Days in a given time zone, with their costs.
+  let days = |tz: &str| {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
+    cmd.args(["days", "--json"]).env("TZ", tz).env("CCTRAIL_NO_UPDATE", "1");
+    cmd.env("CLAUDE_CONFIG_DIR", &run.claude).env("CODEX_HOME", &run.codex);
+    cmd.env("XDG_CACHE_HOME", &run.cache).env("CCTRAIL_CONFIG", fixtures().join("empty.toml"));
+    let value: Value = serde_json::from_slice(&cmd.output().unwrap().stdout).unwrap();
+    value["periods"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|x| (x["start"].as_str().unwrap().to_string(), x["cost_usd"].as_f64().unwrap()))
+      .collect::<Vec<_>>()
+  };
+  let utc = days("UTC");
+  let tokyo = days("Asia/Tokyo");
   std::fs::remove_dir_all(&dir).unwrap();
 
-  let costs: Vec<&Value> =
-    value["periods"].as_array().unwrap().iter().map(|x| &x["cost_usd"]).collect();
-  assert_eq!(costs, [&json!(5.0), &json!(3.0)], "{value}");
+  let day = |d: &str, cost: f64| (d.to_string(), cost);
+  assert_eq!(utc, [day("2026-01-10", 5.0), day("2026-01-31", 5.0), day("2026-02-10", 3.0)]);
+  assert_eq!(tokyo, [day("2026-01-10", 5.0), day("2026-02-01", 3.0), day("2026-02-10", 3.0)]);
 }
 
 #[test]

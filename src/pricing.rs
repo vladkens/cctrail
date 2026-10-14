@@ -8,21 +8,23 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
+use jiff::civil::Date;
 use serde::Deserialize;
 
 use crate::config::home_dir;
+use crate::metrics::local_date;
 use crate::model::{Provider, Speed, Ts, Usage};
 
 const BUNDLED: &str = include_str!("pricing.json");
 
-/// Dollars per million tokens from a day on (UTC): the models.dev price set on that day.
+/// Dollars per million tokens from a day on: the models.dev price set on that day.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Price {
   pub since: String,
-  /// `since` as the first microsecond of that day, filled in by `parse`.
+  /// `since` parsed, filled in by `parse`.
   #[serde(skip)]
-  from: Ts,
+  day: Date,
   #[serde(default)]
   pub cache_read: Option<f64>,
   #[serde(default)]
@@ -91,10 +93,9 @@ fn parse(data: &[u8]) -> Result<Catalog> {
       bail!("pricing catalog has no prices for {model}");
     }
     for x in prices.iter_mut() {
-      let day: jiff::civil::Date = x.since.parse().with_context(|| format!("{model}: since"))?;
-      x.from = day.to_zoned(jiff::tz::TimeZone::UTC)?.timestamp().as_microsecond();
+      x.day = x.since.parse().with_context(|| format!("{model}: since"))?;
     }
-    prices.sort_by_key(|x| x.from);
+    prices.sort_by_key(|x| x.day);
   }
   Ok(catalog)
 }
@@ -108,14 +109,14 @@ fn is_stale(mtime: Option<SystemTime>, now: SystemTime) -> bool {
   mtime.is_none_or(|x| now.duration_since(x).is_ok_and(|x| x > STALE))
 }
 
-/// The price of a model at a moment: the latest set by then, the first one before it, the latest
-/// for an event without a time.
+/// The price of a model at a moment: the latest set by its local day (the day the reports show
+/// it under), the first one before that, the latest for an event without a time.
 pub fn price(provider: Provider, model: Option<&str>, ts: Option<Ts>) -> Option<&'static Price> {
-  pick(catalog().0.get(provider.pricing_key())?.get(model.unwrap_or(""))?, ts)
+  pick(catalog().0.get(provider.pricing_key())?.get(model.unwrap_or(""))?, ts.map(local_date))
 }
 
-fn pick(prices: &[Price], ts: Option<Ts>) -> Option<&Price> {
-  let i = ts.map_or(prices.len(), |ts| prices.partition_point(|x| x.from <= ts));
+fn pick(prices: &[Price], day: Option<Date>) -> Option<&Price> {
+  let i = day.map_or(prices.len(), |day| prices.partition_point(|x| x.day <= day));
   prices.get(i.saturating_sub(1))
 }
 
@@ -244,10 +245,6 @@ pub fn finish(refresh: Option<Refresh>) {
 mod tests {
   use super::*;
 
-  fn ts(s: &str) -> Ts {
-    s.parse::<jiff::Timestamp>().unwrap().as_microsecond()
-  }
-
   #[test]
   fn picks_the_price_of_the_day() {
     let data = br#"{"anthropic": {"m": [
@@ -256,12 +253,12 @@ mod tests {
     ]}, "openai": {"n": [{"since": "2026-01-01", "input": 1, "output": 2}]}}"#;
     let catalog = parse(data).unwrap();
     let prices = &catalog["anthropic"]["m"];
-    let input = |x: Option<&str>| pick(prices, x.map(ts)).unwrap().input;
+    let input = |x: Option<&str>| pick(prices, x.map(|x| x.parse().unwrap())).unwrap().input;
 
-    assert_eq!(input(Some("2025-06-01T00:00:00Z")), 5.0); // before the first: the first
-    assert_eq!(input(Some("2026-02-28T23:59:59Z")), 5.0);
-    assert_eq!(input(Some("2026-03-01T00:00:00Z")), 3.0); // the day starts at UTC midnight
-    assert_eq!(input(Some("2027-01-01T00:00:00Z")), 3.0); // after the last: the last
+    assert_eq!(input(Some("2025-06-01")), 5.0); // before the first: the first
+    assert_eq!(input(Some("2026-02-28")), 5.0);
+    assert_eq!(input(Some("2026-03-01")), 3.0);
+    assert_eq!(input(Some("2027-01-01")), 3.0); // after the last: the last
     assert_eq!(input(None), 3.0);
     assert!(pick(&[], None).is_none());
   }
