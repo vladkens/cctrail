@@ -1,4 +1,4 @@
-.PHONY: prepare check test build dist update compare bench clean
+.PHONY: prepare check test build update clean
 
 CARGO_FLAGS := --release --locked
 
@@ -19,13 +19,22 @@ build:
 	cargo build $(CARGO_FLAGS)
 	ls -lh target/release/cctrail
 
+update: # dependencies, then the bundled prices from a models.dev checkout in 3rd/
+	cargo upgrade -i
+	uv run scripts/pricing-history.py
+
+clean:
+	cargo clean
+
+.PHONY: dist compare bench
+
 # Prebuilt binaries as target/distrib/cctrail-dev-<target>.tar.gz (.zip for Windows), from an Apple
 # Silicon Mac: Linux (glibc 2.28) and Windows through cargo-cross, installed at a fixed version,
 # with its toolchains kept in ~/.cache/cargo-cross (CI caches that folder).
 # macOS keeps its file and line info in cctrail.dSYM, which has to stay next to the binary. Not
 # target/dist: cargo keeps the dist profile's build scripts there.
 dist: T := $(or $(CARGO_TARGET_DIR),target)
-dist:
+dist: # the release archives for CI (vladkens/actions/rust-build)
 	cargo install --locked cargo-cross@1.6.0
 	CARGO_PROFILE_DIST_SPLIT_DEBUGINFO=packed cargo build --profile dist --locked --target aarch64-apple-darwin
 	CROSS_COMPILER_DIR=$${CROSS_COMPILER_DIR:-$$HOME/.cache/cargo-cross} \
@@ -40,19 +49,9 @@ dist:
 		$(T)/x86_64-pc-windows-gnu/dist/cctrail.exe
 	ls -lh $(T)/distrib
 
-# Dependencies, then the bundled prices from a models.dev checkout in 3rd/ (see the script).
-update:
-	cargo upgrade -i
-	uv run scripts/pricing-history.py
-
-# The numbers against a reference build on the local history: make compare REF=<main's binary>.
-compare: build
+compare: build # the numbers against a reference build on the local history: REF=<main's binary>
 	uv run scripts/compare.py --ref "$(REF)"
 
-# Warm runs over the full local history (reads all of it: run it only for speed work).
-bench: build
+bench: build # warm runs over the full local history: reads all of it, only for speed work
 	CCTRAIL_NO_UPDATE=1 hyperfine --warmup 1 --runs 10 --output null \
 		'target/release/cctrail --by dir --json'
-
-clean:
-	cargo clean
