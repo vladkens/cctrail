@@ -127,17 +127,6 @@ fn shares(values: &[f64]) -> Vec<String> {
     .collect()
 }
 
-/// Time in minutes for each row, adding up to the total's minutes when the rows make the total.
-fn minutes(rows: &[Row], total: &Row) -> Vec<Option<String>> {
-  let plain = || rows.iter().map(|x| x.active.map(duration)).collect();
-  let Some(total) = total.active else { return plain() };
-  let actives: Option<Vec<i64>> = rows.iter().map(|x| x.active).collect();
-  let Some(actives) = actives.filter(|x| x.iter().sum::<i64>() == total) else { return plain() };
-  let whole = (total / 1_000_000 + 30) / 60;
-  let parts: Vec<f64> = actives.iter().map(|x| *x as f64 / 60e6).collect();
-  largest_remainder(&parts, whole).into_iter().map(|m| Some(duration(m * 60_000_000))).collect()
-}
-
 pub fn loading(f: &mut Frame) {
   let line = Line::from(vec![Text::styled(" cctrail ", BOLD), dim("reading the history…")]);
   f.render_widget(Paragraph::new(line), f.area());
@@ -197,7 +186,7 @@ fn header(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   f.render_widget(Paragraph::new(Text::styled(VERSION, TEXT)), right);
 }
 
-/// Tabs, the metric, the filter and the unpriced note, cut with `…` at the edge.
+/// Tabs, the metric, the filter, cut with `…` at the edge, and the unpriced note when it fits.
 fn tab_line(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let mut spans = vec![Text::raw(" ")];
   let mut x = area.x + 1;
@@ -222,8 +211,12 @@ fn tab_line(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   if !app.unpriced.is_empty() {
     let t: u64 = app.unpriced.iter().fold(0, |a, x| a.saturating_add(x.1));
     let names: Vec<&str> = app.unpriced.iter().map(|x| x.0.as_str()).collect();
-    spans.push(dim("   unpriced "));
-    spans.push(Text::styled(format!("{} {}", toks(t), names.join(", ")), TEXT));
+    let note = format!("{} {}", toks(t), names.join(", "));
+    let room = (area.width as usize).saturating_sub(1 + Line::from(spans.clone()).width());
+    if 12 + note.chars().count() <= room {
+      spans.push(dim("   unpriced "));
+      spans.push(Text::styled(note, TEXT));
+    }
   }
   let spans = cut_spans(spans, area.width.saturating_sub(1) as usize);
   let lines = vec![Line::from(spans), Line::from(dim("─".repeat(area.width as usize)))];
@@ -304,9 +297,13 @@ fn layout(widths: &[Constraint], area: Rect) -> std::rc::Rc<[Rect]> {
   })
 }
 
-fn empty(f: &mut Frame, area: Rect, hits: &mut Hits) {
+fn empty(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   hits.rows = Rect::default();
-  f.render_widget(Paragraph::new(dim("  No activity in this period")), area);
+  let text = match app.filter.is_empty() || !app.list.is_empty() {
+    true => "No activity in this period".to_string(),
+    false => format!("No match for {:?}", app.filter),
+  };
+  f.render_widget(Paragraph::new(dim(format!("  {text}"))), area);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -321,7 +318,7 @@ fn table(
   hits: &mut Hits,
 ) -> u16 {
   if rows.is_empty() {
-    empty(f, area, hits);
+    empty(f, app, area, hits);
     return 1;
   }
   let m = app.metric;
@@ -365,12 +362,11 @@ fn table(
   let name_width = layout(&widths, area)[0].width as usize;
 
   let share = shares(&rows.iter().map(|x| m.of(x)).collect::<Vec<_>>());
-  let times = minutes(rows, total);
-  let cells = |x: &Row, label: &str, time: Option<String>, share: String| {
+  let cells = |x: &Row, label: &str, share: String| {
     let mut cells = vec![
       Cell::from(cut(label, name_width)).style(TEXT),
-      match time {
-        Some(t) => num(t, TIME),
+      match x.active {
+        Some(t) => num(duration(t), TIME),
         None => num("–".into(), NONE),
       },
       num(toks(x.tokens), TEXT),
@@ -379,13 +375,16 @@ fn table(
     if sessions {
       cells.push(num(x.sessions.map_or(String::new(), |x| x.to_string()), TEXT));
     }
-    cells.push(num(share, TEXT));
+    // An unknown cost has no share of the cost either.
+    cells.push(match x.unpriced && m == Metric::Cost {
+      true => num("–".into(), NONE),
+      false => num(share, TEXT),
+    });
     TableRow::new(cells)
   };
-  let lines =
-    rows.iter().zip(times).zip(share).map(|((x, t), s)| cells(x, &x.label, t, s)).collect();
+  let lines = rows.iter().zip(share).map(|(x, s)| cells(x, &x.label, s)).collect();
   let all = if rows.iter().any(|x| m.of(x) > 0.0) { "100%".into() } else { String::new() };
-  let total = cells(total, "total", total.active.map(duration), all);
+  let total = cells(total, "total", all);
   grid(f, &columns, lines, total, area, sel, hits)
 }
 
@@ -407,7 +406,7 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let m = app.metric;
   let rows = &app.list;
   if rows.iter().all(|x| m.of(x) == 0.0) {
-    return empty(f, area, hits);
+    return empty(f, app, area, hits);
   }
   let max = rows.iter().map(|x| m.of(x)).fold(0.0, f64::max);
   let width = area.width.saturating_sub(36) as usize;
@@ -456,24 +455,30 @@ fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   f.render_widget(Paragraph::new(title), area);
   let body = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
   // Room for the sparkline and the paths below the table, when there are any.
-  let below = if d.days.is_empty() { 0 } else { 4 } + if d.paths.is_empty() { 0 } else { 2 };
+  let below = if d.days.is_empty() { 0 } else { 5 } + if d.paths.is_empty() { 0 } else { 2 };
   let room = Rect { height: body.height.saturating_sub(below).max(3), ..body };
   let used = table(f, app, &d.rows, r, app.tab == Tab::Timeline, room, app.osel, hits);
   let mut y = body.y + used;
-  if !d.days.is_empty() && y + 4 <= area.bottom() {
+  if !d.days.is_empty() && y + 5 <= area.bottom() && area.width > 2 * GUTTER {
     let m = app.metric;
+    let gran = if app.span.gran() == crate::metrics::Granularity::Week { "week" } else { "day" };
+    let caption = format!("  {} by {gran}", m.label());
+    f.render_widget(Paragraph::new(dim(caption)), Rect::new(area.x, y + 1, area.width, 1));
+    let line = Rect::new(area.x + GUTTER, y + 2, area.width.saturating_sub(2 * GUTTER), 2);
+    // The newest buckets that fit, each stretched over an even part of the line.
+    let days = &d.days[d.days.len().saturating_sub(line.width as usize)..];
     // Cents for the cost, so a day under a dollar still draws.
     let scale = if m == Metric::Cost { 100.0 } else { 1.0 };
-    let values: Vec<u64> = d.days.iter().map(|x| (m.of(x) * scale) as u64).collect();
-    let gran = if app.span.gran() == crate::metrics::Granularity::Week { "week" } else { "day" };
-    let line = Rect::new(area.x + GUTTER, y + 2, area.width.saturating_sub(2 * GUTTER), 2);
-    // The caption starts at the first bucket that fits on the line.
-    let skip = values.len().saturating_sub(line.width as usize);
-    let first = d.days.get(skip).map_or(String::new(), |x| x.key.clone());
-    let caption = format!("  {} by {gran} since {first}", m.label());
-    f.render_widget(Paragraph::new(dim(caption)), Rect::new(area.x, y + 1, area.width, 1));
-    f.render_widget(Sparkline::default().data(&values[skip..]).style(metric_color(m)), line);
-    y += 4;
+    let (n, w) = (days.len(), line.width as usize);
+    let values: Vec<u64> = (0..w).map(|i| (m.of(&days[i * n / w]) * scale) as u64).collect();
+    f.render_widget(Sparkline::default().data(&values).style(metric_color(m)), line);
+    let (first, last) = (&days[0].key, &days[n - 1].key);
+    let dates = Rect::new(line.x, y + 4, line.width, 1);
+    f.render_widget(Paragraph::new(dim(first.clone())), dates);
+    if first != last {
+      f.render_widget(Paragraph::new(Line::from(dim(last.clone())).right_aligned()), dates);
+    }
+    y += 5;
   }
   if !d.paths.is_empty() && y + 2 <= area.bottom() {
     let paths = Line::from(vec![dim("  Paths "), Text::styled(d.paths.join(", "), TEXT)]);
@@ -538,35 +543,41 @@ fn help(f: &mut Frame, area: Rect) {
   f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
-/// The hints that fit in `width`, whole ones only.
+/// The hints that fit in `width`, whole ones only: the least needed go first, help and quit last.
 fn footer(app: &App, width: u16) -> Line<'static> {
-  let hints: &[(&str, &str)] = match () {
-    _ if app.typing => &[("enter", "keep"), ("esc", "clear")],
-    _ if app.help => &[("esc", "close"), ("q", "quit")],
-    _ if app.open.is_some() => {
-      &[("↑↓", "select"), ("esc", "back"), ("m", "metric"), ("←→", "period"), ("?", "help")]
-    }
+  // Each hint with its rank: a narrow footer drops the lowest first.
+  let hints: &[(&str, &str, u8)] = match () {
+    _ if app.typing => &[("enter", "keep", 1), ("esc", "clear", 1)],
+    // The box itself says how to close it.
+    _ if app.help => &[("q", "quit", 9)],
+    _ if app.open.is_some() => &[
+      ("↑↓", "select", 2),
+      ("esc", "back", 7),
+      ("m", "metric", 1),
+      ("←→", "period", 0),
+      ("?", "help", 8),
+    ],
     _ => &[
-      ("↑↓", "select"),
-      ("enter", "open"),
-      ("1-3", "view"),
-      ("←→", "period"),
-      ("m", "metric"),
-      ("p", "provider"),
-      ("/", "filter"),
-      ("?", "help"),
-      ("q", "quit"),
+      ("↑↓", "select", 6),
+      ("enter", "open", 5),
+      ("1-3", "view", 0),
+      ("←→", "period", 3),
+      ("m", "metric", 4),
+      ("p", "provider", 1),
+      ("/", "filter", 2),
+      ("?", "help", 8),
+      ("q", "quit", 9),
     ],
   };
+  let size = |x: &(&str, &str, u8)| x.0.chars().count() + 1 + x.1.len() + 2;
+  let mut keep: Vec<_> = hints.to_vec();
+  while 1 + keep.iter().map(size).sum::<usize>() > width as usize && !keep.is_empty() {
+    let low = (0..keep.len()).min_by_key(|i| keep[*i].2).unwrap();
+    keep.remove(low);
+  }
   let mut spans = vec![Text::raw(" ")];
-  let mut used = 1;
-  for (k, d) in hints {
-    let w = k.chars().count() + 1 + d.len() + 2;
-    if used + w > width as usize {
-      break;
-    }
-    used += w;
-    spans.push(Text::styled(*k, Style::new().fg(Color::Cyan)));
+  for (k, d, _) in keep {
+    spans.push(Text::styled(k, Style::new().fg(Color::Cyan)));
     spans.push(dim(format!(" {d}  ")));
   }
   Line::from(spans)

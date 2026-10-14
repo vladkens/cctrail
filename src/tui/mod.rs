@@ -105,8 +105,8 @@ pub struct App {
   /// Tokens on models without a price in the period: their cost counts as 0.
   pub unpriced: Vec<(String, u64)>,
   pub hits: RefCell<Hits>,
-  /// The tab `list` was built for.
-  shown: Option<Tab>,
+  /// The tab `list` was built for and its buckets: days and weeks don't share a selection.
+  shown: Option<(Tab, crate::metrics::Granularity)>,
   pub quit: bool,
 }
 
@@ -142,8 +142,9 @@ impl App {
 
   fn refresh(&mut self) {
     // The selection follows its row across sorting, period, metric and provider changes.
+    let now = (self.tab, self.span.gran());
     let kept =
-      self.shown.filter(|t| *t == self.tab).and(self.list.get(self.sel())).map(|x| x.key.clone());
+      self.shown.filter(|x| *x == now).and(self.list.get(self.sel())).map(|x| x.key.clone());
     let okept = self.open.as_ref().and_then(|d| d.rows.get(self.osel)).map(|x| x.key.clone());
     let (projects, total) = self.data.projects(self.span, self.prov, false);
     self.total = total;
@@ -169,11 +170,13 @@ impl App {
     *sel = match found {
       Some(i) => i,
       // The timeline opens on its newest day.
-      None if self.tab == Tab::Timeline && self.sort.is_none() => last,
+      None if self.tab == Tab::Timeline => {
+        list.iter().enumerate().max_by_key(|x| x.1.day).map_or(0, |x| x.0)
+      }
       None => (*sel).min(last),
     };
     self.list = list;
-    self.shown = Some(self.tab);
+    self.shown = Some(now);
     // An open drill-down follows the period and provider: its row as it is now, or closed.
     if let Some(open) = &self.open {
       let row = self.list.iter().find(|x| x.key == open.row.key).cloned();
@@ -628,16 +631,6 @@ mod tests {
     app
   }
 
-  /// Minutes in `1d 2h 03m`.
-  fn minutes(text: &str) -> i64 {
-    let unit = |x: &str, u: char| x.strip_suffix(u).map(|n| n.parse::<i64>().unwrap());
-    text
-      .split(' ')
-      .map(|x| unit(x, 'd').map(|n| n * 1440).or(unit(x, 'h').map(|n| n * 60)).or(unit(x, 'm')))
-      .map(|x| x.unwrap_or_else(|| panic!("{text:?}")))
-      .sum()
-  }
-
   /// The cells of a table line: runs split by two or more spaces.
   fn cells(line: &str) -> Vec<String> {
     let line = line.trim_start_matches('▶');
@@ -671,10 +664,15 @@ mod tests {
       let long = "w/a-project-with-a-name-too-long-for-a-narrow-terminal";
       assert_eq!(screen_of(&buf).contains(long), width == 140, "{width}");
       assert!(width == 140 || line(&buf, find(&buf, "w/a-project-with-")).contains('…'));
-      // A separator over the footer, which keeps whole hints only.
+      // A separator over the footer, which keeps whole hints, help and quit the longest.
       assert!(line(&buf, height - 2).chars().all(|x| x == '─'));
       let foot = line(&buf, height - 1);
-      assert!(["quit", "help", "filter", "provider"].iter().any(|x| foot.trim_end().ends_with(x)));
+      assert!(foot.contains("? help") && foot.trim_end().ends_with("q quit"), "{foot}");
+      assert_eq!(foot.contains("1-3 view"), width > 80, "{foot}");
+      // The unpriced note shows whole or not at all.
+      let tabs = line(&buf, 1);
+      assert_eq!(tabs.contains("unpriced"), tabs.contains("claude-unknown-1"), "{tabs}");
+      assert!(!tabs.contains('…'), "{tabs}");
       // A sort mark fits its column and keeps the headers apart.
       let x = line(&buf, head).find("Tokens").unwrap() as u16;
       click(&mut app, x, head);
@@ -690,16 +688,37 @@ mod tests {
       let x = l.chars().position(|x| x == '–').unwrap() as u16;
       assert_eq!((buf[(x, y)].fg, buf[(x, y)].modifier), (Color::Reset, Modifier::DIM));
       assert!(!line(&buf, find(&buf, "Model")).contains("Sessions"));
+      // Nor a share of the cost.
+      press(&mut app, KeyCode::Char('m'));
+      press(&mut app, KeyCode::Char('m'));
+      let buf = frame_of(&app, width, height);
+      let y = find(&buf, "claude-unknown-1");
+      assert_eq!(cells(&line(&buf, y))[3..], ["–", "–"]);
+      press(&mut app, KeyCode::Char('m'));
 
-      // A project's models show minutes that add up to the project's.
+      // A project's drill-down shows the same times as everywhere: its own as in the list.
       press(&mut app, KeyCode::Char('1'));
+      press(&mut app, KeyCode::Left);
+      let project = crate::output::duration(app.list[app.sel()].active.unwrap());
       press(&mut app, KeyCode::Enter);
       let buf = frame_of(&app, width, height);
       let head = find(&buf, "Model");
       let total = find(&buf, "total");
-      let time = |y| minutes(&cells(&line(&buf, y))[1]);
-      assert_eq!((head + 1..total).map(time).sum::<i64>(), time(total), "{}", screen_of(&buf));
+      assert_eq!(cells(&line(&buf, total))[1], project);
+      let d = app.open.as_ref().unwrap();
+      for (y, row) in (head + 1..total).zip(&d.rows) {
+        assert_eq!(cells(&line(&buf, y))[1], crate::output::duration(row.active.unwrap()));
+      }
       assert!(!line(&buf, head).contains("Sessions"));
+      // The metric by day spans the line, its first and last days under it.
+      let spark = find(&buf, "time by day") + 1;
+      // The busy days are the last of the 30, drawn at the far end of the line.
+      let bars = line(&buf, spark + 1);
+      assert!(bars.chars().skip(width as usize / 2).any(|x| x == '█'), "{bars:?}");
+      let end = line(&buf, spark + 2).trim_end().chars().count();
+      assert_eq!(end, width as usize - 2);
+      let dates = cells(&line(&buf, spark + 2));
+      assert_eq!(dates, [d.days[0].key.clone(), d.days.last().unwrap().key.clone()]);
     }
   }
 
@@ -734,6 +753,15 @@ mod tests {
     // The typed filter shows before the unpriced note.
     let tabs = line(&frame(&app), 1);
     assert!(tabs.find("filter w").unwrap() < tabs.find("unpriced").unwrap(), "{tabs}");
+    // A filter with no rows says so.
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('z'));
+    assert!(app.list.is_empty());
+    assert!(screen(&app).contains("No match for \"wz\""), "{}", screen(&app));
+    // The help box says how to close it, the footer doesn't.
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('?'));
+    assert!(!line(&frame(&app), 29).contains("esc"));
   }
 
   #[test]
@@ -742,6 +770,15 @@ mod tests {
 
     let mut app = many();
     press(&mut app, KeyCode::Char('3'));
+    assert_eq!(app.sel(), app.list.len() - 1);
+    // Days and weeks don't share a selection: a change between them starts at the newest.
+    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Up);
+    let day = app.list[app.sel()].key.clone();
+    press(&mut app, KeyCode::Left);
+    assert_eq!(app.list[app.sel()].key, day);
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Right);
     assert_eq!(app.sel(), app.list.len() - 1);
     let buf = frame(&app);
     let head = find(&buf, "Week");
