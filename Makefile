@@ -1,4 +1,4 @@
-.PHONY: prepare check test build dist update compare bench bench-ref clean
+.PHONY: prepare check test build dist update compare bench clean
 
 CARGO_FLAGS := --release --locked
 
@@ -49,12 +49,9 @@ update:
 compare: build
 	uv run scripts/compare.py --ref "$(REF)"
 
-# Warm runs over the full local history; bench-ref adds the Python 0.2.1.
+# Warm runs over the full local history (reads all of it: run it only for speed work).
 bench: build
-	hyperfine --warmup 1 --runs 10 --output null 'target/release/cctrail --by dir --json'
-
-bench-ref: build
-	hyperfine --warmup 1 --runs 3 --output null 'uvx cctrail==0.2.1 stats --by workdir --json' \
+	CCTRAIL_NO_UPDATE=1 hyperfine --warmup 1 --runs 10 --output null \
 		'target/release/cctrail --by dir --json'
 
 clean:
