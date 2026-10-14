@@ -23,7 +23,7 @@ Or take a prebuilt binary for macOS, Linux or Windows from the
 ## Usage
 
 ```sh
-cctrail                    # statistics per project
+cctrail                    # statistics per project and unconfigured repository
 cctrail this-month         # for a period
 cctrail --by group         # per group, or --by dir per working directory
 cctrail here               # the current directory's project: today, this week, this month…
@@ -38,8 +38,12 @@ output with full paths and token counts.
 
 ### Projects
 
-Projects are configured in `~/.config/cctrail/config.toml`. `XDG_CONFIG_HOME` changes the config
-root and `CCTRAIL_CONFIG` overrides the complete path.
+Without a config, `cctrail` lists every repository by its directory, dimmed, until the rows cover
+95% of the time; the rest is summed up as `other` (`--json` lists them all; `--by dir` folds the
+same way). A config is optional: it names
+repositories, merges several into one project and puts projects in groups for `--by group`. It
+lives in `~/.config/cctrail/config.toml`; `XDG_CONFIG_HOME` changes the config root and
+`CCTRAIL_CONFIG` overrides the complete path.
 
 ```toml
 [projects]
@@ -51,8 +55,8 @@ root and `CCTRAIL_CONFIG` overrides the complete path.
 ```
 
 Each key has the `<group>/<project>` form. A path includes all directories below it; when paths
-overlap, the longest match wins. Directories outside any project are summed up as `@unmapped`;
-`cctrail --by dir` lists them.
+overlap, the longest match wins. Directories outside any project keep their own rows, and count as
+the `@unmapped` group in `--by group` and in JSON.
 
 Agent worktrees count as their repository, recognized by their path:
 `<repo>/.claude/worktrees/<name>` (any `<repo>/.<tool>/worktrees/<name>`),
@@ -63,18 +67,21 @@ project. `--json --by dir` lists the folded paths of each directory.
 ## How it counts
 
 Claude history is read from `~/.claude/projects` and Codex history from `~/.codex/sessions` and
-`~/.codex/archived_sessions`; `CLAUDE_CONFIG_DIR` and `CODEX_HOME` override those roots. Claude Code
+`~/.codex/archived_sessions`, and the same from every profile beside them (`~/.claude-work`,
+`~/.codex-personal`); `CLAUDE_CONFIG_DIR` and `CODEX_HOME` replace all of those with one root. Claude Code
 deletes sessions older than 30 days at startup by default: raise
 [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically) to
 keep a long history.
 
 Active time treats every user or assistant event as a five-minute window. Overlapping windows
-merge, and time spent in several projects at once is divided between them.
+merge, and time spent in several projects at once is divided between them. Tables show it as
+`8h 14m`, and from a day on as `45d 8h 14m` (days of 24 hours); JSON gives seconds.
 
 Costs are estimates from [models.dev](https://models.dev) prices, each request at the price of its
 day: a later price cut doesn't reprice old usage, and a model models.dev drops keeps its last
 price. The dated prices come from the models.dev git history, so a change counts from the day
 models.dev recorded it, usually a few days after the provider's announcement.
+`codex-auto-review`, Codex's approval reviewer, has no price of its own and counts as `gpt-6-luna`.
 
 The prices bundled with the release are refreshed in the background once a day into
 `~/.cache/cctrail/pricing.tsv`, while the history is read; `cctrail update-pricing` does it now,

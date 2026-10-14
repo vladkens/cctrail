@@ -1,5 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -161,8 +162,39 @@ impl DateRange {
   }
 }
 
+thread_local! {
+  /// The last `[from, until)` span of `local_date`: one offset and one local day throughout.
+  static DAY: Cell<(Ts, Ts, Date)> = const { Cell::new((0, 0, jiff::civil::date(1970, 1, 1))) };
+}
+
+/// The local day of a moment. Events come in time order, so the span of the last answer usually
+/// holds the next one too and the time zone is looked up once per day, not per event.
 pub fn local_date(ts: Ts) -> Date {
-  TZ.to_datetime(timestamp(ts)).date()
+  let (from, until, day) = DAY.get();
+  if from <= ts && ts < until {
+    return day;
+  }
+  let (from, until, day) = day_span(&TZ, ts);
+  DAY.set((from, until, day));
+  day
+}
+
+/// The local day of a moment and the widest span around it with the same offset and day: from the
+/// later of the last offset change and the day's start under that offset, to the earlier of the
+/// next change and the next day's start.
+fn day_span(tz: &TimeZone, ts: Ts) -> (Ts, Ts, Date) {
+  let t = timestamp(ts);
+  let offset = tz.to_offset(t);
+  let day = offset.to_datetime(t).date();
+  let start = |d: Date| offset.to_timestamp(d.to_datetime(Time::midnight())).ok();
+  // `preceding` is strictly before its argument: a change exactly at `t` must count.
+  let after = t.checked_add(jiff::SignedDuration::from_micros(1)).unwrap_or(t);
+  let changed = tz.preceding(after).next().map_or(i64::MIN, |x| x.timestamp().as_microsecond());
+  let changes = tz.following(t).next().map_or(i64::MAX, |x| x.timestamp().as_microsecond());
+  match (start(day), day.tomorrow().ok().and_then(start)) {
+    (Some(a), Some(b)) => (changed.max(a.as_microsecond()), changes.min(b.as_microsecond()), day),
+    _ => (ts, ts + 1, day),
+  }
 }
 
 pub fn timestamp(ts: Ts) -> Timestamp {
@@ -261,6 +293,7 @@ pub fn billable_events(sessions: &[Session]) -> Vec<(usize, usize)> {
 
 pub fn usage_by_period(
   sessions: &[Session],
+  events: &[(usize, usize)],
   gran: Granularity,
   range: &DateRange,
 ) -> BTreeMap<Date, UsageSummary> {
@@ -268,7 +301,7 @@ pub fn usage_by_period(
   let mut models: HashMap<Date, HashMap<(Provider, &str, bool), ModelSummary>> = HashMap::new();
   let mut buckets: HashSet<((Provider, &str), Date)> = HashSet::new();
 
-  for (si, ei) in billable_events(sessions) {
+  for &(si, ei) in events {
     let (session, event) = (&sessions[si], &sessions[si].events[ei]);
     let Some(ts) = event.ts.filter(|x| range.contains(*x)) else { continue };
     let bucket = gran.bucket(local_date(ts));
@@ -328,8 +361,13 @@ pub fn usage_by_period(
   summaries
 }
 
-pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By) -> Vec<Stat> {
-  let events = billable_events(sessions);
+pub fn stats_by(
+  sessions: &[Session],
+  events: &[(usize, usize)],
+  range: &DateRange,
+  config: &Config,
+  by: By,
+) -> Vec<Stat> {
   let bounded = range.bounded();
   let in_range = |e: &Event| !bounded || e.ts.is_some_and(|x| range.contains(x));
   let billable: HashSet<(Provider, &str)> = events
@@ -377,7 +415,7 @@ pub fn stats_by(sessions: &[Session], range: &DateRange, config: &Config, by: By
     }
   }
 
-  for (si, ei) in events {
+  for &(si, ei) in events {
     let (session, event) = (&sessions[si], &sessions[si].events[ei]);
     if !in_range(event) {
       continue;
@@ -432,9 +470,13 @@ pub fn combine_stats<'a>(name: &str, stats: impl IntoIterator<Item = &'a Stat>) 
 }
 
 /// Tokens on models the price catalog lacks, by model, most first: their cost counts as 0.
-pub fn unpriced(sessions: &[Session], range: &DateRange) -> Vec<(String, u64)> {
+pub fn unpriced(
+  sessions: &[Session],
+  events: &[(usize, usize)],
+  range: &DateRange,
+) -> Vec<(String, u64)> {
   let mut models: HashMap<&str, u64> = HashMap::new();
-  for (si, ei) in billable_events(sessions) {
+  for &(si, ei) in events {
     let (session, event) = (&sessions[si], &sessions[si].events[ei]);
     if range.bounded() && !event.ts.is_some_and(|x| range.contains(x)) {
       continue;
@@ -575,7 +617,13 @@ mod tests {
   fn divides_parallel_time_between_workdirs() {
     let at = ts("2026-01-01T10:00:00Z");
     let sessions = [session("/first", at), session("/second", at)];
-    let stats = stats_by(&sessions, &DateRange::default(), &Config::default(), By::Dir);
+    let stats = stats_by(
+      &sessions,
+      &billable_events(&sessions),
+      &DateRange::default(),
+      &Config::default(),
+      By::Dir,
+    );
 
     assert_eq!(stats.len(), 2);
     assert!(stats.iter().all(|x| x.active == 150 * MICROS));
@@ -645,6 +693,32 @@ mod tests {
   }
 
   #[test]
+  fn caches_local_days_exactly() {
+    // DST at 02:00, and DST switching at midnight both ways (a skipped and a repeated midnight).
+    for posix in ["EST5EDT,M3.2.0,M11.1.0", "<-03>3<-02>,M3.2.0/0,M11.1.0/0", "UTC0"] {
+      let tz = TimeZone::posix(posix).unwrap();
+      let direct = |ts: Ts| tz.to_datetime(timestamp(ts)).date();
+      for start in [ts("2026-03-07T00:00:00Z"), ts("2026-10-30T00:00:00Z")] {
+        for i in 0..(4 * 24 * 60 / 7) {
+          let at = start + i * 7 * 60 * MICROS;
+          let (from, until, day) = day_span(&tz, at);
+          assert!(from <= at && at < until, "{posix} {at}");
+          assert_eq!(day, direct(at), "{posix} {at}");
+          assert_eq!((direct(from), direct(until - 1)), (day, day), "{posix} {at}");
+        }
+      }
+    }
+
+    // The cached function itself, in the system zone, forward and back over a midnight.
+    let base = day_start(date(2026, 3, 8)) - 3 * 3600 * MICROS;
+    let direct = |ts: Ts| TZ.to_datetime(timestamp(ts)).date();
+    for i in (0..200).chain((0..200).rev()) {
+      let at = base + i * 97 * MICROS * 60;
+      assert_eq!(local_date(at), direct(at));
+    }
+  }
+
+  #[test]
   fn splits_windows_at_local_midnight() {
     let start = day_start(date(2026, 1, 2)) - 60 * MICROS;
     let parts = split_by_day(start, start + 5 * 60 * MICROS);
@@ -658,11 +732,13 @@ mod tests {
     let config = Config::parse(&format!("[projects]\n'oss/demo' = ['{root}']"), None).unwrap();
     let sessions = [session("C:/repo", at), session("a/b", at), session(root, at)];
 
-    let stats = stats_by(&sessions, &DateRange::default(), &config, By::Project);
+    let stats =
+      stats_by(&sessions, &billable_events(&sessions), &DateRange::default(), &config, By::Project);
     let mapped = |name: &str| stats.iter().find(|x| x.name == name).unwrap().mapped;
     assert!(!mapped("C:/repo") && !mapped("a/b") && mapped("oss/demo"));
 
-    let stats = stats_by(&sessions, &DateRange::default(), &config, By::Group);
+    let stats =
+      stats_by(&sessions, &billable_events(&sessions), &DateRange::default(), &config, By::Group);
     let mapped = |name: &str| stats.iter().find(|x| x.name == name).unwrap().mapped;
     assert!(!mapped("@unmapped") && mapped("oss"));
   }
@@ -679,7 +755,13 @@ mod tests {
       ..Default::default()
     });
 
-    let stat = &stats_by(&[x], &DateRange::default(), &Config::default(), By::Dir)[0];
+    let stat = &stats_by(
+      &[x.clone()],
+      &billable_events(&[x]),
+      &DateRange::default(),
+      &Config::default(),
+      By::Dir,
+    )[0];
     assert_eq!(stat.usage.total(), 1);
     assert_eq!(stat.active, 300 * MICROS);
     assert_eq!(stat.last, Some(at));

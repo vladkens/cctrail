@@ -87,9 +87,13 @@ CI the `Makefile` and `.github/workflows/main.yml`.
      `.claude/worktrees/`. A small change that fits an open PR's topic goes into that PR instead of
      a new one: docs-only edits join the open docs PR.
   3. Commit every step that passes `make check` and `make test`: one short lowercase line, no
-     body, docs updated in the same commit. The branch is squashed.
+     body, docs updated in the same commit. Commits stay granular locally; the branch is
+     squashed.
   4. Push and open the PR with `gh pr create`. The title is the squash commit, one short lowercase
      line; the body says what changed, the checks run, `make compare` and numbers for speed work.
+     Push to a PR once, when its set of tasks is done and checked; collect review fixes (Copilot,
+     codex, orchestrator, docs, plan completion) and push them together. Don't push to a PR the
+     person is reviewing until they respond.
   5. The orchestrating agent reviews the diff, reruns the checks and sends findings back until the
      PR is clean, then hands it to the person. Copilot reviews every PR: fix what is right, answer
      the rest in the thread and resolve it. Once the orchestrator accepts the solution, the

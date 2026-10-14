@@ -15,6 +15,8 @@ Code and Codex. Tick a phase when done.
       [Plan](plans/completed/20261014-price-history.md)
 - [x] **5. Workdirs:** agent worktrees fold into their repository (#4).
       [Plan](plans/completed/20261014-workdirs.md)
+- [x] **6. Hybrid stats:** unconfigured repositories beside the projects, the small tail in one
+      row (#6). [Plan](plans/completed/20261014-hybrid-stats.md)
 
 Later, only on request: a cache of parsed sessions keyed by file size and mtime, so a run reads
 only new history; other harnesses (Gemini CLI, opencode).

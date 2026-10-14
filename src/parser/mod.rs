@@ -19,23 +19,44 @@ use crate::model::{Provider, Session, Ts};
 pub fn parse_history(provider: Option<Provider>) -> Vec<Session> {
   let claude = || match provider {
     Some(Provider::Codex) => vec![],
-    _ => claude::parse(&history_root("CLAUDE_CONFIG_DIR", ".claude")),
+    _ => claude::parse(&history_roots("CLAUDE_CONFIG_DIR", ".claude")),
   };
   let codex = || match provider {
     Some(Provider::Claude) => vec![],
-    _ => codex::parse(&history_root("CODEX_HOME", ".codex")),
+    _ => codex::parse(&history_roots("CODEX_HOME", ".codex")),
   };
   let (mut sessions, other) = rayon::join(claude, codex);
   sessions.extend(other);
   sessions
 }
 
-pub fn history_root(var: &str, fallback: &str) -> PathBuf {
+/// A harness's history directories: `$var` when set, else `~/<base>` and every `~/<base>-*`
+/// profile (`~/.claude-work`).
+pub fn history_roots(var: &str, base: &str) -> Vec<PathBuf> {
   match std::env::var_os(var) {
-    Some(x) if x.is_empty() => PathBuf::from("."),
-    Some(x) => PathBuf::from(x),
-    None => crate::config::home_dir().unwrap_or_else(|| ".".into()).join(fallback),
+    Some(x) if x.is_empty() => vec![PathBuf::from(".")],
+    Some(x) => vec![PathBuf::from(x)],
+    None => profiles(&crate::config::home_dir().unwrap_or_else(|| ".".into()), base),
   }
+}
+
+/// `<home>/<base>` and its `<home>/<base>-*` sibling directories, sorted.
+fn profiles(home: &Path, base: &str) -> Vec<PathBuf> {
+  let prefix = format!("{base}-");
+  let mut dirs: Vec<PathBuf> = std::fs::read_dir(home)
+    .into_iter()
+    .flatten()
+    .flatten()
+    .filter(|x| {
+      x.file_name().to_str().is_some_and(|x| x.starts_with(&prefix) && x.len() > prefix.len())
+    })
+    .map(|x| x.path())
+    // `is_dir` follows symlinks: a profile linked to another directory counts too.
+    .filter(|x| x.is_dir())
+    .collect();
+  dirs.sort();
+  dirs.insert(0, home.join(base));
+  dirs
 }
 
 /// A tool call that may have spawned an agent.
@@ -455,6 +476,30 @@ mod tests {
     assert_eq!((x.a.int(), x.a.truthy(), x.b.has_text()), (0, true, true));
     assert!(!line(r#"{"b": "\u001f\n"}"#).b.has_text());
     assert!(serde_json::from_str::<Obj<Line>>("[1, 2]").unwrap().0.is_none());
+  }
+
+  #[test]
+  fn finds_profile_directories() {
+    let home = std::env::temp_dir().join(format!("cctrail-profiles-{}", std::process::id()));
+    for x in [".claude", ".claude-work", ".claude-b", ".claudex", ".claude-", ".codex-alt"] {
+      std::fs::create_dir_all(home.join(x)).unwrap();
+    }
+    std::fs::write(home.join(".claude-file"), "").unwrap();
+    // A profile linked to another directory counts too.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(home.join(".claude-work"), home.join(".claude-link")).unwrap();
+    let names = |base: &str| -> Vec<String> {
+      let dirs = profiles(&home, base);
+      dirs.iter().map(|x| x.file_name().unwrap().to_string_lossy().to_string()).collect()
+    };
+    let expected: &[&str] = match cfg!(unix) {
+      true => &[".claude", ".claude-b", ".claude-link", ".claude-work"],
+      false => &[".claude", ".claude-b", ".claude-work"],
+    };
+    assert_eq!(names(".claude"), expected);
+    // The base itself needn't exist.
+    assert_eq!(names(".codex"), [".codex", ".codex-alt"]);
+    std::fs::remove_dir_all(&home).unwrap();
   }
 
   #[test]

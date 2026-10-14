@@ -155,8 +155,24 @@ fn is_stale(mtime: Option<SystemTime>, now: SystemTime) -> bool {
 
 /// The price of a model at a moment: the latest set by its local day (the day the reports show
 /// it under), the first one before that, the latest for an event without a time.
+/// Models without a price of their own, billed as another model at its price on the same day.
+const ALIASES: &[(&str, &str)] = &[
+  // Codex's approval reviewer: not on models.dev, it runs on the small model.
+  ("codex-auto-review", "gpt-6-luna"),
+];
+
 pub fn price(provider: Provider, model: Option<&str>, ts: Option<Ts>) -> Option<&'static Price> {
-  pick(catalog().0.get(provider.pricing_key())?.get(model.unwrap_or(""))?, ts.map(local_date))
+  lookup(&catalog().0, provider, model.unwrap_or(""), ts.map(local_date))
+}
+
+fn lookup<'a>(
+  catalog: &'a Catalog,
+  p: Provider,
+  model: &str,
+  day: Option<Date>,
+) -> Option<&'a Price> {
+  let model = ALIASES.iter().find(|x| x.0 == model).map_or(model, |x| x.1);
+  pick(catalog.get(p.pricing_key())?.get(model)?, day)
 }
 
 fn pick(prices: &[Price], day: Option<Date>) -> Option<&Price> {
@@ -299,6 +315,16 @@ mod tests {
   fn tsv(rows: &[&str]) -> String {
     let rows = rows.iter().map(|x| format!("{}\t\t\t\t\t\t\t\t", x.replace(' ', "\t")));
     std::iter::once(HEADER.to_string()).chain(rows).collect::<Vec<_>>().join("\n")
+  }
+
+  #[test]
+  fn bills_aliases_as_their_model() {
+    // The bundled catalog, not the cached one a test run may find.
+    let catalog = parse(BUNDLED).unwrap();
+    let day = Some(jiff::civil::date(2026, 10, 1));
+    let luna = lookup(&catalog, Provider::Codex, "gpt-6-luna", day).unwrap();
+    assert_eq!(lookup(&catalog, Provider::Codex, "codex-auto-review", day), Some(luna));
+    assert_eq!(lookup(&catalog, Provider::Claude, "codex-auto-review", day), None);
   }
 
   #[test]
