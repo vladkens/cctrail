@@ -50,8 +50,9 @@ fn profiles(home: &Path, base: &str) -> Vec<PathBuf> {
     .filter(|x| {
       x.file_name().to_str().is_some_and(|x| x.starts_with(&prefix) && x.len() > prefix.len())
     })
-    .filter(|x| x.file_type().is_ok_and(|x| x.is_dir()))
     .map(|x| x.path())
+    // `is_dir` follows symlinks: a profile linked to another directory counts too.
+    .filter(|x| x.is_dir())
     .collect();
   dirs.sort();
   dirs.insert(0, home.join(base));
@@ -484,11 +485,18 @@ mod tests {
       std::fs::create_dir_all(home.join(x)).unwrap();
     }
     std::fs::write(home.join(".claude-file"), "").unwrap();
+    // A profile linked to another directory counts too.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(home.join(".claude-work"), home.join(".claude-link")).unwrap();
     let names = |base: &str| -> Vec<String> {
       let dirs = profiles(&home, base);
       dirs.iter().map(|x| x.file_name().unwrap().to_string_lossy().to_string()).collect()
     };
-    assert_eq!(names(".claude"), [".claude", ".claude-b", ".claude-work"]);
+    let expected: &[&str] = match cfg!(unix) {
+      true => &[".claude", ".claude-b", ".claude-link", ".claude-work"],
+      false => &[".claude", ".claude-b", ".claude-work"],
+    };
+    assert_eq!(names(".claude"), expected);
     // The base itself needn't exist.
     assert_eq!(names(".codex"), [".codex", ".codex-alt"]);
     std::fs::remove_dir_all(&home).unwrap();
