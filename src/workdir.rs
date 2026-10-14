@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::model::{Session, Ts};
 
@@ -10,7 +10,7 @@ use crate::model::{Session, Ts};
 pub struct Folds {
   /// The Codex and Claude homes (`same_path`): their `worktrees` name no repository.
   homes: Vec<String>,
-  /// A worktree-folded directory → the clone it folds into.
+  /// A worktree-folded directory (`same_path`) → the clone it folds into.
   clones: HashMap<String, String>,
 }
 
@@ -23,7 +23,7 @@ impl Folds {
   /// that repository folds into.
   pub fn fold(&self, dir: &str) -> String {
     let repo = self.worktree(dir);
-    self.clones.get(&repo).cloned().unwrap_or(repo)
+    self.clones.get(&same_path(&repo)).cloned().unwrap_or(repo)
   }
 
   /// The repository a directory belongs to: `<repo>` for `<repo>/.<tool>/worktrees/<name>`,
@@ -77,19 +77,20 @@ pub fn fold_sessions(sessions: &mut [Session]) -> Folds {
     x.workdir = cache.entry(x.cwd.clone()).or_insert_with(|| folds.worktree(&x.cwd)).clone();
   }
 
-  let mut seen: HashMap<&str, (Option<Ts>, Option<&str>)> = HashMap::new();
+  let mut seen: HashMap<&str, (Option<Ts>, BTreeSet<String>)> = HashMap::new();
   for x in sessions.iter() {
     let last = x.events.iter().filter_map(|e| e.ts).max();
     let dir = seen.entry(&x.workdir).or_default();
-    *dir = (dir.0.max(last), dir.1.or(x.remote.as_deref()));
+    dir.0 = dir.0.max(last);
+    dir.1.extend(x.remote.clone());
   }
   let dirs: Vec<Dir> = seen
     .into_iter()
-    .map(|(path, (last, remote))| Dir { path: path.into(), last, remote: remote.map(Into::into) })
+    .map(|(path, (last, remotes))| Dir { path: path.into(), last, remotes })
     .collect();
   folds.clones = clones(&dirs, &temp_dirs());
   for x in sessions.iter_mut() {
-    if let Some(clone) = folds.clones.get(&x.workdir) {
+    if let Some(clone) = folds.clones.get(&same_path(&x.workdir)) {
       x.workdir = clone.clone();
     }
   }
@@ -101,12 +102,13 @@ struct Dir {
   path: String,
   /// The latest activity in it.
   last: Option<Ts>,
-  remote: Option<String>,
+  /// Every git remote Codex logged for it.
+  remotes: BTreeSet<String>,
 }
 
 /// Clones of one repository: directories of the same name fold into the one with the latest
 /// activity. A temp directory, a directory holding other session directories (`~/Code`) and
-/// directories Codex saw with different git remotes never fold together.
+/// directories Codex saw only with different git remotes never fold together. Keys are `same_path`.
 fn clones(dirs: &[Dir], temps: &[String]) -> HashMap<String, String> {
   let keys: Vec<String> = dirs.iter().map(|x| same_path(&x.path)).collect();
   let below =
@@ -125,17 +127,19 @@ fn clones(dirs: &[Dir], temps: &[String]) -> HashMap<String, String> {
   for mut group in groups.into_values() {
     // The latest first; ties by path, so the result doesn't depend on the order of sessions.
     group.sort_by(|a, b| b.last.cmp(&a.last).then_with(|| a.path.cmp(&b.path)));
-    let mut repos: Vec<(&str, Option<&str>)> = vec![];
+    let mut repos: Vec<(&str, BTreeSet<String>)> = vec![];
     for x in group {
-      let remote = x.remote.as_deref();
-      match repos.iter_mut().find(|r| r.1.is_none() || remote.is_none() || r.1 == remote) {
+      // Unknown remotes match anything; known ones must share at least one.
+      let fits =
+        |r: &BTreeSet<String>| r.is_empty() || x.remotes.is_empty() || !r.is_disjoint(&x.remotes);
+      match repos.iter_mut().find(|r| fits(&r.1)) {
         Some(repo) => {
-          repo.1 = repo.1.or(remote);
+          repo.1.extend(x.remotes.iter().cloned());
           if repo.0 != x.path {
-            map.insert(x.path.clone(), repo.0.to_string());
+            map.insert(same_path(&x.path), repo.0.to_string());
           }
         }
-        None => repos.push((&x.path, remote)),
+        None => repos.push((&x.path, x.remotes.clone())),
       }
     }
   }
@@ -144,8 +148,10 @@ fn clones(dirs: &[Dir], temps: &[String]) -> HashMap<String, String> {
 
 /// System temp directories (`same_path`): sessions there are throwaway, never a clone.
 fn temp_dirs() -> Vec<String> {
-  let fixed = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"].map(String::from);
-  let env = ["TMPDIR", "TEMP"].into_iter().filter_map(std::env::var_os);
+  let fixed = ["/tmp", "/var/tmp", "/var/folders"].map(String::from);
+  // macOS keeps them under /private too.
+  let fixed = fixed.iter().flat_map(|x| [x.clone(), format!("/private{x}")]).collect::<Vec<_>>();
+  let env = ["TMPDIR", "TEMP", "TMP"].into_iter().filter_map(std::env::var_os);
   let env = env.map(|x| x.to_string_lossy().to_string()).filter(|x| !x.is_empty());
   fixed.into_iter().chain(env).map(|x| same_path(&x)).collect()
 }
@@ -159,12 +165,17 @@ pub fn normalize_remote(url: &str) -> Option<String> {
     Some((_, rest)) => {
       let (authority, path) = rest.split_once('/')?;
       let host = authority.rsplit_once('@').map_or(authority, |x| x.1);
-      (host.split_once(':').map_or(host, |x| x.0), path)
+      // A bracketed IPv6 host keeps its colons; otherwise `:` starts the port.
+      let host = match host.strip_prefix('[').and_then(|x| x.split_once(']')) {
+        Some((ip, _)) => &host[..ip.len() + 2],
+        None => host.split_once(':').map_or(host, |x| x.0),
+      };
+      (host, path)
     }
     // scp-like `user@host:owner/repo`; one letter before `:` is a Windows drive.
     None => {
       let (authority, path) = url.split_once(':')?;
-      if authority.contains('/') || authority.len() < 2 || path.starts_with('/') {
+      if authority.contains('/') || authority.len() < 2 {
         return None;
       }
       (authority.rsplit_once('@').map_or(authority, |x| x.1), path)
@@ -248,7 +259,11 @@ mod tests {
   }
 
   fn dir(path: &str, last: Ts, remote: Option<&str>) -> Dir {
-    Dir { path: path.into(), last: Some(last), remote: remote.map(Into::into) }
+    Dir {
+      path: path.into(),
+      last: Some(last),
+      remotes: remote.map(String::from).into_iter().collect(),
+    }
   }
 
   #[test]
@@ -314,6 +329,30 @@ mod tests {
     for url in ["", "/srv/git/repo.git", "file:///srv/repo.git", "C:\\repo", "https://host"] {
       assert_eq!(normalize_remote(url), None, "{url}");
     }
+    let some = |x: &str| Some(x.to_string());
+    assert_eq!(
+      normalize_remote("ssh://git@[2001:db8::1]:22/team/app.git"),
+      some("[2001:db8::1]/team/app")
+    );
+    assert_ne!(
+      normalize_remote("ssh://git@[2001:db8::1]/team/app.git"),
+      normalize_remote("ssh://git@[2001:db8::2]/team/app.git")
+    );
+    assert_eq!(normalize_remote("git@host:/srv/git/app.git"), some("host/srv/git/app"));
+  }
+
+  #[test]
+  fn folds_clones_sharing_any_remote() {
+    let dir = |path: &str, last: Ts, remotes: &[&str]| Dir {
+      path: path.into(),
+      last: Some(last),
+      remotes: remotes.iter().map(|x| x.to_string()).collect(),
+    };
+    // /a/app saw remotes A and B, /b/app only A: one repository whichever order.
+    let dirs = [dir("/a/app", 2, &["B", "A"]), dir("/b/app", 1, &["A"]), dir("/c/app", 0, &["C"])];
+    let map = clones(&dirs, &[]);
+    assert_eq!(map.get("/b/app").map(String::as_str), Some("/a/app"));
+    assert_eq!(map.get("/c/app"), None);
   }
 
   #[test]
