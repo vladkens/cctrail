@@ -263,9 +263,9 @@ impl App {
     d
   }
 
-  /// Opens the selected row; `other` and empty days open nothing.
+  /// Opens the selected row; an empty day opens nothing.
   fn open(&mut self) {
-    let row = self.list.get(self.sel()).filter(|x| !x.key.is_empty());
+    let row = self.list.get(self.sel());
     if let Some(row) = row.filter(|x| x.tokens > 0 || x.active.unwrap_or(0) > 0) {
       let sort = self.sorts[self.tab as usize];
       self.open = Some(self.detail(row.clone(), sort));
@@ -525,7 +525,7 @@ fn sum(rows: &[Row]) -> Row {
   }
 }
 
-/// Rows by a column, most first or least first; ties by name, `other` last whatever the order.
+/// Rows by a column, most first or least first; ties by name.
 fn sort(rows: &mut [Row], (col, most): Sort) {
   rows.sort_by(|a, b| {
     let order = match col {
@@ -533,7 +533,7 @@ fn sort(rows: &mut [Row], (col, most): Sort) {
       _ => col.of(a).partial_cmp(&col.of(b)).unwrap(),
     };
     let order = if most { order.reverse() } else { order };
-    a.key.is_empty().cmp(&b.key.is_empty()).then(order).then_with(|| a.label.cmp(&b.label))
+    order.then_with(|| a.label.cmp(&b.label))
   });
 }
 
@@ -748,12 +748,7 @@ mod tests {
     };
     // Time, most first, by default; `s` steps through the columns, `S` reverses.
     assert_eq!(head(&app), ["Project", "Time ↓", "Tokens", "Cost", "Sessions", "Share"]);
-    assert!(
-      app
-        .list
-        .windows(2)
-        .all(|w| w[0].key.is_empty() || w[1].key.is_empty() || w[0].active >= w[1].active)
-    );
+    assert!(app.list.windows(2).all(|w| w[0].active >= w[1].active));
     let order = [Col::Tokens, Col::Cost, Col::Sessions, Col::Name, Col::Time];
     for col in order {
       press(&mut app, KeyCode::Char('s'));
@@ -763,7 +758,7 @@ mod tests {
     press(&mut app, KeyCode::Char('S'));
     assert_eq!(app.sort(), (Col::Tokens, false));
     assert_eq!(head(&app)[2], "Tokens ↑");
-    let named: Vec<_> = app.list.iter().filter(|x| !x.key.is_empty()).collect();
+    let named: Vec<_> = app.list.iter().collect();
     assert!(named.windows(2).all(|w| w[0].tokens <= w[1].tokens));
     // The share is of the sorted column: tokens here, so the largest share is the last row's.
     let buf = frame(&app);

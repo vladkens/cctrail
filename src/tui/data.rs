@@ -66,7 +66,7 @@ pub struct Row {
 
 /// Time per project, model, speed and effort, for one span and provider.
 type Times = HashMap<Part, i64>;
-/// A project, a model, whether fast, an effort (empty where unknown).
+/// A project, a model, whether fast, an effort (`UNKNOWN` where none is logged).
 type Part = (String, String, bool, String);
 /// `Times` with the span and provider they are for.
 type Cached = Option<((Span, Option<Provider>), Times)>;
@@ -150,7 +150,7 @@ impl Data {
   pub fn model_usage(&self, span: Span, prov: Option<Provider>, key: &str) -> [Vec<Row>; 2] {
     let keep = |si: usize, e: &Event| model_key(self.sessions[si].provider, model(e)) == key;
     let speed = |e: &Event| if is_fast(e) { "fast" } else { "standard" }.to_string();
-    let effort = |e: &Event| e.effort.clone().unwrap_or_default();
+    let effort = |e: &Event| e.effort.clone().unwrap_or(UNKNOWN.into());
     let times = self.times(span, prov);
     let by = |part: &dyn Fn(&Part) -> String, rows: Vec<Row>| {
       let of = |k: &Part, row: &Row| k.1 == key && part(k) == row.key;
@@ -162,7 +162,7 @@ impl Data {
     [by(&fast, speeds), by(&|k: &Part| k.3.clone(), efforts)]
   }
 
-  /// Tokens and cost of the events `keep` takes in the span, per `key`; an empty key reads `–`.
+  /// Tokens and cost of the events `keep` takes in the span, per `key`; `UNKNOWN` reads `–`.
   fn usage(
     &self,
     span: Span,
@@ -179,7 +179,7 @@ impl Data {
       }
       let key = key(s, e);
       let row = rows.entry(key.clone()).or_insert_with(|| Row {
-        label: if key.is_empty() { "–".into() } else { key.clone() },
+        label: if key == UNKNOWN { "–".into() } else { key.clone() },
         key,
         ..Default::default()
       });
@@ -222,7 +222,7 @@ impl Data {
         continue;
       }
       let part = |e: &Event| {
-        let effort = e.effort.as_deref().unwrap_or("");
+        let effort = e.effort.as_deref().unwrap_or(UNKNOWN);
         e.model
           .as_ref()
           .map(|_| format!("{}\0{}\0{effort}", model_key(s.provider, model(e)), is_fast(e)))
@@ -360,6 +360,9 @@ fn scale(parts: Vec<(String, i64)>, total: i64) -> HashMap<String, i64> {
 }
 
 const MICROS: i64 = 1_000_000;
+
+/// The effort of turns that log none; it reads `–`.
+const UNKNOWN: &str = "unknown";
 
 /// An event counts in a span as `stats_by` counts it: by its day, and always for all time, even
 /// without a timestamp.
@@ -545,6 +548,7 @@ pub mod tests {
     keys.sort();
     assert_eq!(keys, ["high", "low"]);
     let [_, efforts] = data.model_usage(Span::All, None, "claude/claude-unknown-1");
-    assert_eq!(efforts.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(), ["–"]);
+    let unknown: Vec<_> = efforts.iter().map(|x| (x.key.as_str(), x.label.as_str())).collect();
+    assert_eq!(unknown, [("unknown", "–")]);
   }
 }

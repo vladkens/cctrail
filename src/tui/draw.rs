@@ -538,25 +538,23 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
       .map_or(String::new(), |d| if week { d.to_string() } else { d.strftime("%m-%d").to_string() })
   };
   let wide: usize = if week { 10 } else { 5 };
-  let place = |i: usize| {
-    let (dx, width) = bar(i - first);
-    (dx + width / 2).saturating_sub(wide / 2).min(room.saturating_sub(wide))
-  };
-  // Every few bars, so that labels fit even over the narrowest gaps.
-  let every = (wide + 2).div_ceil(width + 1);
   let last = first + shown - 1;
-  // The selected and the newest always (the selected first); the others only as far from them
-  // as from each other, so a label close to a forced one is dropped, not squeezed in.
-  let usual = every * (width + 1);
+  // Centred under its bar, kept on screen at the right edge.
+  let centred = |i: usize| {
+    let (dx, width) = bar(i - first);
+    (dx + width / 2).saturating_sub(wide / 2)
+  };
+  let place = |i: usize| centred(i).min(room.saturating_sub(wide));
+  // Every few bars, so that labels fit over the narrowest gaps, and the newest, pushed left of
+  // its centre to stay on screen, still leaves room for the one before it.
+  let pushed = centred(last) - place(last);
+  let every = (wide + 2 + pushed).div_ceil(width + 1);
+  // The selected and the newest always (the selected first), then the others where they fit,
+  // two cells clear of each other.
   let mut marks: Vec<(usize, usize)> = vec![];
-  for (i, forced) in [(sel, true), (last, true)]
-    .into_iter()
-    .chain((first..=last).rev().step_by(every).map(|i| (i, false)))
-  {
-    let x = place(i);
-    let room = if forced { wide + 2 } else { usual };
-    if marks.iter().all(|(m, j)| *j != i && x.abs_diff(*m) >= room.max(wide + 2)) {
-      marks.push((x, i));
+  for i in [sel, last].into_iter().chain((first..=last).rev().step_by(every)) {
+    if marks.iter().all(|(m, j)| *j != i && place(i).abs_diff(*m) >= wide + 2) {
+      marks.push((place(i), i));
     }
   }
   marks.sort();
@@ -643,7 +641,7 @@ fn help(f: &mut Frame, area: Rect) {
     ("← →", "on the timeline: the day before / after"),
     ("PgUp PgDn", "a page up / down"),
     ("Home End", "the first / last row"),
-    ("enter", "open: project → models, model → projects, day → projects"),
+    ("enter", "open: project → models, model → speed and effort, day → projects"),
     ("esc ⌫", "back"),
     ("s", "sort by the next column; on the timeline: bars of time / tokens / cost"),
     ("S", "reverse the sort"),
