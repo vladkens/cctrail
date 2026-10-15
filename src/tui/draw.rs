@@ -503,7 +503,8 @@ fn timeline(f: &mut Frame, app: &App, outer: Rect, area: Rect, hits: &mut Hits) 
 
 /// The model's name without its provider, for the legend.
 fn short(key: &str) -> &str {
-  key.split_once('/').map_or(key, |x| x.1)
+  let name = key.split_once('/').map_or(key, |x| x.1);
+  name.strip_prefix("claude-").unwrap_or(name)
 }
 
 /// Bars of what `app.bars` picks, a bar per day stacked by model, the dates under some bars; the
@@ -525,24 +526,22 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     spans.push(Text::raw(" "));
     x += name.len() as u16 + 1;
   }
-  spans.push(dim(if week { " by week" } else { " by day" }));
-  if max > 0.0 {
-    let top = days.iter().max_by(|a, b| col.of(a.1).total_cmp(&col.of(b.1))).unwrap().1;
-    let (text, style) = value(col, top);
-    spans.extend([dim(" · max "), Text::styled(text, style)]);
-  }
-  let choice = Line::from(spans);
-  let used = choice.width() as u16;
-  f.render_widget(choice, Rect { x: area.x + GUTTER, height: 1, ..area });
+  let by = dim(if week { " by week" } else { " by day" });
   if max == 0.0 {
+    spans.push(by);
+    f.render_widget(Line::from(spans), Rect { x: area.x + GUTTER, height: 1, ..area });
     let rest = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
     return f.render_widget(Paragraph::new(dim("  No activity in this period")), rest);
   }
+  let top = days.iter().max_by(|a, b| col.of(a.1).total_cmp(&col.of(b.1))).unwrap().1;
+  let (text, style) = value(col, top);
+  let largest = Text::styled(text, style);
 
   // The models in colors: the largest by all-time tokens keep theirs on every screen; as many as
-  // the legend can name, the rest together in `other`.
+  // the legend can name, the rest together in `other`. When narrow, the line gives up `by day`,
+  // then the word `max`, for the legend; with no room for one model, plain bars and no legend.
   let models = app.data.bucket_models(app.span, app.prov);
-  let rank = app.data.model_rank(app.prov);
+  let rank = app.data.model_rank();
   let present: std::collections::HashSet<&str> =
     models.values().flatten().filter(|x| col.of(x) > 0.0).map(|x| x.key.as_str()).collect();
   let ranked: Vec<(usize, &str)> = rank
@@ -552,8 +551,24 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     .filter(|x| present.contains(x.1.as_str()))
     .map(|(i, k)| (i, k.as_str()))
     .collect();
-  let room = usize::from(area.width.saturating_sub(GUTTER * 2 + used + 2));
-  let (colored, legend) = legend(&ranked, present.len(), room);
+  let variants = [
+    vec![by.clone(), dim(" · max "), largest.clone()],
+    vec![dim(" · max "), largest.clone()],
+    vec![dim(" · "), largest.clone()],
+  ];
+  let fitted = variants.iter().find_map(|extra| {
+    let mut line = spans.clone();
+    line.extend(extra.iter().cloned());
+    let used = Line::from(line.clone()).width() as u16;
+    let room = usize::from(area.width.saturating_sub(GUTTER * 2 + used + 2));
+    let (colored, legend) = legend(&ranked, present.len(), room);
+    (!colored.is_empty()).then_some((line, colored, legend))
+  });
+  let (line, colored, legend) = fitted.unwrap_or_else(|| {
+    spans.extend(variants[0].iter().cloned());
+    (spans, vec![], Line::default())
+  });
+  f.render_widget(Line::from(line), Rect { x: area.x + GUTTER, height: 1, ..area });
   let w = legend.width() as u16;
   f.render_widget(legend, Rect::new(area.right() - GUTTER - w, area.y, w, 1));
 
@@ -624,7 +639,8 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let (dx, width) = bar(sel - first);
   buf.set_string(x0 + dx as u16, base, "━".repeat(width), Style::new().fg(Color::Cyan));
   // Dates under their bars every few bars, counted back from the newest, all shifted as far as
-  // the newest must be to stay on screen, so the gaps are even; the selected one always.
+  // the newest must be to stay on screen, so the gaps are even; the selected one's in the
+  // selection color when it is among them.
   let date = |x: &Row| {
     x.day
       .map_or(String::new(), |d| if week { d.to_string() } else { d.strftime("%m-%d").to_string() })
@@ -638,12 +654,8 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let pushed = centred(last).saturating_sub(room.saturating_sub(wide));
   let place = |i: usize| centred(i).saturating_sub(pushed);
   let every = (wide + 2).div_ceil(pitch);
-  let mut marks: Vec<(usize, usize)> = vec![];
-  for i in [sel, last].into_iter().chain((first..=last).rev().step_by(every)) {
-    if marks.iter().all(|(m, j)| *j != i && place(i).abs_diff(*m) >= wide + 2) {
-      marks.push((place(i), i));
-    }
-  }
+  let mut marks: Vec<(usize, usize)> =
+    (first..=last).rev().step_by(every).map(|i| (place(i), i)).collect();
   marks.sort();
   for (x, i) in marks {
     let style = if i == sel { Style::new().fg(Color::Cyan) } else { DIM };
@@ -652,36 +664,27 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
 }
 
 /// The legend for `ranked` models (their rank, their key) out of `present` ones in `room` cells:
-/// as many as it can name, the names cut to fit when they must; `other` when any is left out.
-/// Returns the models that get their color and the legend.
+/// as many as it can name in full, `other` after them when any is left out. Returns the models
+/// that get their color and the legend; none when not even one fits.
 fn legend<'a>(
   ranked: &[(usize, &'a str)],
   present: usize,
   room: usize,
 ) -> (Vec<(usize, &'a str)>, Line<'static>) {
-  for count in (0..=ranked.len()).rev() {
+  for count in (1..=ranked.len()).rev() {
     let shown = &ranked[..count];
     let other = present > count;
-    // Each item is `■ name` and two spaces; the names as long as the room allows.
-    let items = count + usize::from(other);
-    let fixed = items * 4 + if other { 5 } else { 0 };
-    let longest = shown.iter().map(|x| short(x.1).chars().count()).max().unwrap_or(0);
-    let fits = |cap: usize| {
-      fixed + shown.iter().map(|x| short(x.1).chars().count().min(cap)).sum::<usize>() <= room + 2
-    };
-    let cap = match fits(longest) {
-      true => longest,
-      false => (4..longest).rev().find(|c| fits(*c)).unwrap_or(0),
-    };
-    if count > 0 && cap < 4 {
+    // `■ name` and two spaces each, the last without them.
+    let names: usize = shown.iter().map(|x| short(x.1).chars().count() + 4).sum();
+    if names + if other { 7 } else { 0 } > room + 2 {
       continue;
     }
     let mut spans = vec![];
     for (i, key) in shown {
       spans.push(Text::styled("■ ", Style::new().fg(MODELS[*i])));
-      spans.push(Text::styled(format!("{}  ", cut(short(key), cap)), TEXT));
+      spans.push(Text::styled(format!("{}  ", short(key)), TEXT));
     }
-    if other && fixed <= room + 2 {
+    if other {
       spans.extend([Text::styled("■ ", Style::new().fg(OTHER)), Text::styled("other", TEXT)]);
     }
     let mut line = Line::from(spans);

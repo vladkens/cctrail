@@ -1116,7 +1116,8 @@ mod tests {
     // The top half: a choice of what the bars show, the largest value, the legend.
     assert!(line(&buf, 1).starts_with("  Time Tokens Cost  by day"), "{out}");
     assert_eq!((fg(&buf, 1, "Time"), fg(&buf, 1, "Tokens")), (Color::Cyan, Color::DarkGray));
-    for model in ["claude-sonnet-5", "claude-unknown-1", "gpt-5.4"] {
+    // The legend without the `claude-` of the names.
+    for model in ["sonnet-5", "unknown-1", "gpt-5.4"] {
       assert!(line(&buf, 1).contains(&format!("■ {model}")), "{out}");
     }
     let max = app.list.iter().filter_map(|x| x.active).max().unwrap();
@@ -1248,21 +1249,26 @@ mod tests {
     let mut app = many();
     press(&mut app, KeyCode::Char('3'));
     let buf = frame(&app);
-    let models = ["gpt-5.4", "claude-sonnet-5", "claude-unknown-1"];
+    let models = ["gpt-5.4", "sonnet-5", "unknown-1"];
     let colors: Vec<Color> = models.map(|m| square(&buf, m)).to_vec();
-    // The same colors whatever the bars show and whatever the period (a model without a price
-    // has no cost to show).
-    for key in ['s', 's', 'T', 't', 't'] {
+    // The same colors whatever the bars show, the period and the provider (a model without a
+    // price has no cost to show).
+    for key in ['s', 's', 'T', 't', 't', 'p', 'p'] {
       press(&mut app, KeyCode::Char(key));
       let buf = frame(&app);
       for (model, color) in models.iter().zip(&colors) {
-        if line(&buf, 1).contains(&format!("■ {model}")) {
-          assert_eq!(square(&buf, model), *color, "{}", screen_of(&buf));
+        if line(&buf, 1).contains(&format!("■ {model} ")) || line(&buf, 1).ends_with(model) {
+          assert_eq!(square(&buf, model), *color, "{key}: {}", screen_of(&buf));
         }
       }
     }
-    // Narrow, the names are cut or fold into `other`, and every color in the bars is named.
-    for width in [60, 80] {
+    press(&mut app, KeyCode::Char('p'));
+    press(&mut app, KeyCode::Char('T'));
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!((app.span, app.prov, app.bars), (Span::All, None, Col::Time));
+    // Narrow, the line gives up words for the legend, which names models in full (fewer, the
+    // rest in `other`) and every color in the bars; never `other` alone.
+    for width in [44, 52, 60, 80] {
       let buf = frame_of(&app, width, 30);
       let named: std::collections::HashSet<Color> =
         (1..width - 1).filter(|x| buf[(*x, 1)].symbol() == "■").map(|x| buf[(x, 1)].fg).collect();
@@ -1272,6 +1278,10 @@ mod tests {
         .map(|p| buf[p].fg)
         .collect();
       assert!(drawn.is_subset(&named), "{width}: {}", screen_of(&buf));
+      let legend = line(&buf, 1);
+      let squares = legend.matches('■').count();
+      assert!(squares != 1 || !legend.contains("■ other"), "{width}: {legend}");
+      assert!(width < 60 || squares >= 2, "{width}: {legend}");
     }
   }
 
@@ -1330,5 +1340,9 @@ mod tests {
     let dates = line(&buf, axis + 1);
     let at: Vec<usize> = dates.match_indices('-').map(|x| dates[..x.0].chars().count()).collect();
     assert!(at.len() > 3 && at.windows(3).all(|w| w[1] - w[0] == w[2] - w[1]), "{dates}");
+    // Off the grid, the selected day adds no label: the grid stays.
+    press(&mut app, KeyCode::Down);
+    let buf = frame_of(&app, 140, 30);
+    assert_eq!(line(&buf, axis + 1), dates);
   }
 }

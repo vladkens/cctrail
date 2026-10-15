@@ -85,8 +85,8 @@ pub struct Data {
   times: RefCell<Kept<Times>>,
   /// `bucket_models` of the last span and provider asked for.
   buckets: RefCell<Kept<Buckets>>,
-  /// `model_rank` of the last provider asked for.
-  rank: RefCell<Option<(Option<Provider>, Vec<String>)>>,
+  /// `model_rank`, once worked out.
+  rank: RefCell<Option<Vec<String>>>,
 }
 
 impl Data {
@@ -322,21 +322,21 @@ impl Data {
     rows
   }
 
-  /// The models by their tokens over all of the history, most first: an order that doesn't change
-  /// with the period or what is shown, for their colors.
-  pub fn model_rank(&self, prov: Option<Provider>) -> std::cell::Ref<'_, Vec<String>> {
-    if self.rank.borrow().as_ref().is_none_or(|x| x.0 != prov) {
+  /// The models by their tokens over all of the history and both providers, most first: an order
+  /// that doesn't change with the period, the provider or what is shown, for their colors.
+  pub fn model_rank(&self) -> std::cell::Ref<'_, Vec<String>> {
+    if self.rank.borrow().is_none() {
       let mut tokens: HashMap<String, u64> = HashMap::new();
-      for (si, ei) in self.events(prov) {
+      for (si, ei) in self.events(None) {
         let (s, e) = (&self.sessions[si], &self.sessions[si].events[ei]);
         let t = tokens.entry(model_key(s.provider, model(e))).or_default();
         *t = t.saturating_add(e.usage.unwrap_or_default().total());
       }
       let mut rank: Vec<(String, u64)> = tokens.into_iter().collect();
       rank.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-      *self.rank.borrow_mut() = Some((prov, rank.into_iter().map(|x| x.0).collect()));
+      *self.rank.borrow_mut() = Some(rank.into_iter().map(|x| x.0).collect());
     }
-    std::cell::Ref::map(self.rank.borrow(), |x| &x.as_ref().unwrap().1)
+    std::cell::Ref::map(self.rank.borrow(), |x| x.as_ref().unwrap())
   }
 
   /// Each timeline bucket's models with their time, tokens and cost; the time as in `times`, each
