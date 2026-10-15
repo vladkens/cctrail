@@ -165,6 +165,8 @@ pub struct App {
   pub typing: bool,
   /// The rows of the current tab, sorted and filtered, and the period's total.
   pub list: Vec<Row>,
+  /// How many rows the tab has before the filter.
+  pub all: usize,
   pub total: Row,
   /// Tokens on models without a price in the period: their cost counts as 0.
   pub unpriced: Vec<(String, u64)>,
@@ -191,6 +193,7 @@ impl App {
       filter: String::new(),
       typing: false,
       list: vec![],
+      all: 0,
       total: Row::default(),
       unpriced: vec![],
       hits: RefCell::default(),
@@ -227,6 +230,7 @@ impl App {
       Tab::Timeline => self.data.timeline(self.span, self.prov, None),
     };
     sort(&mut list, self.sorts[self.tab as usize]);
+    self.all = list.len();
     let needle = self.filter.to_lowercase();
     list.retain(|x| x.label.to_lowercase().contains(&needle));
     // With a filter, the total is of the rows shown.
@@ -678,16 +682,16 @@ mod tests {
     buf[(col(buf, y, text), y)].fg
   }
 
-  /// The first line inside the box with `text`.
+  /// The first line inside the list (or chart) box with `text`.
   fn find(buf: &Buffer, text: &str) -> u16 {
-    (1..buf.area.height - 1)
+    (4..buf.area.height - 1)
       .find(|y| line(buf, *y).contains(text))
       .unwrap_or_else(|| panic!("{text:?} in {}", screen_of(buf)))
   }
 
   /// The cells of a table line: runs split by two or more spaces.
   fn cells(line: &str) -> Vec<String> {
-    let line = line.trim_start_matches('▶');
+    let line = line.trim_start().trim_start_matches('▶');
     line.split("  ").map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect()
   }
 
@@ -713,17 +717,29 @@ mod tests {
     assert_eq!(app.span, Span::All);
     let buf = frame(&app);
     let out = screen_of(&buf);
-    // One rounded box: the choices and the version on the top border, the totals not there but
-    // as the last `total` row, the keys on the bottom border.
+    // Boxes as macmon's: the header with the views and the version on its border, the periods
+    // and the provider inside; the list's box with its name, the filter, `sort` and `→ open` on
+    // its top border, the keys on its bottom one; the totals as the last `total` row.
     let (top, bottom) = (raw(&buf, 0), raw(&buf, 29));
-    assert!(top.starts_with("╭─ ") && top.ends_with("─╮"), "{top}");
+    assert!(
+      top.starts_with("╭─ Projects 1  Models 2  Timeline 3 ") && top.ends_with("─╮"),
+      "{top}"
+    );
     assert!(top.contains(concat!(" cctrail v", env!("CARGO_PKG_VERSION"), " ")), "{top}");
-    assert!(!top.contains('$'), "{top}");
-    assert!(bottom.starts_with("╰─") && bottom.contains("? | quit | → open | sort"), "{bottom}");
+    assert!(!raw(&buf, 1).contains('$') && !top.contains('$'), "{out}");
+    let title = raw(&buf, 3);
+    assert!(title.starts_with("╭─ projects 1 ─ / filter ─ sort ─"), "{title}");
+    assert!(title.ends_with(" → open ─╮"), "{title}");
+    assert!(
+      bottom.starts_with("╰─") && bottom.contains("? help | quit | t period | provider"),
+      "{bottom}"
+    );
+    // The filter once, on the list's title.
+    assert_eq!(out.matches("filter").count(), 1, "{out}");
     let sel = find(&buf, "▶");
     let total = find(&buf, "total");
     assert_eq!(total, sel + app.list.len() as u16, "{out}");
-    assert!(buf[(3, total)].modifier.contains(Modifier::BOLD));
+    assert!(buf[(4, total)].modifier.contains(Modifier::BOLD));
     // No bars, percentages only; numbers right-aligned up to an equal right gutter.
     assert!(!out.contains('█') && out.contains('%'), "{out}");
     for y in [sel - 1, sel, total] {
@@ -746,12 +762,13 @@ mod tests {
     assert!(buf[(col(&buf, sel - 1, "Tokens"), sel - 1)].modifier.contains(Modifier::BOLD));
     // The picked tab and period: bold cyan, the others gray, no filled block; the border gray.
     assert!((0..buf.area.width).all(|x| !buf[(x, 0)].modifier.contains(Modifier::REVERSED)));
-    assert_eq!(fg(&buf, 0, "All"), Color::Cyan);
-    assert_eq!(fg(&buf, 0, "Week"), Color::DarkGray);
-    assert_eq!(fg(&buf, 0, "claude+codex"), Color::Reset);
+    assert_eq!(fg(&buf, 1, "All"), Color::Cyan);
+    assert_eq!(fg(&buf, 1, "Week"), Color::DarkGray);
+    assert_eq!(fg(&buf, 1, "claude+codex"), Color::Reset);
     assert_eq!(fg(&buf, 0, "cctrail v"), Color::Reset);
-    assert_eq!(fg(&buf, 0, "1 Projects"), Color::Cyan);
-    assert_eq!(fg(&buf, 0, "2 Models"), Color::DarkGray);
+    assert_eq!(fg(&buf, 0, "Projects"), Color::Cyan);
+    assert_eq!(fg(&buf, 0, "Models"), Color::DarkGray);
+    assert_eq!(fg(&buf, 0, "2"), Color::Cyan);
     assert_eq!((fg(&buf, 0, "╭"), fg(&buf, 29, "╰")), (Color::DarkGray, Color::DarkGray));
     // Hints as macmon's: the key in cyan, in its word where it is one, the rest faint.
     assert_eq!(fg(&buf, 29, "quit"), Color::Cyan);
@@ -764,7 +781,7 @@ mod tests {
     press(&mut app, KeyCode::Enter);
     let buf = frame(&app);
     let out = screen_of(&buf);
-    assert!(raw(&buf, 0).contains(" Projects › oss/demo "), "{out}");
+    assert!(raw(&buf, 3).contains(" oss/demo › models 4 ─ sort "), "{out}");
     assert!(raw(&buf, 29).contains(" paths "), "{out}");
     assert!(!out.contains('█'), "{out}");
     let d = app.open.as_ref().unwrap();
@@ -783,7 +800,7 @@ mod tests {
     press(&mut app, KeyCode::Char('?'));
     let buf = frame(&app);
     let out = screen_of(&buf);
-    assert!(out.matches('╭').count() == 2 && out.contains(" help "), "{out}");
+    assert!(out.matches('╭').count() == 3 && out.contains(" help "), "{out}");
     assert!(!raw(&buf, 29).contains("quit"), "{out}");
     assert_eq!(out.matches(" q ").count(), 1, "{out}");
   }
@@ -885,14 +902,14 @@ mod tests {
       (0..buf.area.height).map(|y| buf[(buf.area.width - 1, y)].symbol().to_string()).collect()
     };
     assert!(!bar(&frame_of(&app, 80, 24)).contains('┃'));
-    let buf = frame_of(&app, 80, 8);
+    let buf = frame_of(&app, 80, 11);
     let edge = bar(&buf);
     assert!(edge.contains("↑┃") && edge.contains('↓'), "{}", screen_of(&buf));
     wheel(&mut app, MouseEventKind::ScrollDown);
     assert_eq!(app.sel(), 3);
-    let buf = frame_of(&app, 80, 8);
+    let buf = frame_of(&app, 80, 11);
     assert_eq!(app.hits.borrow().offset, 1);
-    assert!(line(&buf, 4).starts_with('▶'), "{}", screen_of(&buf));
+    assert!(line(&buf, 7).trim_start().starts_with('▶'), "{}", screen_of(&buf));
     wheel(&mut app, MouseEventKind::ScrollDown);
     wheel(&mut app, MouseEventKind::ScrollDown);
     assert_eq!(app.sel(), 0);
@@ -913,16 +930,16 @@ mod tests {
   fn clicks_the_borders_choices_headers_and_rows() {
     let mut app = app();
     let buf = frame(&app);
-    click(&mut app, col(&buf, 0, "Week"), 0);
+    click(&mut app, col(&buf, 1, "Week"), 1);
     assert_eq!(app.span, Span::Week);
-    click(&mut app, col(&buf, 0, "All"), 0);
-    click(&mut app, col(&buf, 0, "claude+codex"), 0);
+    click(&mut app, col(&buf, 1, "All"), 1);
+    click(&mut app, col(&buf, 1, "claude+codex"), 1);
     assert_eq!(app.prov, Some(Provider::Claude));
     let buf = frame(&app);
-    click(&mut app, col(&buf, 0, "claude") + 1, 0);
-    click(&mut app, col(&buf, 0, "claude") + 1, 0);
+    click(&mut app, col(&buf, 1, "claude") + 1, 1);
+    click(&mut app, col(&buf, 1, "claude") + 1, 1);
     assert_eq!(app.prov, None);
-    click(&mut app, col(&buf, 0, "2 Models"), 0);
+    click(&mut app, col(&buf, 0, "Models 2"), 0);
     assert_eq!(app.tab, Tab::Models);
     // A header sorts by its column, most first; again reverses; Share follows the sort.
     let buf = frame(&app);
@@ -944,7 +961,7 @@ mod tests {
     click(&mut app, 4, head + 2);
     assert!(app.open.is_some());
     let buf = frame(&app);
-    click(&mut app, col(&buf, 0, "Models ›"), 0);
+    click(&mut app, col(&buf, 3, "›"), 3);
     assert!(app.open.is_none());
   }
 
@@ -1009,7 +1026,7 @@ mod tests {
     // The selection goes through both tables.
     press(&mut app, KeyCode::End);
     assert_eq!(app.osel, 3);
-    assert!(line(&frame(&app), total - 1).starts_with('▶'));
+    assert!(line(&frame(&app), total - 1).trim_start().starts_with('▶'));
     // An effort that isn't logged reads `–`.
     press(&mut app, KeyCode::Esc);
     app.sel[1] = app.list.iter().position(|x| x.key == "claude/claude-unknown-1").unwrap();
@@ -1042,13 +1059,13 @@ mod tests {
       assert!(out.contains("/tmp/b") && !out.contains("other"), "{out}");
       let long = "w/a-project-with-a-name-too-long-for-a-narrow-terminal";
       assert_eq!(out.contains(long), width == 140, "{width}");
-      assert!(width == 140 || line(&buf, find(&buf, "w/a-project-with")).contains('…'));
-      // The top border keeps the tabs, periods and provider; the version where it fits. The
-      // bottom one the keys right and the unpriced note left, cut to fit.
+      assert!(width == 140 || line(&buf, find(&buf, "w/a-project-wi")).contains('…'));
+      // The header keeps the views, periods, provider and version; the list's bottom border the
+      // keys right and the unpriced note left, cut to fit; its title the filter.
       let (top, bottom) = (raw(&buf, 0), raw(&buf, height - 1));
-      assert!(top.contains("Timeline") && top.contains("All") && top.contains("claude+codex"));
-      assert_eq!(top.contains("cctrail v"), width > 80, "{top}");
-      assert!(bottom.contains("? | quit") && bottom.contains("/ filter"), "{bottom}");
+      assert!(top.contains("Timeline 3") && top.contains("cctrail v"), "{top}");
+      assert!(raw(&buf, 1).contains("All") && raw(&buf, 1).contains("claude+codex"));
+      assert!(bottom.contains("? help | quit") && raw(&buf, 3).contains("/ filter"), "{bottom}");
       assert!(bottom.contains(" unpriced 37.8"), "{bottom}");
       // A sort arrow fits its column and keeps the headers apart.
       click(&mut app, col(&buf, head, "Sessions"), head);
@@ -1093,9 +1110,10 @@ mod tests {
     press(&mut app, KeyCode::Enter);
     assert!(app.list.len() > 1 && app.list.len() < many().list.len());
     assert_eq!(app.total.tokens, app.list.iter().map(|x| x.tokens).sum::<u64>());
-    // The typed filter shows on the top border, before the provider.
-    let top = raw(&frame(&app), 0);
-    assert!(top.find("filter w").unwrap() < top.find("claude+codex").unwrap(), "{top}");
+    // The typed filter shows once, on the list's title with the count of its rows.
+    let buf = frame(&app);
+    assert!(raw(&buf, 3).starts_with("╭─ projects 3/5 ─ /w ─ sort "), "{}", raw(&buf, 3));
+    assert_eq!(screen_of(&buf).matches(" /w").count(), 1, "{}", screen_of(&buf));
     // A filter with no rows says so.
     press(&mut app, KeyCode::Char('/'));
     press(&mut app, KeyCode::Char('z'));
@@ -1113,26 +1131,28 @@ mod tests {
     assert_eq!(app.list[0].day.unwrap(), jiff::civil::date(2026, 1, 10));
     let buf = frame(&app);
     let out = screen_of(&buf);
-    // The top half: a choice of what the bars show, the largest value, the legend.
-    assert!(line(&buf, 1).starts_with("  Time Tokens Cost  by day"), "{out}");
-    assert_eq!((fg(&buf, 1, "Time"), fg(&buf, 1, "Tokens")), (Color::Cyan, Color::DarkGray));
-    // The legend without the `claude-` of the names.
+    // The chart's box: on its title a choice of what the bars show, the largest value, the
+    // legend without the `claude-` of the names.
+    let title = raw(&buf, 3);
+    assert!(title.starts_with("╭─ Time  Tokens  Cost ─ by day · max "), "{out}");
+    assert_eq!((fg(&buf, 3, "Time"), fg(&buf, 3, "Tokens")), (Color::Cyan, Color::DarkGray));
     for model in ["sonnet-5", "unknown-1", "gpt-5.4"] {
-      assert!(line(&buf, 1).contains(&format!("■ {model}")), "{out}");
+      assert!(title.contains(&format!("■ {model}")), "{out}");
     }
     let max = app.list.iter().filter_map(|x| x.active).max().unwrap();
-    let largest = format!("by day · max {}", crate::output::duration(max));
-    assert!(line(&buf, 1).contains(&largest), "{out}");
-    // The bottom half: a divider, then the days as a table with its total.
-    let divider = (1..29).find(|y| raw(&buf, *y).starts_with('├')).unwrap();
-    assert_eq!(divider, 15, "{out}");
+    assert!(title.contains(&format!("max {}", crate::output::duration(max))), "{out}");
+    // The days' box under it: its name, count and `sort` on its title, a table with its total.
+    let list =
+      (4..29).find(|y| raw(&buf, *y).starts_with("╭─ days 30 ─ / filter ─ sort ")).unwrap();
+    assert_eq!(list, 16, "{out}");
+    let divider = list;
     let head = cells(&line(&buf, divider + 1));
     assert_eq!(head, ["Day ↓", "Time", "Tokens", "Cost", "Sessions", "Share"], "{out}");
     let newest = cells(&line(&buf, divider + 2));
     assert_eq!(newest, ["2026-01-10 Sa", "–", "–", "–", "–", "–"], "{out}");
-    assert!(line(&buf, 28).starts_with("  total"), "{out}");
+    assert!(line(&buf, 28).trim_start().starts_with("total"), "{out}");
     // One bar per busy day, all as wide, one cell apart, stacked in the models' colors.
-    let axis = (2..divider).find(|y| line(&buf, *y).contains('━')).unwrap();
+    let axis = (4..divider).find(|y| line(&buf, *y).contains('━')).unwrap();
     let bars = line(&buf, axis - 1);
     let blocks = |t: &str| !t.is_empty() && t.chars().all(|c| "▁▂▃▄▅▆▇█".contains(c));
     let busy = app.list.iter().filter(|x| x.tokens > 0).count();
@@ -1142,7 +1162,7 @@ mod tests {
     let from = bars.find(|c| "▁▂▃▄▅▆▇█".contains(c)).unwrap();
     let to = bars.rfind(|c| "▁▂▃▄▅▆▇█".contains(c)).unwrap();
     assert!(!bars[from..to].contains("  "), "{out}");
-    let cells_of = (2..axis).flat_map(|y| (1..99).map(move |x| (x, y)));
+    let cells_of = (4..axis).flat_map(|y| (1..99).map(move |x| (x, y)));
     let colors: std::collections::HashSet<Color> =
       cells_of.filter(|p| "▁▂▃▄▅▆▇█".contains(buf[*p].symbol())).map(|p| buf[p].fg).collect();
     assert!(colors.len() >= 2 && colors.iter().all(|c| matches!(c, Color::Indexed(_))), "{out}");
@@ -1163,8 +1183,8 @@ mod tests {
     press(&mut app, KeyCode::Char('s'));
     assert_eq!(app.bars, Col::Cost);
     let buf = frame(&app);
-    assert_eq!(fg(&buf, 1, "Cost"), Color::Cyan);
-    click(&mut app, col(&buf, 1, "Tokens"), 1);
+    assert_eq!(fg(&buf, 3, "Cost"), Color::Cyan);
+    click(&mut app, col(&buf, 3, "Tokens"), 3);
     assert_eq!(app.bars, Col::Tokens);
     // A header sorts the days; the chart keeps them in order and the selection follows.
     let key = app.list[app.sel()].key.clone();
@@ -1195,7 +1215,7 @@ mod tests {
     press(&mut app, KeyCode::Char('t'));
     assert_eq!(app.span, Span::All);
     assert_eq!(app.list[app.sel()].day, app.list.iter().filter_map(|x| x.day).max());
-    assert!(line(&frame(&app), 1).contains("by week"));
+    assert!(line(&frame(&app), 3).contains("by week"));
 
     let mut app = App::new(data::tests::data());
     press(&mut app, KeyCode::Char('t'));
@@ -1213,8 +1233,8 @@ mod tests {
     assert!(screen_of(&frame_of(&app, 80, 7)).contains("too small"));
     assert!(!screen_of(&frame_of(&app, 80, 8)).contains("too small"));
     press(&mut app, KeyCode::Char('3'));
-    assert!(screen_of(&frame_of(&app, 80, 13)).contains("too small"));
-    assert!(!screen_of(&frame_of(&app, 80, 14)).contains("too small"));
+    assert!(screen_of(&frame_of(&app, 80, 16)).contains("too small"));
+    assert!(!screen_of(&frame_of(&app, 80, 17)).contains("too small"));
   }
 
   #[test]
@@ -1239,9 +1259,9 @@ mod tests {
     assert_eq!(app.sel(), 4);
   }
 
-  /// The color of the legend's square for `model` on line 1.
+  /// The color of the legend's square for `model` on the chart's title.
   fn square(buf: &Buffer, model: &str) -> Color {
-    fg(buf, 1, &format!("■ {model}"))
+    fg(buf, 3, &format!("■ {model}"))
   }
 
   #[test]
@@ -1257,7 +1277,7 @@ mod tests {
       press(&mut app, KeyCode::Char(key));
       let buf = frame(&app);
       for (model, color) in models.iter().zip(&colors) {
-        if line(&buf, 1).contains(&format!("■ {model} ")) || line(&buf, 1).ends_with(model) {
+        if raw(&buf, 3).contains(&format!("■ {model} ")) || raw(&buf, 3).ends_with(model) {
           assert_eq!(square(&buf, model), *color, "{key}: {}", screen_of(&buf));
         }
       }
@@ -1271,14 +1291,14 @@ mod tests {
     for width in [44, 52, 60, 80] {
       let buf = frame_of(&app, width, 30);
       let named: std::collections::HashSet<Color> =
-        (1..width - 1).filter(|x| buf[(*x, 1)].symbol() == "■").map(|x| buf[(x, 1)].fg).collect();
-      let drawn: std::collections::HashSet<Color> = (2..14)
+        (1..width - 1).filter(|x| buf[(*x, 3)].symbol() == "■").map(|x| buf[(x, 3)].fg).collect();
+      let drawn: std::collections::HashSet<Color> = (4..16)
         .flat_map(|y| (1..width - 1).map(move |x| (x, y)))
         .filter(|p| "▁▂▃▄▅▆▇█".contains(buf[*p].symbol()) && buf[*p].fg != Color::Reset)
         .map(|p| buf[p].fg)
         .collect();
       assert!(drawn.is_subset(&named), "{width}: {}", screen_of(&buf));
-      let legend = line(&buf, 1);
+      let legend = raw(&buf, 3);
       let squares = legend.matches('■').count();
       assert!(squares != 1 || !legend.contains("■ other"), "{width}: {legend}");
       assert!(width < 60 || squares >= 2, "{width}: {legend}");

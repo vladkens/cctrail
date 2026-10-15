@@ -1,10 +1,10 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
-//! The app in one box (see `boxes`). Colors from the terminal's own palette, the same for an
-//! entity on every screen: names and counts in the default foreground, time yellow, cost green;
-//! the picked period, tab and choice cyan; dark gray only for borders, headers, separators, hints
-//! and the other choices. The selected row is one even subtle bar across its width. Tables keep an
-//! equal gutter left (the `▶` column) and right.
+//! The app in boxes as macmon's (see `boxes`): the header, then the list or the chart over it.
+//! Colors from the terminal's own palette, the same for an entity on every screen: names and counts
+//! in the default foreground, time yellow, cost green; the picked period, tab and choice cyan; dark
+//! gray only for borders, headers, separators, hints and the other choices. The selected row is one
+//! even subtle bar across its width. Tables keep an equal gutter left (the `▶` column) and right.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -31,8 +31,11 @@ const NONE: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::DIM);
 /// The selected row: a background only, so every cell keeps its own text color.
 const SELECTED: Style = Style::new().bg(Color::Indexed(236));
 const VERSION: &str = concat!("cctrail v", env!("CARGO_PKG_VERSION"));
-/// The `▶ ` column on the left, matched by as much room on the right.
+/// The room on the right of a table and around the chart.
 const GUTTER: u16 = 2;
+/// The selected row's mark, a blank cell from the box's left border.
+const MARKER: &str = " ▶ ";
+const MARKER_WIDTH: u16 = 3;
 /// Fewest cells for the names before columns give way.
 const NAME_MIN: usize = 12;
 /// Room for a sort arrow (` ↓`) after a header; a column fits its header, the mark and a space.
@@ -146,15 +149,15 @@ pub fn draw(f: &mut Frame, app: &App) {
     too_small(f, area, &mut hits);
     return *app.hits.borrow_mut() = hits;
   }
-  // The app in one box, as macmon's: its choices on the top border, a note and the keys on the
-  // bottom one.
-  let (inner, clicks) = boxes::draw_box(f, area, titles(app, area.width));
-  hits.clicks = clicks;
-  boxes::render_bottom_border(f, area, hints(app), note(app));
+  // Boxes as macmon's: the header with the views, periods and provider, then the list (or the
+  // chart over the list) with its own title and the keys on its bottom border.
+  let [head, body] = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas::<2>(area);
+  header(f, app, head, &mut hits);
   match &app.open {
-    Some(_) => detail(f, app, inner, &mut hits),
-    None if app.tab == Tab::Timeline => timeline(f, app, area, inner, &mut hits),
+    Some(_) => detail(f, app, body, &mut hits),
+    None if app.tab == Tab::Timeline => timeline(f, app, body, &mut hits),
     None => {
+      let inner = list_box(f, app, body, &mut hits);
       let sessions = app.tab == Tab::Projects;
       let name = if app.tab == Tab::Models { "Model" } else { "Project" };
       let rows = (name, &app.list[..], 0);
@@ -177,95 +180,125 @@ fn choices<T: Copy + PartialEq>(
   let mut title = Title::default();
   for (i, (x, label)) in items.into_iter().enumerate() {
     if i > 0 {
-      title = title.push(Text::raw(" "), None);
+      title = title.push(Text::raw("  "), None);
     }
     title = title.push(Text::styled(label, if x == picked { KEY } else { DIM }), Some(click(x)));
   }
   title
 }
 
-/// The top border: the view (the tabs, or where a drill-down is), the periods, the provider and
-/// the filter left, the version right; what doesn't fit goes, the version first, then the filter
-/// hint and the keys of the tabs.
-fn titles(app: &App, width: u16) -> Titles {
-  let tabs = |keys: bool| {
-    let names = [(Tab::Projects, "Projects"), (Tab::Models, "Models"), (Tab::Timeline, "Timeline")];
-    let items = names.into_iter().enumerate();
-    let label = |i: usize, name: &str| if keys { format!("{} {name}", i + 1) } else { name.into() };
-    choices(items.map(|(i, (t, name))| (t, label(i, name))), app.tab, Click::Tab)
-  };
-  let view = |keys: bool| match &app.open {
-    // Where a drill-down is: its tab, a click on which goes back, and the opened row.
-    Some(d) => {
-      let name = ["Projects", "Models", "Timeline"][app.tab as usize];
-      Title::default()
-        .push(Text::styled(name, DIM), Some(Click::Tab(app.tab)))
-        .push(dim(" › "), None)
-        .push(Text::styled(d.row.label.clone(), TEXT.add_modifier(Modifier::BOLD)), None)
+/// The header box: the views and their keys on its top border, the version right of them (the
+/// first to go when narrow); inside, the periods left and the provider right. All clickable.
+fn header(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
+  let mut tabs = Title::default();
+  for (i, (tab, name)) in
+    [(Tab::Projects, "Projects"), (Tab::Models, "Models"), (Tab::Timeline, "Timeline")]
+      .into_iter()
+      .enumerate()
+  {
+    if i > 0 {
+      tabs = tabs.push(Text::raw("  "), None);
     }
-    None => tabs(keys),
-  };
+    let style = if tab == app.tab { KEY } else { DIM };
+    tabs = tabs.push(Text::styled(name, style), Some(Click::Tab(tab)));
+    tabs = tabs.push(Text::raw(" "), Some(Click::Tab(tab)));
+    tabs = tabs.push(boxes::key((i + 1).to_string()), Some(Click::Tab(tab)));
+  }
+  let version = Title::new([Text::styled(VERSION, TEXT)]);
+  let titles = Titles { left: vec![tabs], right: Some(version) };
+  let (inner, clicks) = boxes::draw_box(f, area, titles);
+  hits.clicks.extend(clicks);
+  // The periods and the provider, a blank cell from the borders.
+  let line = Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner };
   let periods = choices(Span::ALL.map(|x| (x, x.label().to_string())), app.span, Click::Period);
-  let provider = Title::default()
-    .push(Text::styled(app.prov.map_or("claude+codex", |x| x.name()), TEXT), Some(Click::Provider));
-  let filter = match (app.typing, app.filter.is_empty()) {
-    (false, true) => Title::new(boxes::hint("/", "filter")),
-    (typing, _) => {
-      let caret = if typing { "▏" } else { "" };
-      Title::new([dim("filter "), Text::styled(format!("{}{caret}", app.filter), TEXT)])
+  let mut x = line.x;
+  let mut spans = vec![];
+  for (span, click) in periods.0 {
+    let w = span.width() as u16;
+    if let Some(click) = click.filter(|_| x + w <= line.right()) {
+      hits.clicks.push((Rect::new(x, line.y, w, 1), click));
     }
-  };
-  let version = Some(Title::new([Text::styled(VERSION, TEXT)]));
-  let set = |keys: bool, hint: bool, right: bool| {
-    let mut left = vec![view(keys), periods.clone()];
-    // A filter in use stays before the provider; the hint for one comes last.
-    let typed = !app.filter.is_empty() || app.typing;
-    match (hint, typed) {
-      (true, true) => left.extend([filter.clone(), provider.clone()]),
-      (true, false) => left.extend([provider.clone(), filter.clone()]),
-      (false, _) => left.push(provider.clone()),
-    }
-    Titles { left, right: if right { version.clone() } else { None } }
-  };
-  let typed = !app.filter.is_empty() || app.typing;
-  boxes::fit_titles(
-    width,
-    vec![
-      set(true, true, true),
-      set(true, typed, true),
-      set(false, typed, true),
-      set(false, typed, false),
-    ],
-  )
+    x += w;
+    spans.push(span);
+  }
+  f.render_widget(Line::from(spans), line);
+  let provider = app.prov.map_or("claude+codex", |x| x.name());
+  let w = provider.len() as u16;
+  if x + 2 + w <= line.right() {
+    let at = Rect::new(line.right() - w, line.y, w, 1);
+    hits.clicks.push((at, Click::Provider));
+    f.render_widget(Text::styled(provider, TEXT), at);
+  }
 }
 
-/// The key hints on the bottom border, those to keep longest first.
+/// The list's own name with its rows' count (`3/42` with a filter), the filter as macmon's (`/
+/// filter`, or what is typed), `sort`; the row action on the right. In a drill-down, the path,
+/// a click on which goes back.
+fn list_titles(app: &App, width: u16, name: &str) -> Titles {
+  let heading = |x: &str| Text::styled(x.to_string(), TEXT.add_modifier(Modifier::BOLD));
+  let sort = Title::new(boxes::hint("s", "sort"));
+  if let Some(d) = &app.open {
+    let path = Title::default()
+      .push(Text::styled(d.row.label.clone(), TEXT), Some(Click::Tab(app.tab)))
+      .push(dim(" › "), Some(Click::Tab(app.tab)))
+      .push(heading(name), None)
+      .push(Text::styled(format!(" {}", d.rows().len()), TEXT), None);
+    return Titles { left: vec![path, sort], right: None };
+  }
+  let shown = app.list.len();
+  let count = match app.filter.is_empty() && !app.typing {
+    true => format!(" {}", app.all),
+    false => format!(" {shown:>w$}/{}", app.all, w = app.all.to_string().len()),
+  };
+  let title = Title::new([heading(name), Text::styled(count, TEXT)]);
+  let filter = match app.filter.is_empty() && !app.typing {
+    true => Title::new(boxes::hint("/", "filter")),
+    false => {
+      let room = width.saturating_sub(title.width() + 10) as usize;
+      let text = app.filter.chars().rev().take(room.max(4)).collect::<Vec<_>>();
+      let text: String = text.into_iter().rev().collect();
+      let mut spans = vec![heading("/"), Text::styled(text, TEXT)];
+      if app.typing {
+        spans.push(Text::styled("▏", TEXT));
+      }
+      Title::new(spans)
+    }
+  };
+  let left = if app.typing { vec![title, filter] } else { vec![title, filter, sort] };
+  let open = (!app.typing && !app.list.is_empty()).then(|| Title::new(boxes::hint("→", "open")));
+  Titles { left, right: open }
+}
+
+/// Draws the list box with its titles, the keys and the note on its bottom border; returns the
+/// area inside.
+fn list_box(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) -> Rect {
+  let name = match app.tab {
+    Tab::Projects => "projects",
+    Tab::Models => "models",
+    Tab::Timeline if app.span.gran() == crate::metrics::Granularity::Week => "weeks",
+    Tab::Timeline => "days",
+  };
+  boxed(f, app, area, list_titles(app, area.width, name), hits)
+}
+
+/// A list box with `titles`: draws it, its keys and note, and returns the table's area.
+fn boxed(f: &mut Frame, app: &App, area: Rect, titles: Titles, hits: &mut Hits) -> Rect {
+  let (inner, clicks) = boxes::draw_box(f, area, titles);
+  hits.clicks.extend(clicks);
+  boxes::render_bottom_border(f, area, hints(app), note(app));
+  inner
+}
+
+/// The keys on the list's bottom border, those to keep longest first: the global ones only, the
+/// filter and the row's keys are on its title.
 fn hints(app: &App) -> Vec<Vec<Text<'static>>> {
   use boxes::hint;
   match () {
     _ if app.typing => vec![hint("Enter", "keep"), hint("Esc", "clear")],
     // The box itself says how to close it.
     _ if app.help => vec![],
-    _ if app.open.is_some() => {
-      vec![hint("?", ""), hint("←", "back"), hint("s", "sort"), hint("t", "period")]
-    }
-    _ if app.tab == Tab::Timeline => vec![
-      hint("?", ""),
-      hint("q", "quit"),
-      hint("→", "open"),
-      hint("s", "bars"),
-      hint("t", "period"),
-      hint("p", "provider"),
-    ],
-    _ => vec![
-      hint("?", ""),
-      hint("q", "quit"),
-      hint("→", "open"),
-      hint("s", "sort"),
-      hint("t", "period"),
-      hint("p", "provider"),
-      hint("/", "filter"),
-    ],
+    _ if app.open.is_some() => vec![hint("?", "help"), hint("←", "back"), hint("t", "period")],
+    _ => vec![hint("?", "help"), hint("q", "quit"), hint("t", "period"), hint("p", "provider")],
   }
 }
 
@@ -345,7 +378,7 @@ fn grid(
   let t = Table::new(lines, widths.clone())
     .header(TableRow::new(head))
     .row_highlight_style(SELECTED)
-    .highlight_symbol("▶ ")
+    .highlight_symbol(MARKER)
     .highlight_spacing(HighlightSpacing::Always);
   let offset = kept.min(n.saturating_sub(usize::from(height.saturating_sub(1))));
   let mut state = TableState::default().with_offset(offset).with_selected(sel);
@@ -358,18 +391,18 @@ fn grid(
   if foot.height > 0 {
     // Unselected, but with the same `▶ ` column, so its cells line up with the rows'.
     let t = Table::new([total.style(BOLD)], widths)
-      .highlight_symbol("▶ ")
+      .highlight_symbol(MARKER)
       .highlight_spacing(HighlightSpacing::Always);
     f.render_widget(t, foot);
   }
   height + foot.height
 }
 
-/// The column rectangles of a table in `area`, after the `▶ ` column.
+/// The column rectangles of a table in `area`, after the ` ▶ ` column.
 fn layout(widths: &[Constraint], area: Rect) -> std::rc::Rc<[Rect]> {
   Layout::horizontal(widths.to_vec()).spacing(1).split(Rect {
-    x: area.x + GUTTER,
-    width: area.width.saturating_sub(GUTTER),
+    x: area.x + MARKER_WIDTH,
+    width: area.width.saturating_sub(MARKER_WIDTH),
     ..area
   })
 }
@@ -488,17 +521,18 @@ const OTHER: Color = Color::Indexed(245);
 
 /// The timeline: the chart over the top half, the list of its days (weeks for all of the
 /// history) under it, the chart marking the selected one.
-fn timeline(f: &mut Frame, app: &App, outer: Rect, area: Rect, hits: &mut Hits) {
-  if area.height < 12 {
+fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
+  // Room for three rows of bars over three rows of days.
+  if area.height < 14 {
     return too_small(f, area, hits);
   }
   let high = area.height / 2;
   chart(f, app, Rect { height: high, ..area }, hits);
-  boxes::draw_divider(f, outer, area.y + high, Titles::default());
-  let list = Rect { y: area.y + high + 1, height: area.height - high - 1, ..area };
+  let list = Rect { y: area.y + high, height: area.height - high, ..area };
+  let inner = list_box(f, app, list, hits);
   let week = app.span.gran() == crate::metrics::Granularity::Week;
   let rows = (if week { "Week" } else { "Day" }, &app.list[..], 0);
-  table(f, app, rows, &app.total, true, list, Some(app.sel()), hits);
+  table(f, app, rows, &app.total, true, inner, Some(app.sel()), hits);
 }
 
 /// The model's name without its provider, for the legend.
@@ -507,38 +541,34 @@ fn short(key: &str) -> &str {
   name.strip_prefix("claude-").unwrap_or(name)
 }
 
-/// Bars of what `app.bars` picks, a bar per day stacked by model, the dates under some bars; the
-/// choice of time, tokens or cost, the largest value and the legend above them.
-fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
+/// The chart box: bars of what `app.bars` picks, a bar per day stacked by model, the dates under
+/// some bars; on its top border the choice of time, tokens or cost, the largest value and the
+/// legend.
+fn chart(f: &mut Frame, app: &App, outer: Rect, hits: &mut Hits) {
   let col = app.bars;
   let week = app.span.gran() == crate::metrics::Granularity::Week;
   let mut days: Vec<(usize, &Row)> = app.list.iter().enumerate().collect();
   days.sort_by_key(|x| x.1.day);
   let max = days.iter().map(|x| col.of(x.1)).fold(0.0, f64::max);
-  // The choice: clickable, the picked one in the selection color, as the periods; then the
-  // largest value, so the bars take the whole width.
+  // The choice: clickable, the picked one in the selection color, as the periods.
   let names = [(Col::Time, "Time"), (Col::Tokens, "Tokens"), (Col::Cost, "Cost")];
-  let mut x = area.x + GUTTER;
-  let mut spans = vec![];
-  for (c, name) in names {
-    hits.clicks.push((Rect::new(x, area.y, name.len() as u16, 1), Click::Bars(c)));
-    spans.push(Text::styled(name, if c == col { KEY } else { DIM }));
-    spans.push(Text::raw(" "));
-    x += name.len() as u16 + 1;
-  }
-  let by = dim(if week { " by week" } else { " by day" });
+  let choice = choices(names.map(|(c, n)| (c, n.to_string())), col, Click::Bars);
+  let by = dim(if week { "by week" } else { "by day" });
+  let titles = |info: Vec<Text<'static>>, legend: Option<Title>| Titles {
+    left: vec![choice.clone(), Title::new(info)],
+    right: legend,
+  };
   if max == 0.0 {
-    spans.push(by);
-    f.render_widget(Line::from(spans), Rect { x: area.x + GUTTER, height: 1, ..area });
-    let rest = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
-    return f.render_widget(Paragraph::new(dim("  No activity in this period")), rest);
+    let (inner, clicks) = boxes::draw_box(f, outer, titles(vec![by], None));
+    hits.clicks.extend(clicks);
+    return f.render_widget(Paragraph::new(dim(" No activity in this period")), inner);
   }
   let top = days.iter().max_by(|a, b| col.of(a.1).total_cmp(&col.of(b.1))).unwrap().1;
   let (text, style) = value(col, top);
   let largest = Text::styled(text, style);
 
   // The models in colors: the largest by all-time tokens keep theirs on every screen; as many as
-  // the legend can name, the rest together in `other`. When narrow, the line gives up `by day`,
+  // the legend can name, the rest together in `other`. When narrow, the title gives up `by day`,
   // then the word `max`, for the legend; with no room for one model, plain bars and no legend.
   let models = app.data.bucket_models(app.span, app.prov);
   let rank = app.data.model_rank();
@@ -551,30 +581,25 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     .filter(|x| present.contains(x.1.as_str()))
     .map(|(i, k)| (i, k.as_str()))
     .collect();
-  let variants = [
+  let infos = [
     vec![by.clone(), dim(" · max "), largest.clone()],
-    vec![dim("· max "), largest.clone()],
-    vec![dim("· "), largest.clone()],
+    vec![dim("max "), largest.clone()],
+    vec![largest.clone()],
   ];
-  let fitted = variants.iter().find_map(|extra| {
-    let mut line = spans.clone();
-    line.extend(extra.iter().cloned());
-    let used = Line::from(line.clone()).width() as u16;
-    let room = usize::from(area.width.saturating_sub(GUTTER * 2 + used + 2));
-    let (colored, legend) = legend(&ranked, present.len(), room);
-    (!colored.is_empty()).then_some((line, colored, legend))
+  let fitted = infos.iter().find_map(|info| {
+    (1..=ranked.len()).rev().find_map(|count| {
+      let (colored, legend) = legend(&ranked[..count], present.len());
+      let titles = titles(info.clone(), Some(legend));
+      titles.fits(outer.width).then_some((titles, colored))
+    })
   });
-  let (line, colored, legend) = fitted.unwrap_or_else(|| {
-    spans.extend(variants[0].iter().cloned());
-    (spans, vec![], Line::default())
-  });
-  f.render_widget(Line::from(line), Rect { x: area.x + GUTTER, height: 1, ..area });
-  let w = legend.width() as u16;
-  f.render_widget(legend, Rect::new(area.right() - GUTTER - w, area.y, w, 1));
+  let (titles, colored) = fitted.unwrap_or_else(|| (titles(infos[0].clone(), None), vec![]));
+  let (area, clicks) = boxes::draw_box(f, outer, titles);
+  hits.clicks.extend(clicks);
 
-  // Below the choice: the bars, the axis, the dates.
-  let height = area.height.saturating_sub(3);
-  let bars = Rect { y: area.y + 1, height, ..area };
+  // Inside: the bars, the axis, the dates.
+  let height = area.height.saturating_sub(2);
+  let bars = Rect { height, ..area };
   let x0 = area.x + GUTTER;
   let room = usize::from(area.right().saturating_sub(GUTTER + x0));
   // Bars of one width, at most seven cells, and gaps of one width, as fill the room best, the
@@ -673,43 +698,31 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   }
 }
 
-/// The legend for `ranked` models (their rank, their key) out of `present` ones in `room` cells:
-/// as many as it can name in full, `other` after them when any is left out. Returns the models
-/// that get their color and the legend; none when not even one fits.
-fn legend<'a>(
-  ranked: &[(usize, &'a str)],
-  present: usize,
-  room: usize,
-) -> (Vec<(usize, &'a str)>, Line<'static>) {
-  for count in (1..=ranked.len()).rev() {
-    let shown = &ranked[..count];
-    let other = present > count;
-    // `■ name` and two spaces each, the last without them.
-    let names: usize = shown.iter().map(|x| short(x.1).chars().count() + 4).sum();
-    if names + if other { 7 } else { 0 } > room + 2 {
-      continue;
-    }
-    let mut spans = vec![];
-    for (i, key) in shown {
-      spans.push(Text::styled("■ ", Style::new().fg(MODELS[*i])));
-      spans.push(Text::styled(format!("{}  ", short(key)), TEXT));
-    }
-    if other {
-      spans.extend([Text::styled("■ ", Style::new().fg(OTHER)), Text::styled("other", TEXT)]);
-    }
-    let mut line = Line::from(spans);
-    if let Some(last) = line.spans.last_mut() {
-      last.content = last.content.trim_end().to_string().into();
-    }
-    return (shown.to_vec(), line);
+/// The legend for `shown` models (their rank, their key) out of `present` ones: their names in
+/// full, `other` after them when any is left out. Returns the models that get their color and the
+/// legend.
+fn legend<'a>(shown: &[(usize, &'a str)], present: usize) -> (Vec<(usize, &'a str)>, Title) {
+  let mut title = Title::default();
+  for (n, (i, key)) in shown.iter().enumerate() {
+    let gap = if n > 0 { "  " } else { "" };
+    title = title.push(Text::raw(gap), None);
+    title = title.push(Text::styled("■ ", Style::new().fg(MODELS[*i])), None);
+    title = title.push(Text::styled(short(key).to_string(), TEXT), None);
   }
-  (vec![], Line::default())
+  if present > shown.len() {
+    title = title.push(Text::styled("  ■ ", Style::new().fg(OTHER)), None);
+    title = title.push(Text::styled("other", TEXT), None);
+  }
+  (shown.to_vec(), title)
 }
 
-/// A drill-down, in place of the list: its tables one under another, a blank line between them,
-/// each with the opened row as its total; the selection counts through all of them.
+/// A drill-down, in place of the list, in its box with the path as its title: its tables one
+/// under another, a blank line between them, each with the opened row as its total; the selection
+/// counts through all of them.
 fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let d = app.open.as_ref().unwrap();
+  let name = ["models", "usage", "projects"][app.tab as usize];
+  let area = boxed(f, app, area, list_titles(app, area.width, name), hits);
   let mut y = area.y;
   let mut first = 0;
   for (name, rows) in &d.parts {

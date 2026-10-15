@@ -63,7 +63,7 @@ impl Title {
     self
   }
 
-  fn width(&self) -> u16 {
+  pub fn width(&self) -> u16 {
     width(&self.0.iter().map(|x| x.0.clone()).collect::<Vec<_>>())
   }
 }
@@ -79,7 +79,7 @@ pub struct Titles {
 
 impl Titles {
   /// Whether every title fits uncut on the top border of a box `width` cells wide.
-  fn fits(&self, width: u16) -> bool {
+  pub fn fits(&self, width: u16) -> bool {
     let left: Vec<u16> = self.left.iter().map(|x| x.width() + 2).collect();
     let right = self.right.as_ref().map(|x| x.width() + 2);
     let slots = place_titles(width, &left, right);
@@ -116,18 +116,6 @@ impl Titles {
     }
     clicks
   }
-}
-
-/// The first of `variants` (longest first) whose titles fit uncut on the top border of a box
-/// `width` cells wide; when none does, the last one, cut to fit.
-pub fn fit_titles(width: u16, variants: Vec<Titles>) -> Titles {
-  let mut variants = variants.into_iter().peekable();
-  while let Some(titles) = variants.next() {
-    if variants.peek().is_none() || titles.fits(width) {
-      return titles;
-    }
-  }
-  Titles::default()
 }
 
 /// Positions of titles on a border, as offsets from the box's left edge.
@@ -171,13 +159,6 @@ pub fn draw_box(f: &mut Frame, area: Rect, titles: Titles) -> (Rect, Vec<(Rect, 
   let inner = block.inner(area);
   f.render_widget(block, area);
   (inner, titles.render(area, area.y, f.buffer_mut()))
-}
-
-/// Draws a divider across box `area` at row `y`, `├──┤`, with `titles` on it as on the top border.
-pub fn draw_divider(f: &mut Frame, area: Rect, y: u16, titles: Titles) -> Vec<(Rect, Click)> {
-  let line = format!("├{}┤", "─".repeat(usize::from(area.width.saturating_sub(2))));
-  f.buffer_mut().set_string(area.x, y, line, BORDER);
-  titles.render(area, y, f.buffer_mut())
 }
 
 /// Draws a scrollbar over column `x`, the right border, beside `rows`, the cells of a list of

@@ -45,9 +45,9 @@ the last 30 days or all time; `t` and `T` switch the period. `→` or `enter` op
 project's models, a model's speeds and efforts, a day's projects) and `←`, `esc` or `q` goes back,
 `s` sorts by the next column and `S` reverses (on the timeline `s` switches the bars between time,
 tokens and cost), `p` switches the provider, `/` filters, `?` lists the keys. The mouse works too:
-a click selects a row or a bar and a second one opens it, a column header sorts, the choices on
-the border switch, the wheel scrolls. Any argument, `--json` or a pipe prints the text report
-instead.
+a click selects a row or a bar and a second one opens it, a column header sorts, a click on a
+view, period or provider switches it, the wheel scrolls. Any argument, `--json` or a pipe prints
+the text report instead.
 
 ## Projects
 
