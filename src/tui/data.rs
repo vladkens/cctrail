@@ -68,8 +68,10 @@ pub struct Row {
 type Times = HashMap<Part, i64>;
 /// A project, a model, whether fast, an effort (`UNKNOWN` where none is logged).
 type Part = (String, String, bool, String);
-/// `Times` with the span and provider they are for.
-type Cached = Option<((Span, Option<Provider>), Times)>;
+/// Each timeline bucket's models.
+pub type Buckets = HashMap<Date, Vec<Row>>;
+/// A value with the span and provider it is for.
+type Kept<T> = Option<((Span, Option<Provider>), T)>;
 
 /// The parsed history and what each session maps to.
 pub struct Data {
@@ -80,7 +82,9 @@ pub struct Data {
   names: Vec<(String, bool)>,
   pub today: Date,
   /// `model_times` of the last span and provider asked for.
-  times: RefCell<Cached>,
+  times: RefCell<Kept<Times>>,
+  /// `bucket_models` of the last span and provider asked for.
+  buckets: RefCell<Kept<Buckets>>,
 }
 
 impl Data {
@@ -99,7 +103,15 @@ impl Data {
           .clone()
       })
       .collect();
-    Self { sessions, events, config, names, today, times: RefCell::default() }
+    Self {
+      sessions,
+      events,
+      config,
+      names,
+      today,
+      times: RefCell::default(),
+      buckets: RefCell::default(),
+    }
   }
 
   fn events(&self, prov: Option<Provider>) -> Vec<(usize, usize)> {
@@ -279,6 +291,14 @@ impl Data {
       }
       _ => vec![],
     };
+    // Sessions per bucket: those with usage in it.
+    let mut sessions: HashMap<Date, std::collections::HashSet<(Provider, &str)>> = HashMap::new();
+    for &(si, ei) in &events {
+      if let Some(ts) = self.sessions[si].events[ei].ts.filter(|x| range.contains(*x)) {
+        let day = gran.bucket(metrics::local_date(ts));
+        sessions.entry(day).or_default().insert(self.sessions[si].root());
+      }
+    }
     for (day, x) in buckets {
       let i = match rows.iter().position(|r| r.day == Some(day)) {
         Some(i) => i,
@@ -290,9 +310,77 @@ impl Data {
       rows[i].active = Some(x.active);
       rows[i].tokens = x.usage.total();
       rows[i].cost = x.cost;
+      rows[i].sessions = Some(sessions.get(&day).map_or(0, |x| x.len()));
+    }
+    for row in rows.iter_mut().filter(|x| x.sessions.is_none()) {
+      row.sessions = Some(0);
     }
     rows.sort_by_key(|x| x.day);
     rows
+  }
+
+  /// Each timeline bucket's models with their time, tokens and cost; the time as in `times`, each
+  /// bucket's parts scaled to its time. Kept for the last span and provider.
+  pub fn bucket_models(&self, span: Span, prov: Option<Provider>) -> std::cell::Ref<'_, Buckets> {
+    let fresh = self.buckets.borrow().as_ref().is_some_and(|x| x.0 == (span, prov));
+    if !fresh {
+      *self.buckets.borrow_mut() = Some(((span, prov), self.models_by_bucket(span, prov)));
+    }
+    std::cell::Ref::map(self.buckets.borrow(), |x| &x.as_ref().unwrap().1)
+  }
+
+  fn models_by_bucket(&self, span: Span, prov: Option<Provider>) -> Buckets {
+    let range = span.range(self.today);
+    let gran = span.gran();
+    let bucket = |ts: Ts| gran.bucket(metrics::local_date(ts));
+    let mut out: HashMap<Date, HashMap<String, Row>> = HashMap::new();
+    for (si, ei) in self.events(prov) {
+      let (s, e) = (&self.sessions[si], &self.sessions[si].events[ei]);
+      let Some(ts) = e.ts.filter(|x| range.contains(*x)) else { continue };
+      let key = model_key(s.provider, model(e));
+      let row = out.entry(bucket(ts)).or_default().entry(key.clone()).or_insert_with(|| Row {
+        label: key.clone(),
+        key,
+        ..Default::default()
+      });
+      let usage = e.usage.unwrap_or_default();
+      row.tokens = row.tokens.saturating_add(usage.total());
+      row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
+    }
+    // Activity stamps to the model of the session's last response, as in `model_times`.
+    let mut stamps: HashMap<String, Vec<Ts>> = HashMap::new();
+    for s in self.sessions.iter().filter(|s| prov.is_none_or(|p| s.provider == p)) {
+      let key = |e: &Event| e.model.as_ref().map(|_| model_key(s.provider, model(e)));
+      let Some(mut last) = s.events.iter().find_map(key) else { continue };
+      for e in &s.events {
+        last = key(e).unwrap_or(last);
+        if let Some(ts) = e.ts.filter(|x| !e.failed && range.contains(*x)) {
+          stamps.entry(format!("{}\0{last}", bucket(ts))).or_default().push(ts);
+        }
+      }
+    }
+    let by: HashMap<&str, Vec<Ts>> = stamps.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+    let mut per: HashMap<Date, Vec<(String, i64)>> = HashMap::new();
+    for (k, v) in metrics::active_by_name(&by, &range) {
+      let (day, model) = k.split_once('\0').unwrap();
+      per.entry(day.parse().unwrap()).or_default().push((model.to_string(), v));
+    }
+    let totals: HashMap<Date, i64> = self
+      .timeline(span, prov, None)
+      .iter()
+      .filter_map(|x| Some((x.day?, x.active.unwrap_or(0) / MICROS)))
+      .collect();
+    for (day, parts) in per {
+      for (model, v) in scale(parts, totals.get(&day).copied().unwrap_or(0)) {
+        let row = out.entry(day).or_default().entry(model.clone()).or_insert_with(|| Row {
+          label: model.clone(),
+          key: model,
+          ..Default::default()
+        });
+        row.active = Some(v * MICROS);
+      }
+    }
+    out.into_iter().map(|(day, rows)| (day, rows.into_values().collect())).collect()
   }
 
   /// The projects of one timeline bucket.

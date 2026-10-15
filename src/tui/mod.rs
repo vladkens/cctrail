@@ -3,6 +3,7 @@
 //! The interactive view: `cctrail` without arguments on a terminal. The history is parsed once;
 //! every switch after that is in memory.
 
+mod boxes;
 mod data;
 mod draw;
 
@@ -102,12 +103,21 @@ impl Detail {
   }
 }
 
+/// What a click on a choice on a border picks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Click {
+  Period(Span),
+  Provider,
+  Tab(Tab),
+  /// What the timeline's bars show.
+  Bars(Col),
+}
+
 /// Where the last frame put what a click can hit.
 #[derive(Clone, Debug, Default)]
 pub struct Hits {
-  pub periods: Vec<(Rect, Span)>,
-  pub provider: Rect,
-  pub tabs: Vec<(Rect, Tab)>,
+  /// The choices on the borders: periods, provider, tabs, the bars' column.
+  pub clicks: Vec<(Rect, Click)>,
   /// The header rows of the tables and the sortable columns' x ranges.
   pub heads: Vec<Rect>,
   pub cols: Vec<(u16, u16, Col)>,
@@ -137,8 +147,10 @@ pub struct App {
   pub data: Data,
   pub span: Span,
   pub prov: Option<Provider>,
-  /// Each tab's sort; the timeline's column is what its bars show, its days stay in order.
+  /// Each tab's sort; the timeline's days newest first.
   pub sorts: [Sort; 3],
+  /// What the timeline's bars show: time, tokens or cost.
+  pub bars: Col,
   pub tab: Tab,
   sel: [usize; 3],
   pub open: Option<Detail>,
@@ -164,7 +176,8 @@ impl App {
       data,
       span: Span::Month,
       prov: None,
-      sorts: [Col::Time.sorted(); 3],
+      sorts: [Col::Time.sorted(), Col::Time.sorted(), (Col::Name, true)],
+      bars: Col::Time,
       tab: Tab::Projects,
       sel: [0; 3],
       open: None,
@@ -208,10 +221,7 @@ impl App {
       Tab::Models => self.data.models(self.span, self.prov, None),
       Tab::Timeline => self.data.timeline(self.span, self.prov, None),
     };
-    // The timeline keeps its days in order.
-    if self.tab != Tab::Timeline {
-      sort(&mut list, self.sorts[self.tab as usize]);
-    }
+    sort(&mut list, self.sorts[self.tab as usize]);
     let needle = self.filter.to_lowercase();
     list.retain(|x| x.label.to_lowercase().contains(&needle));
     // With a filter, the total is of the rows shown.
@@ -223,7 +233,9 @@ impl App {
     *sel = match found {
       Some(i) => i,
       // The timeline opens on its newest day.
-      None if self.tab == Tab::Timeline => list.len().saturating_sub(1),
+      None if self.tab == Tab::Timeline => {
+        list.iter().enumerate().max_by_key(|x| x.1.day).map_or(0, |x| x.0)
+      }
       None => (*sel).min(list.len().saturating_sub(1)),
     };
     self.list = list;
@@ -282,12 +294,9 @@ impl App {
   }
 
   /// Moves the selection by a key: ↑ / ↓ wrap around at the ends, PgUp / PgDn and Home / End
-  /// stop there, a page is the rows on screen (a week of the timeline's days).
+  /// stop there, a page is the rows on screen.
   fn nav(&mut self, code: KeyCode) {
-    let page = match self.open.is_none() && self.tab == Tab::Timeline {
-      true => 7,
-      false => self.hits.borrow().page(),
-    };
+    let page = self.hits.borrow().page();
     let (sel, len) = self.selection();
     if let Some(i) = step(code, *sel, page, len) {
       *sel = i;
@@ -313,13 +322,12 @@ impl App {
   fn next_sort(&mut self) {
     let (col, _) = self.sort();
     let by = match (&self.open, self.tab) {
-      (None, Tab::Timeline) => match col {
-        Col::Time => Col::Tokens.sorted(),
-        Col::Tokens => Col::Cost.sorted(),
-        _ => Col::Time.sorted(),
-      },
+      (None, Tab::Timeline) => {
+        return self.bars =
+          [Col::Tokens, Col::Cost, Col::Time][(self.bars as usize).clamp(1, 3) - 1];
+      }
       (Some(d), _) => col.next(d.sessions).sorted(),
-      (None, tab) => col.next(tab == Tab::Projects).sorted(),
+      (None, tab) => col.next(tab != Tab::Models).sorted(),
     };
     self.sort_by(by);
   }
@@ -358,8 +366,8 @@ impl App {
       }
       return;
     }
-    // `q` in a drill-down goes back like Esc; it quits only from the lists.
-    let back = matches!(key.code, KeyCode::Esc | KeyCode::Backspace)
+    // `q` in a drill-down goes back like Esc and ←; it quits only from the lists.
+    let back = matches!(key.code, KeyCode::Esc | KeyCode::Backspace | KeyCode::Left)
       || (key.code == KeyCode::Char('q') && self.open.is_some());
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
@@ -375,9 +383,6 @@ impl App {
         self.span = Span::ALL[(self.span as usize + Span::ALL.len() - 1) % 5];
       }
       KeyCode::Char('t') => self.span = Span::ALL[(self.span as usize + 1) % Span::ALL.len()],
-      // On the timeline ← → move between bars as ↑ ↓ do; elsewhere they do nothing.
-      KeyCode::Left if self.bars() => return self.nav(KeyCode::Up),
-      KeyCode::Right if self.bars() => return self.nav(KeyCode::Down),
       KeyCode::Char('p') => self.next_provider(),
       KeyCode::Char('S') => return self.reverse(),
       KeyCode::Char('s') if shift => return self.reverse(),
@@ -387,23 +392,17 @@ impl App {
         return self.nav(key.code);
       }
       KeyCode::Home | KeyCode::End => return self.nav(key.code),
-      KeyCode::Enter if self.open.is_none() => return self.open(),
+      // → goes deeper, as Enter.
+      KeyCode::Enter | KeyCode::Right if self.open.is_none() => return self.open(),
       _ => return,
     }
     self.refresh();
   }
 
-  /// Whether the timeline's bars are on screen.
-  fn bars(&self) -> bool {
-    self.open.is_none() && self.tab == Tab::Timeline
-  }
-
-  /// `S`: the other direction; the timeline's days stay in order.
+  /// `S`: the other direction.
   fn reverse(&mut self) {
-    if self.open.is_some() || self.tab != Tab::Timeline {
-      let (col, most) = self.sort();
-      self.sort_by((col, !most));
-    }
+    let (col, most) = self.sort();
+    self.sort_by((col, !most));
   }
 
   fn next_provider(&mut self) {
@@ -452,12 +451,13 @@ impl App {
       return self.help = false;
     }
     let hits = self.hits.borrow().clone();
-    if let Some((_, span)) = hits.periods.iter().find(|x| x.0.contains(at)) {
-      self.span = *span;
-    } else if hits.provider.contains(at) {
-      self.next_provider();
-    } else if let Some((_, tab)) = hits.tabs.iter().find(|x| x.0.contains(at)) {
-      self.tab(*tab as usize);
+    if let Some(&(_, click)) = hits.clicks.iter().find(|x| x.0.contains(at)) {
+      match click {
+        Click::Period(span) => self.span = span,
+        Click::Provider => self.next_provider(),
+        Click::Tab(tab) => self.tab(tab as usize),
+        Click::Bars(col) => return self.bars = col,
+      }
     } else if hits.heads.iter().any(|x| x.contains(at)) {
       if let Some(&(_, _, col)) = hits.cols.iter().find(|x| (x.0..x.1).contains(&at.x)) {
         self.click_sort(col);
@@ -493,6 +493,8 @@ impl App {
 
 /// Rows one wheel step moves the selection and scrolls the list, as macmon's.
 const WHEEL_ROWS: isize = 3;
+/// The least time between two wheel steps.
+const WHEEL_EVERY: std::time::Duration = std::time::Duration::from_millis(30);
 
 /// The row of `len` a navigation key moves the selection to from row `at`, with `page` rows on
 /// screen: ↑ / ↓ wrap around at the ends, the others stop there; `None` for other keys.
@@ -537,6 +539,33 @@ fn sort(rows: &mut [Row], (col, most): Sort) {
   });
 }
 
+/// Applies a batch of queued events: keys and clicks in order, the wheel's steps folded into one,
+/// the last one's direction, and that only `WHEEL_EVERY` after the last step (`wheeled`).
+fn pump(
+  app: &mut App,
+  events: Vec<Event>,
+  wheeled: &mut Option<std::time::Instant>,
+  now: std::time::Instant,
+) {
+  let mut wheel = None;
+  for ev in events {
+    match ev {
+      Event::Key(key) => app.key(key),
+      Event::Mouse(ev)
+        if matches!(ev.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
+      {
+        wheel = Some(ev);
+      }
+      Event::Mouse(ev) => app.mouse(ev),
+      _ => {}
+    }
+  }
+  if let Some(ev) = wheel.filter(|_| wheeled.is_none_or(|x| now - x >= WHEEL_EVERY)) {
+    app.mouse(ev);
+    *wheeled = Some(now);
+  }
+}
+
 /// Runs the interface until `q`: a loading frame while the history is parsed, then the app.
 pub fn run() -> Result<()> {
   let mut term = ratatui::init();
@@ -547,13 +576,15 @@ pub fn run() -> Result<()> {
     let sessions = crate::cli::sessions(None);
     let today = crate::metrics::local_date(jiff::Timestamp::now().as_microsecond());
     let mut app = App::new(Data::new(sessions, config, today));
+    let mut wheeled = None;
     while !app.quit {
       term.draw(|f| draw::draw(f, &app))?;
-      match event::read()? {
-        Event::Key(key) => app.key(key),
-        Event::Mouse(ev) => app.mouse(ev),
-        _ => {}
+      // The queued events all before the next frame.
+      let mut events = vec![event::read()?];
+      while event::poll(std::time::Duration::ZERO)? {
+        events.push(event::read()?);
       }
+      pump(&mut app, events, &mut wheeled, std::time::Instant::now());
     }
     Ok(())
   })();
@@ -576,12 +607,15 @@ mod tests {
   }
 
   fn click(app: &mut App, x: u16, y: u16) {
-    let kind = MouseEventKind::Down(MouseButton::Left);
+    mouse(app, MouseEventKind::Down(MouseButton::Left), x, y);
+  }
+
+  fn mouse(app: &mut App, kind: MouseEventKind, x: u16, y: u16) {
     app.mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE });
   }
 
   fn wheel(app: &mut App, kind: MouseEventKind) {
-    app.mouse(MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE });
+    mouse(app, kind, 0, 0);
   }
 
   fn frame(app: &App) -> Buffer {
@@ -595,20 +629,26 @@ mod tests {
   }
 
   fn screen_of(buf: &Buffer) -> String {
-    (0..buf.area.height).map(|y| line(buf, y) + "\n").collect()
+    (0..buf.area.height).map(|y| raw(buf, y) + "\n").collect()
   }
 
   fn screen(app: &App) -> String {
     screen_of(&frame(app))
   }
 
-  fn line(buf: &Buffer, y: u16) -> String {
+  /// A whole line, borders included.
+  fn raw(buf: &Buffer, y: u16) -> String {
     (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+  }
+
+  /// A line inside the box: without its border cells.
+  fn line(buf: &Buffer, y: u16) -> String {
+    (1..buf.area.width - 1).map(|x| buf[(x, y)].symbol()).collect()
   }
 
   /// The column of `text` on line `y`.
   fn col(buf: &Buffer, y: u16, text: &str) -> u16 {
-    let l = line(buf, y);
+    let l = raw(buf, y);
     let x = l.find(text).unwrap_or_else(|| panic!("{text:?} not in {l:?}"));
     l[..x].chars().count() as u16
   }
@@ -618,9 +658,9 @@ mod tests {
     buf[(col(buf, y, text), y)].fg
   }
 
-  /// The first line under the header and tabs with `text`.
+  /// The first line inside the box with `text`.
   fn find(buf: &Buffer, text: &str) -> u16 {
-    (3..buf.area.height)
+    (1..buf.area.height - 1)
       .find(|y| line(buf, *y).contains(text))
       .unwrap_or_else(|| panic!("{text:?} in {}", screen_of(buf)))
   }
@@ -653,14 +693,17 @@ mod tests {
     assert_eq!(app.span, Span::All);
     let buf = frame(&app);
     let out = screen_of(&buf);
-    // Version top right, totals not in the header but as the last `total` row.
-    let head = line(&buf, 0);
-    assert!(head.trim_end().ends_with(concat!("cctrail v", env!("CARGO_PKG_VERSION"))), "{head}");
-    assert!(!head.contains('$'), "{head}");
+    // One rounded box: the choices and the version on the top border, the totals not there but
+    // as the last `total` row, the keys on the bottom border.
+    let (top, bottom) = (raw(&buf, 0), raw(&buf, 29));
+    assert!(top.starts_with("╭─ ") && top.ends_with("─╮"), "{top}");
+    assert!(top.contains(concat!(" cctrail v", env!("CARGO_PKG_VERSION"), " ")), "{top}");
+    assert!(!top.contains('$'), "{top}");
+    assert!(bottom.starts_with("╰─") && bottom.contains("? | quit | → open | sort"), "{bottom}");
     let sel = find(&buf, "▶");
     let total = find(&buf, "total");
     assert_eq!(total, sel + app.list.len() as u16, "{out}");
-    assert!(buf[(2, total)].modifier.contains(Modifier::BOLD));
+    assert!(buf[(3, total)].modifier.contains(Modifier::BOLD));
     // No bars, percentages only; numbers right-aligned up to an equal right gutter.
     assert!(!out.contains('█') && out.contains('%'), "{out}");
     for y in [sel - 1, sel, total] {
@@ -668,8 +711,8 @@ mod tests {
       assert_eq!(l.chars().count() - l.trim_end().chars().count(), 2, "gutter on {l:?}");
     }
     assert!(line(&buf, sel - 1).trim_end().ends_with("Share"));
-    // Selected row: one subtle bar, nothing reversed, colors kept.
-    for x in 0..buf.area.width {
+    // Selected row: one subtle bar inside the box, nothing reversed, colors kept.
+    for x in 1..buf.area.width - 1 {
       assert_eq!(buf[(x, sel)].bg, Color::Indexed(236), "column {x}");
       assert!(!buf[(x, sel)].modifier.contains(Modifier::REVERSED), "column {x}");
     }
@@ -681,22 +724,29 @@ mod tests {
     assert_eq!(fg(&buf, sel - 1, "Time ↓"), Color::Reset);
     assert_eq!(fg(&buf, sel - 1, "Tokens"), Color::DarkGray);
     assert!(buf[(col(&buf, sel - 1, "Tokens"), sel - 1)].modifier.contains(Modifier::BOLD));
-    // Active period and tab: bold cyan text, others gray, no filled block; no metric.
+    // The picked tab and period: bold cyan, the others gray, no filled block; the border gray.
     assert!((0..buf.area.width).all(|x| !buf[(x, 0)].modifier.contains(Modifier::REVERSED)));
     assert_eq!(fg(&buf, 0, "All"), Color::Cyan);
     assert_eq!(fg(&buf, 0, "Week"), Color::DarkGray);
     assert_eq!(fg(&buf, 0, "claude+codex"), Color::Reset);
     assert_eq!(fg(&buf, 0, "cctrail v"), Color::Reset);
-    assert_eq!(fg(&buf, 1, "1 Projects"), Color::Cyan);
-    assert_eq!(fg(&buf, 1, "2 Models"), Color::DarkGray);
-    assert!(!out.contains("metric"), "{out}");
+    assert_eq!(fg(&buf, 0, "1 Projects"), Color::Cyan);
+    assert_eq!(fg(&buf, 0, "2 Models"), Color::DarkGray);
+    assert_eq!((fg(&buf, 0, "╭"), fg(&buf, 29, "╰")), (Color::DarkGray, Color::DarkGray));
+    // Hints as macmon's: the key in cyan, in its word where it is one, the rest faint.
+    assert_eq!(fg(&buf, 29, "quit"), Color::Cyan);
+    let x = col(&buf, 29, "quit") + 1;
+    assert_eq!(buf[(x, 29)].modifier, Modifier::DIM);
+    assert_eq!(fg(&buf, 29, "| quit"), Color::DarkGray);
 
-    // A project's drill-down takes the screen: models with time summing to the project's, its
-    // paths, no chart.
+    // A project's drill-down takes the box: where it is on the top border, its paths on the
+    // bottom one, its models with time summing to the project's, no chart.
     press(&mut app, KeyCode::Enter);
     let buf = frame(&app);
     let out = screen_of(&buf);
-    assert!(!out.contains('╭') && !out.contains('█') && out.contains("Paths"), "{out}");
+    assert!(raw(&buf, 0).contains(" Projects › oss/demo "), "{out}");
+    assert!(raw(&buf, 29).contains(" paths "), "{out}");
+    assert!(!out.contains('█'), "{out}");
     let d = app.open.as_ref().unwrap();
     let times: i64 = d.rows().into_iter().map(|x| x.active.unwrap()).sum();
     assert_eq!(times, d.row.active.unwrap(), "{out}");
@@ -709,32 +759,37 @@ mod tests {
     let buf = frame(&app);
     let y = find(&buf, "claude/claude-sonnet-5");
     assert_eq!(fg(&buf, y, "claude/claude-sonnet-5"), Color::Reset);
-    // The help is a box over the screen.
+    // The help is a box over the screen, without hints under it.
     press(&mut app, KeyCode::Char('?'));
-    let out = screen(&app);
-    assert!(out.contains('╭') && out.contains("help") && out.contains("Model"), "{out}");
+    let buf = frame(&app);
+    let out = screen_of(&buf);
+    assert!(out.matches('╭').count() == 2 && out.contains(" help "), "{out}");
+    assert!(!raw(&buf, 29).contains("quit"), "{out}");
+    assert_eq!(out.matches(" q ").count(), 1, "{out}");
   }
 
   #[test]
-  fn esc_and_q_go_back_and_q_quits_only_the_lists() {
+  fn arrows_esc_and_q_go_deeper_and_back() {
     let mut app = app();
-    press(&mut app, KeyCode::Char('?'));
-    press(&mut app, KeyCode::Char('q'));
-    assert!(!app.help && !app.quit);
-    press(&mut app, KeyCode::Char('?'));
-    press(&mut app, KeyCode::Esc);
-    assert!(!app.help);
-    // The help takes every key while open.
+    // → opens, ← goes back, as Enter and Esc.
+    press(&mut app, KeyCode::Right);
+    assert!(app.open.is_some());
+    press(&mut app, KeyCode::Right);
+    assert!(app.open.is_some());
+    press(&mut app, KeyCode::Left);
+    assert!(app.open.is_none());
+    press(&mut app, KeyCode::Left);
+    assert!(app.open.is_none() && !app.quit);
+    // The help takes every key while open; Esc, `?` and `q` close it.
     press(&mut app, KeyCode::Char('?'));
     press(&mut app, KeyCode::Char('2'));
     assert_eq!((app.help, app.tab), (true, Tab::Projects));
-    press(&mut app, KeyCode::Char('?'));
+    press(&mut app, KeyCode::Char('q'));
+    assert!(!app.help && !app.quit);
+    // `q` goes back from a drill-down and quits only from a list.
     press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Char('q'));
     assert!(app.open.is_none() && !app.quit);
-    press(&mut app, KeyCode::Enter);
-    press(&mut app, KeyCode::Esc);
-    assert!(app.open.is_none());
     press(&mut app, KeyCode::Char('q'));
     assert!(app.quit);
   }
@@ -758,21 +813,18 @@ mod tests {
     press(&mut app, KeyCode::Char('S'));
     assert_eq!(app.sort(), (Col::Tokens, false));
     assert_eq!(head(&app)[2], "Tokens ↑");
-    let named: Vec<_> = app.list.iter().collect();
-    assert!(named.windows(2).all(|w| w[0].tokens <= w[1].tokens));
-    // The share is of the sorted column: tokens here, so the largest share is the last row's.
+    assert!(app.list.windows(2).all(|w| w[0].tokens <= w[1].tokens));
+    // The share is of the sorted column: tokens here.
     let buf = frame(&app);
     let share =
       |y| cells(&line(&buf, y)).pop().unwrap().trim_end_matches('%').parse::<u32>().unwrap();
-    let (first, total) = (find(&buf, "Project") + 1, find(&buf, "total"));
-    let tokens = |i: usize| app.list[i].tokens as f64 / app.total.tokens as f64 * 100.0;
+    let first = find(&buf, "Project") + 1;
     let i = app.list.iter().position(|x| x.key == "w/api").unwrap();
-    assert!((share(first + i as u16) as f64 - tokens(i)).abs() <= 1.0);
-    assert!(total > first);
+    let tokens = app.list[i].tokens as f64 / app.total.tokens as f64 * 100.0;
+    assert!((share(first + i as u16) as f64 - tokens).abs() <= 1.0);
     // By name, the share is of the time; models have no sessions to sort by.
     press(&mut app, KeyCode::Char('2'));
-    let order = [Col::Tokens, Col::Cost, Col::Name, Col::Time];
-    for col in order {
+    for col in [Col::Tokens, Col::Cost, Col::Name, Col::Time] {
       press(&mut app, KeyCode::Char('s'));
       assert_eq!(app.sort().0, col);
     }
@@ -787,7 +839,7 @@ mod tests {
   }
 
   #[test]
-  fn lists_wrap_around_and_page_like_macmon() {
+  fn lists_wrap_around_page_and_scroll_like_macmon() {
     use KeyCode::{Down, End, Home, PageDown, PageUp, Up};
     // ↑ / ↓ wrap around at the ends, PgUp / PgDn and Home / End stop there.
     let steps = [(Up, 0, 6), (Down, 6, 0), (Down, 0, 1), (PageDown, 1, 6), (PageDown, 6, 6)];
@@ -801,33 +853,44 @@ mod tests {
     assert_eq!(app.sel(), last);
     press(&mut app, KeyCode::Down);
     assert_eq!(app.sel(), 0);
-    // The wheel wraps around at the ends too.
-    wheel(&mut app, MouseEventKind::ScrollUp);
-    assert_eq!(app.sel(), last);
-    wheel(&mut app, MouseEventKind::ScrollDown);
-    assert_eq!(app.sel(), 0);
-    // ← → do nothing in a list.
-    press(&mut app, KeyCode::Right);
-    assert_eq!((app.sel(), app.span), (0, Span::All));
     // Periods wrap around too.
-    assert_eq!(app.span, Span::All);
     press(&mut app, KeyCode::Char('t'));
     assert_eq!(app.span, Span::Today);
     press(&mut app, KeyCode::Char('T'));
     assert_eq!(app.span, Span::All);
-    // A scrollbar in the right gutter when the rows don't fit, none when they do.
-    let bar = |buf: &Buffer| {
-      (0..buf.area.height)
-        .map(|y| buf[(buf.area.width - 1, y)].symbol().to_string())
-        .collect::<String>()
+    // Five rows in a list four high: a scrollbar on the right border, ↑ and ↓ at its ends; the
+    // wheel moves three rows and the list as much, the selected row keeping its place until the
+    // end, then around to the top; the other mouse events do nothing.
+    let bar = |buf: &Buffer| -> String {
+      (0..buf.area.height).map(|y| buf[(buf.area.width - 1, y)].symbol().to_string()).collect()
     };
-    let buf = frame_of(&app, 80, 10);
-    assert!(bar(&buf).contains('┃') && bar(&buf).contains('↓'), "{}", screen_of(&buf));
     assert!(!bar(&frame_of(&app, 80, 24)).contains('┃'));
+    let buf = frame_of(&app, 80, 8);
+    let edge = bar(&buf);
+    assert!(edge.contains("↑┃") && edge.contains('↓'), "{}", screen_of(&buf));
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    assert_eq!(app.sel(), 3);
+    let buf = frame_of(&app, 80, 8);
+    assert_eq!(app.hits.borrow().offset, 1);
+    assert!(line(&buf, 4).starts_with('▶'), "{}", screen_of(&buf));
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    assert_eq!(app.sel(), 0);
+    wheel(&mut app, MouseEventKind::ScrollUp);
+    assert_eq!(app.sel(), last);
+    for kind in [
+      MouseEventKind::Up(MouseButton::Left),
+      MouseEventKind::Drag(MouseButton::Left),
+      MouseEventKind::Moved,
+      MouseEventKind::Down(MouseButton::Right),
+    ] {
+      mouse(&mut app, kind, 4, 3);
+      assert_eq!((app.sel(), app.open.is_none()), (last, true), "{kind:?}");
+    }
   }
 
   #[test]
-  fn clicks_periods_provider_tabs_headers_and_rows() {
+  fn clicks_the_borders_choices_headers_and_rows() {
     let mut app = app();
     let buf = frame(&app);
     click(&mut app, col(&buf, 0, "Week"), 0);
@@ -839,7 +902,7 @@ mod tests {
     click(&mut app, col(&buf, 0, "claude") + 1, 0);
     click(&mut app, col(&buf, 0, "claude") + 1, 0);
     assert_eq!(app.prov, None);
-    click(&mut app, col(&buf, 1, "2 Models"), 1);
+    click(&mut app, col(&buf, 0, "2 Models"), 0);
     assert_eq!(app.tab, Tab::Models);
     // A header sorts by its column, most first; again reverses; Share follows the sort.
     let buf = frame(&app);
@@ -853,13 +916,16 @@ mod tests {
     assert_eq!(app.sort(), (Col::Tokens, false));
     click(&mut app, col(&buf, y, "Share"), y);
     assert_eq!(app.sort(), (Col::Tokens, false));
-    // A row selects; the selected row opens.
+    // A row selects; the selected row opens; its tab on the top border goes back.
     let buf = frame(&app);
     let head = find(&buf, "Tokens");
     click(&mut app, 4, head + 2);
     assert_eq!(app.sel(), 1);
     click(&mut app, 4, head + 2);
     assert!(app.open.is_some());
+    let buf = frame(&app);
+    click(&mut app, col(&buf, 0, "Models ›"), 0);
+    assert!(app.open.is_none());
   }
 
   #[test]
@@ -901,8 +967,7 @@ mod tests {
     press(&mut app, KeyCode::Char('2'));
     // One row per model: fast and standard together.
     assert_eq!(app.list.iter().filter(|x| x.key.contains("gpt-5.4")).count(), 1);
-    let i = app.list.iter().position(|x| x.key == "codex/gpt-5.4").unwrap();
-    app.sel[1] = i;
+    app.sel[1] = app.list.iter().position(|x| x.key == "codex/gpt-5.4").unwrap();
     press(&mut app, KeyCode::Enter);
     let buf = frame(&app);
     let out = screen_of(&buf);
@@ -934,25 +999,6 @@ mod tests {
   }
 
   #[test]
-  fn t_cycles_the_period_and_arrows_move_the_timeline() {
-    let mut app = App::new(data::tests::many());
-    assert_eq!(app.span, Span::Month);
-    press(&mut app, KeyCode::Char('t'));
-    assert_eq!(app.span, Span::Days30);
-    press(&mut app, KeyCode::Char('T'));
-    press(&mut app, KeyCode::Char('T'));
-    assert_eq!(app.span, Span::Week);
-    press(&mut app, KeyCode::Char('3'));
-    let last = app.list.len() - 1;
-    assert_eq!(app.sel(), last);
-    press(&mut app, KeyCode::Left);
-    assert_eq!((app.sel(), app.span), (last - 1, Span::Week));
-    press(&mut app, KeyCode::Right);
-    press(&mut app, KeyCode::Right);
-    assert_eq!(app.sel(), 0);
-  }
-
-  #[test]
   fn lays_out_many_projects_at_every_width() {
     for (width, height) in [(80, 24), (100, 30), (140, 30)] {
       let mut app = many();
@@ -972,19 +1018,18 @@ mod tests {
         .sum();
       assert_eq!(shares, 100, "{width}");
       // Every project, `other` only in the text report.
-      assert!(screen_of(&buf).contains("/tmp/b") && !screen_of(&buf).contains("other"));
+      let out = screen_of(&buf);
+      assert!(out.contains("/tmp/b") && !out.contains("other"), "{out}");
       let long = "w/a-project-with-a-name-too-long-for-a-narrow-terminal";
-      assert_eq!(screen_of(&buf).contains(long), width == 140, "{width}");
-      assert!(width == 140 || line(&buf, find(&buf, "w/a-project-with-")).contains('…'));
-      // A separator over the footer, which keeps whole hints, help and quit the longest.
-      assert!(line(&buf, height - 2).chars().all(|x| x == '─'));
-      let foot = line(&buf, height - 1);
-      assert!(foot.contains("? help") && foot.trim_end().ends_with("q quit"), "{foot}");
-      assert_eq!(foot.contains("1-3 view"), width > 80, "{foot}");
-      // The unpriced note shows whole or not at all.
-      let tabs = line(&buf, 1);
-      assert_eq!(tabs.contains("unpriced"), tabs.contains("claude-unknown-1"), "{tabs}");
-      assert!(!tabs.contains('…'), "{tabs}");
+      assert_eq!(out.contains(long), width == 140, "{width}");
+      assert!(width == 140 || line(&buf, find(&buf, "w/a-project-with")).contains('…'));
+      // The top border keeps the tabs, periods and provider; the version where it fits. The
+      // bottom one the keys right and the unpriced note left, cut to fit.
+      let (top, bottom) = (raw(&buf, 0), raw(&buf, height - 1));
+      assert!(top.contains("Timeline") && top.contains("All") && top.contains("claude+codex"));
+      assert_eq!(top.contains("cctrail v"), width > 80, "{top}");
+      assert!(bottom.contains("? | quit") && bottom.contains("/ filter"), "{bottom}");
+      assert!(bottom.contains(" unpriced 37.8"), "{bottom}");
       // A sort arrow fits its column and keeps the headers apart.
       click(&mut app, col(&buf, head, "Sessions"), head);
       let buf = frame_of(&app, width, height);
@@ -1028,108 +1073,109 @@ mod tests {
     press(&mut app, KeyCode::Enter);
     assert!(app.list.len() > 1 && app.list.len() < many().list.len());
     assert_eq!(app.total.tokens, app.list.iter().map(|x| x.tokens).sum::<u64>());
-    // The typed filter shows before the unpriced note.
-    let tabs = line(&frame(&app), 1);
-    assert!(tabs.find("filter w").unwrap() < tabs.find("unpriced").unwrap(), "{tabs}");
+    // The typed filter shows on the top border, before the provider.
+    let top = raw(&frame(&app), 0);
+    assert!(top.find("filter w").unwrap() < top.find("claude+codex").unwrap(), "{top}");
     // A filter with no rows says so.
     press(&mut app, KeyCode::Char('/'));
     press(&mut app, KeyCode::Char('z'));
     assert!(app.list.is_empty());
     assert!(screen(&app).contains("No match for \"wz\""), "{}", screen(&app));
-    // The help box says how to close it, the footer doesn't.
-    press(&mut app, KeyCode::Enter);
-    press(&mut app, KeyCode::Char('?'));
-    assert!(!line(&frame(&app), 29).contains("esc"));
   }
 
   #[test]
-  fn timeline_draws_a_bar_per_day() {
+  fn timeline_charts_the_models_over_its_days() {
     let mut app = many();
     press(&mut app, KeyCode::Char('3'));
     press(&mut app, KeyCode::Char('T')); // 30 days
-    let last = app.list.len() - 1;
-    assert_eq!((app.list.len(), app.sel()), (30, last));
+    // The days newest first, the newest selected.
+    assert_eq!((app.list.len(), app.sel()), (30, 0));
+    assert_eq!(app.list[0].day.unwrap(), jiff::civil::date(2026, 1, 10));
     let buf = frame(&app);
     let out = screen_of(&buf);
-    // The title says what the bars show; the largest value labels the axis.
-    assert!(line(&buf, 3).contains("Time by day"), "{out}");
-    assert_eq!(fg(&buf, 3, "Time"), Color::Cyan);
+    // The top half: a choice of what the bars show, the legend, the largest value on the axis.
+    assert!(line(&buf, 1).starts_with("  Time Tokens Cost  by day"), "{out}");
+    assert_eq!((fg(&buf, 1, "Time"), fg(&buf, 1, "Tokens")), (Color::Cyan, Color::DarkGray));
+    for model in ["claude-sonnet-5", "claude-unknown-1", "gpt-5.4"] {
+      assert!(line(&buf, 1).contains(&format!("■ {model}")), "{out}");
+    }
     let max = app.list.iter().filter_map(|x| x.active).max().unwrap();
-    assert!(line(&buf, 5).contains(&crate::output::duration(max)), "{out}");
-    // One bar per busy day with a gap after each, the selected one in the selection color, the
-    // others in the time's.
-    let base = find(&buf, "01-");
-    let bars = line(&buf, base - 2);
+    assert!(line(&buf, 2).contains(&crate::output::duration(max)), "{out}");
+    // The bottom half: a divider, then the days as a table with its total.
+    let divider = (1..29).find(|y| raw(&buf, *y).starts_with('├')).unwrap();
+    assert_eq!(divider, 15, "{out}");
+    let head = cells(&line(&buf, divider + 1));
+    assert_eq!(head, ["Day ↓", "Time", "Tokens", "Cost", "Sessions", "Share"], "{out}");
+    let newest = cells(&line(&buf, divider + 2));
+    assert_eq!(newest, ["2026-01-10 Sa", "–", "–", "–", "–", "–"], "{out}");
+    assert!(line(&buf, 28).starts_with("  total"), "{out}");
+    // One bar per busy day, all as wide, one cell apart, stacked in the models' colors.
+    let axis = (2..divider).find(|y| line(&buf, *y).contains('━')).unwrap();
+    let bars = line(&buf, axis - 1);
     let blocks = |t: &str| !t.is_empty() && t.chars().all(|c| "▁▂▃▄▅▆▇█".contains(c));
     let busy = app.list.iter().filter(|x| x.tokens > 0).count();
-    assert_eq!(bars.split(' ').filter(|t| blocks(t)).count(), busy, "{out}");
     let widths: Vec<usize> =
       bars.split(' ').filter(|t| blocks(t)).map(|t| t.chars().count()).collect();
-    assert!(widths.windows(2).all(|w| w[0] == w[1]), "{out}");
-    // The busy days are next to each other: one-cell gaps between their bars.
+    assert!(widths.len() == busy && widths.windows(2).all(|w| w[0] == w[1]), "{out}");
     let from = bars.find(|c| "▁▂▃▄▅▆▇█".contains(c)).unwrap();
     let to = bars.rfind(|c| "▁▂▃▄▅▆▇█".contains(c)).unwrap();
     assert!(!bars[from..to].contains("  "), "{out}");
-    assert_eq!(fg(&buf, base - 2, "█"), Color::Yellow);
-    // The newest bar ends at the right gutter; the newest day is empty, yet its slot is marked
-    // on the axis and its numbers are dashes.
-    let axis = line(&buf, base - 1);
-    assert_eq!(axis.trim_end().chars().count(), 98, "{out}");
-    assert!(axis.trim_end().ends_with('━') && fg(&buf, base - 1, "━") == Color::Cyan, "{out}");
-    assert_eq!(app.list[last].tokens, 0);
-    let numbers = cells(&line(&buf, find(&buf, "▶")));
-    assert_eq!(numbers[1..], ["–", "–", "–"], "{out}");
-    // The dates under the bars end with the newest day; the numbers of the selected day and the
-    // period's total under the chart.
-    let newest = app.list[last].day.unwrap().strftime("%m-%d").to_string();
-    assert!(line(&buf, base).trim_end().ends_with(&newest), "{out}");
-    let sel = find(&buf, "▶");
-    assert!(line(&buf, sel).contains(&app.list[last].label));
-    assert!(line(&buf, sel + 1).contains("total"));
-    // ↑ selects the day before, `s` shows tokens then cost.
-    let busy = app.list.iter().rposition(|x| x.tokens > 0).unwrap();
-    for _ in busy..last {
-      press(&mut app, KeyCode::Up);
-    }
-    assert_eq!(app.sel(), busy);
-    press(&mut app, KeyCode::Char('s'));
-    press(&mut app, KeyCode::Char('s'));
+    let cells_of = (2..axis).flat_map(|y| (1..99).map(move |x| (x, y)));
+    let colors: std::collections::HashSet<Color> =
+      cells_of.filter(|p| "▁▂▃▄▅▆▇█".contains(buf[*p].symbol())).map(|p| buf[p].fg).collect();
+    assert!(colors.len() >= 2 && colors.iter().all(|c| matches!(c, Color::Indexed(_))), "{out}");
+    // The newest bar at the right gutter; empty, yet marked on the axis, its date under it.
+    let axis_line = line(&buf, axis);
+    assert!(axis_line.ends_with("━  ") && fg(&buf, axis, "━") == Color::Cyan, "{out}");
+    assert!(line(&buf, axis + 1).trim_end().ends_with("01-10"), "{out}");
+    // ↓ selects the day before: its bar marked with the selection's background.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.list[app.sel()].day.unwrap(), jiff::civil::date(2026, 1, 8));
     let buf = frame(&app);
-    assert!(line(&buf, 3).contains("Cost by day"));
-    let bars = line(&buf, base - 2);
-    let x = bars.chars().take_while(|x| *x != '█').count() as u16;
-    let cyan = (0..buf.area.width).filter(|x| buf[(*x, base - 2)].fg == Color::Cyan).count();
-    assert!(cyan > 0 && buf[(x, base - 2)].fg == Color::Green, "{}", screen_of(&buf));
-    assert_eq!(app.sel(), busy);
-    // A click on a bar selects it, a second one opens its day.
-    let (rect, i) = app
+    let (rect, _) = *app.hits.borrow().bars.iter().find(|x| x.1 == app.sel()).unwrap();
+    assert_eq!(buf[(rect.x, rect.y)].bg, Color::Indexed(236));
+    // `s` or a click on the choice picks what the bars show.
+    press(&mut app, KeyCode::Char('s'));
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.bars, Col::Cost);
+    let buf = frame(&app);
+    assert_eq!(fg(&buf, 1, "Cost"), Color::Cyan);
+    click(&mut app, col(&buf, 1, "Tokens"), 1);
+    assert_eq!(app.bars, Col::Tokens);
+    // A header sorts the days; the chart keeps them in order and the selection follows.
+    let key = app.list[app.sel()].key.clone();
+    let buf = frame(&app);
+    click(&mut app, col(&buf, divider + 1, "Time"), divider + 1);
+    assert_eq!(app.list[app.sel()].key, key);
+    assert!(app.list.windows(2).all(|w| w[0].active >= w[1].active));
+    // A click on a bar selects its day, a second one opens it; ← back, → opens.
+    frame(&app);
+    let (rect, i) = *app
       .hits
       .borrow()
       .bars
       .iter()
-      .find(|x| x.1 != busy && app.list[x.1].tokens > 0)
-      .copied()
+      .find(|x| x.1 != app.sel() && app.list[x.1].tokens > 0)
       .unwrap();
     click(&mut app, rect.x, rect.bottom() - 1);
     assert_eq!(app.sel(), i);
     click(&mut app, rect.x, rect.bottom() - 1);
     let d = app.open.as_ref().unwrap();
     assert_eq!(d.row.sessions, Some(d.rows().into_iter().filter_map(|x| x.sessions).sum()));
-    press(&mut app, KeyCode::Esc);
+    assert_eq!(d.row.sessions, app.list[i].sessions);
+    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Right);
+    assert!(app.open.is_some());
+    press(&mut app, KeyCode::Left);
     // Days and weeks don't share a selection: a change between them starts at the newest.
-    press(&mut app, KeyCode::Up);
-    let day = app.list[app.sel()].key.clone();
-    press(&mut app, KeyCode::Char('T'));
-    assert_eq!(app.list[app.sel()].key, day);
-    press(&mut app, KeyCode::Char('t'));
     press(&mut app, KeyCode::Char('t'));
     assert_eq!(app.span, Span::All);
-    assert_eq!(app.sel(), app.list.len() - 1);
-    assert!(line(&frame(&app), 3).contains("Cost by week"));
+    assert_eq!(app.list[app.sel()].day, app.list.iter().filter_map(|x| x.day).max());
+    assert!(line(&frame(&app), 1).contains("by week"));
 
     let mut app = App::new(data::tests::data());
     press(&mut app, KeyCode::Char('t'));
-    assert_eq!(app.span, Span::Days30);
     press(&mut app, KeyCode::Char('t'));
     press(&mut app, KeyCode::Char('t'));
     assert_eq!(app.span, Span::Today);
@@ -1139,39 +1185,34 @@ mod tests {
   }
 
   #[test]
-  fn the_wheel_moves_three_rows_and_small_screens_say_so() {
+  fn small_screens_say_so() {
     let mut app = many();
-    // Five rows in a list three high: the wheel moves three rows and the list as much, the
-    // selected row keeping its place until the end, then around to the top.
-    assert_eq!(app.list.len(), 5);
-    frame_of(&app, 80, 10);
-    wheel(&mut app, MouseEventKind::ScrollDown);
-    assert_eq!(app.sel(), 3);
-    let buf = frame_of(&app, 80, 10);
-    assert_eq!(app.hits.borrow().offset, 2);
-    assert!(line(&buf, 5).starts_with('▶'), "{}", screen_of(&buf));
-    wheel(&mut app, MouseEventKind::ScrollDown);
-    assert_eq!(app.sel(), 4);
-    wheel(&mut app, MouseEventKind::ScrollDown);
-    assert_eq!(app.sel(), 0);
-    // A drill-down too low for a scrollbar shows arrows where there is more.
-    press(&mut app, KeyCode::Char('2'));
-    press(&mut app, KeyCode::Char('/'));
-    for c in "gpt".chars() {
-      press(&mut app, KeyCode::Char(c));
-    }
-    press(&mut app, KeyCode::Enter);
-    press(&mut app, KeyCode::Enter);
-    let buf = frame_of(&app, 80, 10);
-    let edge: String = (0..10).map(|y| buf[(79, y)].symbol().to_string()).collect();
-    assert!(edge.contains('↓'), "{}", screen_of(&buf));
-    // A terminal too small says so, the timeline sooner than the lists.
     assert!(screen_of(&frame_of(&app, 80, 7)).contains("too small"));
+    assert!(!screen_of(&frame_of(&app, 80, 8)).contains("too small"));
     press(&mut app, KeyCode::Char('3'));
-    assert!(screen_of(&frame_of(&app, 80, 14)).contains("too small"));
-    assert!(!screen_of(&frame_of(&app, 80, 16)).contains("too small"));
-    // The help has one line for `q`.
-    press(&mut app, KeyCode::Char('?'));
-    assert_eq!(screen(&app).matches(" q ").count(), 1, "{}", screen(&app));
+    assert!(screen_of(&frame_of(&app, 80, 13)).contains("too small"));
+    assert!(!screen_of(&frame_of(&app, 80, 14)).contains("too small"));
+  }
+
+  #[test]
+  fn the_wheel_steps_once_per_batch_and_not_too_often() {
+    let mut app = many();
+    let spin = |n| {
+      let ev = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+      };
+      vec![Event::Mouse(ev); n]
+    };
+    let now = std::time::Instant::now();
+    let mut wheeled = None;
+    pump(&mut app, spin(10), &mut wheeled, now);
+    assert_eq!(app.sel(), 3);
+    pump(&mut app, spin(1), &mut wheeled, now + std::time::Duration::from_millis(10));
+    assert_eq!(app.sel(), 3);
+    pump(&mut app, spin(1), &mut wheeled, now + std::time::Duration::from_millis(40));
+    assert_eq!(app.sel(), 4);
   }
 }
