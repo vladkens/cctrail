@@ -102,6 +102,8 @@ pub struct Event {
   pub usage: Option<Usage>,
   pub model: Option<String>,
   pub speed: Option<Speed>,
+  /// The reasoning effort as logged: `low`, `medium`, `high`, `xhigh`, `max`…
+  pub effort: Option<String>,
   /// Claude's `(message.id, requestId)`, shared by copies of one API response across files.
   pub identity: Option<(String, Option<String>)>,
   pub sidechain: bool,

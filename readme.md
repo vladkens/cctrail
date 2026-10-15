@@ -40,12 +40,12 @@ claude|codex` reads one harness only, and `--json` prints everything with full p
 counts. Weeks start on Monday. `cctrail --help` lists it all.
 
 `cctrail` without arguments on a terminal opens the interactive view: projects, models and a
-timeline for today, this week, this month, the last 30 days or all time. `enter` opens a row (a
-project's models, a model's projects, a day's projects), `s` sorts by the next column and `S`
-reverses (on the timeline `s` switches the bars between time, tokens and cost), `p` switches the
-provider, `/` filters, `?` lists the keys, `esc` or `q` goes back. The mouse works too: a click
-selects a row or a bar and a second one opens it, a column header sorts, the wheel scrolls. Any
-argument, `--json` or a pipe prints the text report instead.
+timeline for today, this week, this month, the last 30 days or all time; `t` and `T` switch the
+period. `enter` opens a row (a project's models, a model's speeds and efforts, a day's projects),
+`s` sorts by the next column and `S` reverses (on the timeline `s` switches the bars between time,
+tokens and cost), `p` switches the provider, `/` filters, `?` lists the keys, `esc` or `q` goes
+back. The mouse works too: a click selects a row or a bar and a second one opens it, a column
+header sorts, the wheel scrolls. Any argument, `--json` or a pipe prints the text report instead.
 
 ## Projects
 

@@ -64,6 +64,7 @@ struct Payload {
   model: Val,
   cwd: Val,
   service_tier: Val,
+  effort: Val,
   thread_settings: Obj<Settings>,
   message: Text,
   info: Obj<Info>,
@@ -308,6 +309,7 @@ fn parse_file(rollout: &Rollout) -> Parsed {
   session.remote = rollout.remote.clone();
   let mut model: Option<String> = None;
   let mut speed: Option<Speed> = None;
+  let mut effort: Option<String> = None;
   let mut prev_total: Option<Signature> = None;
   // The activity record of the current assistant turn, dropped when its token count follows.
   let mut assistant: Option<usize> = None;
@@ -332,6 +334,9 @@ fn parse_file(rollout: &Rollout) -> Parsed {
         }
         if let Some(x) = p.service_tier.str() {
           speed = Speed::parse(x);
+        }
+        if let Some(x) = p.effort.str() {
+          effort = Some(x.to_string());
         }
       }
       (_, Some("thread_settings_applied")) if event_msg => {
@@ -369,6 +374,7 @@ fn parse_file(rollout: &Rollout) -> Parsed {
           usage: Some(usage),
           model: info.model.str().map(String::from).or_else(|| model.clone()),
           speed,
+          effort: effort.clone(),
           ..Default::default()
         });
         if let Some(i) = assistant.filter(|_| event.as_ref().is_some_and(|x| x.ts.is_some())) {
@@ -606,5 +612,33 @@ mod tests {
       Usage { input: 0, cache_read: 10, output: 0, reasoning: 5, ..Default::default() }
     );
     assert_eq!(delta([5, 5, 5, 5, 5, 5], Some([1, 6, 0, 0, 0, 0])), [4, 0, 5, 5, 5, 5]);
+  }
+
+  #[test]
+  fn carries_the_effort_of_a_turn_context() {
+    let base = std::env::temp_dir().join(format!("cctrail-effort-{}", std::process::id()));
+    let line = |t: u8, kind: &str, payload: &str| {
+      format!(r#"{{"timestamp":"2026-01-01T00:0{t}:00Z","type":"{kind}","payload":{payload}}}"#)
+    };
+    let count = |t, n: u64| {
+      let usage = format!(r#"{{"input_tokens":{n}}}"#);
+      let info = format!(r#"{{"total_token_usage":{usage},"last_token_usage":{usage}}}"#);
+      line(t, "event_msg", &format!(r#"{{"type":"token_count","info":{info}}}"#))
+    };
+    let lines = [
+      line(0, "session_meta", r#"{"id":"s","cwd":"/r"}"#),
+      count(1, 1),
+      line(2, "turn_context", r#"{"model":"gpt-5","effort":"high"}"#),
+      count(3, 2),
+      count(4, 3),
+      line(5, "turn_context", r#"{"effort":"low"}"#),
+      count(6, 4),
+    ];
+    std::fs::create_dir_all(base.join("sessions")).unwrap();
+    std::fs::write(base.join("sessions/rollout.jsonl"), lines.join("\n")).unwrap();
+    let sessions = parse(std::slice::from_ref(&base));
+    let effort: Vec<_> = sessions[0].events.iter().map(|x| x.effort.as_deref()).collect();
+    assert_eq!(effort, [None, Some("high"), Some("high"), Some("low")]);
+    std::fs::remove_dir_all(&base).unwrap();
   }
 }

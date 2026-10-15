@@ -156,7 +156,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     None if app.tab == Tab::Timeline => timeline(f, app, body, &mut hits),
     None => {
       let sessions = app.tab == Tab::Projects;
-      table(f, app, &app.list, &app.total, sessions, body, app.sel(), &mut hits);
+      let name = if app.tab == Tab::Models { "Model" } else { "Project" };
+      let rows = (name, &app.list[..], 0);
+      table(f, app, rows, &app.total, sessions, body, Some(app.sel()), &mut hits);
     }
   }
   f.render_widget(Paragraph::new(dim("─".repeat(rule.width as usize))), rule);
@@ -255,8 +257,8 @@ fn head_style(head: &str) -> Style {
 }
 
 /// Lays out rows under a header, the `total` row right under them, both gutters and a scrollbar
-/// in the right one when the rows don't fit, and records where the header columns and rows went.
-/// Returns the height used.
+/// in the right one when the rows don't fit, and records where the header columns and rows went
+/// (`first`: the index of its first row among all the tables' rows). Returns the height used.
 #[allow(clippy::too_many_arguments)]
 fn grid(
   f: &mut Frame,
@@ -264,7 +266,8 @@ fn grid(
   lines: Vec<TableRow<'static>>,
   total: TableRow<'static>,
   area: Rect,
-  sel: usize,
+  sel: Option<usize>,
+  first: usize,
   hits: &mut Hits,
 ) -> u16 {
   let n = lines.len();
@@ -281,8 +284,11 @@ fn grid(
     .filter(|(c, _)| !c.head.is_empty() && c.col != Col::Share)
     .map(|(c, r)| (r.x, r.x + r.width, c.col))
     .collect();
-  hits.head = Rect { height: 1, ..table };
-  hits.rows = Rect { y: table.y + 1, height: height.saturating_sub(1), ..table };
+  hits.heads.push(Rect { height: 1, ..table });
+  let rows = Rect { y: table.y + 1, height: height.saturating_sub(1), ..table };
+  // The first table keeps its scrolling from the last frame, so the selection moves on screen as
+  // little as it can.
+  let kept = if hits.rows.is_empty() { hits.offset } else { 0 };
   let head = columns.iter().enumerate().map(|(i, c)| match i {
     0 => Cell::from(c.head.clone()).style(head_style(&c.head)),
     _ => num(c.head.clone(), head_style(&c.head)),
@@ -292,12 +298,14 @@ fn grid(
     .row_highlight_style(SELECTED)
     .highlight_symbol("▶ ")
     .highlight_spacing(HighlightSpacing::Always);
-  // From the last frame's first row, so the selection moves on screen as little as it can.
-  let offset = hits.offset.min(n.saturating_sub(usize::from(height.saturating_sub(1))));
-  let mut state = TableState::default().with_offset(offset).with_selected(Some(sel));
+  let offset = kept.min(n.saturating_sub(usize::from(height.saturating_sub(1))));
+  let mut state = TableState::default().with_offset(offset).with_selected(sel);
   f.render_stateful_widget(t, table, &mut state);
-  hits.offset = state.offset();
-  scrollbar(f, area, hits.rows, n, hits.offset);
+  if hits.rows.is_empty() {
+    hits.offset = state.offset();
+  }
+  hits.rows.push((rows, first + state.offset()));
+  scrollbar(f, area, rows, n, state.offset());
   if foot.height > 0 {
     // Unselected, but with the same `▶ ` column, so its cells line up with the rows'.
     let t = Table::new([total.style(BOLD)], widths)
@@ -367,12 +375,12 @@ fn layout(widths: &[Constraint], area: Rect) -> std::rc::Rc<[Rect]> {
 }
 
 fn too_small(f: &mut Frame, area: Rect, hits: &mut Hits) {
-  hits.rows = Rect::default();
+  hits.rows = vec![];
   f.render_widget(Paragraph::new(dim("  The terminal is too small")), area);
 }
 
 fn empty(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
-  hits.rows = Rect::default();
+  hits.rows = vec![];
   let text = match app.filter.is_empty() || !app.list.is_empty() {
     true => "No activity in this period".to_string(),
     false => format!("No match for {:?}", app.filter),
@@ -380,15 +388,17 @@ fn empty(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   f.render_widget(Paragraph::new(dim(format!("  {text}"))), area);
 }
 
+/// A table of `rows` under the header `name`, the first of them `first` among all the tables'
+/// rows, with `total` as its last row.
 #[allow(clippy::too_many_arguments)]
 fn table(
   f: &mut Frame,
   app: &App,
-  rows: &[Row],
+  (name, rows, first): (&str, &[Row], usize),
   total: &Row,
   sessions: bool,
   area: Rect,
-  sel: usize,
+  sel: Option<usize>,
   hits: &mut Hits,
 ) -> u16 {
   if rows.is_empty() {
@@ -396,11 +406,6 @@ fn table(
     return 1;
   }
   let sort = app.sort();
-  let name = match app.tab {
-    _ if app.open.is_some() && app.tab == Tab::Projects => "Model",
-    Tab::Models if app.open.is_none() => "Model",
-    _ => "Project",
-  };
   let column = |col, label, width| Column {
     head: head_label(sort, col, label),
     col,
@@ -445,7 +450,7 @@ fn table(
   let lines = rows.iter().zip(share).map(|(x, s)| cells(x, &x.label, s)).collect();
   let all = if rows.iter().any(|x| of.of(x) > 0.0) { "100%".into() } else { String::new() };
   let total = cells(total, "total", all);
-  grid(f, &columns, lines, total, area, sel, hits)
+  grid(f, &columns, lines, total, area, sel, first, hits)
 }
 
 /// The column's text and color for a row.
@@ -489,16 +494,13 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let axis = top.chars().count() as u16 + 1;
   let x0 = area.x + GUTTER + axis;
   let room = usize::from(area.right().saturating_sub(GUTTER + x0));
-  // Bars of one width, at most seven cells, the newest at the right edge; the columns left over
-  // widen the gaps evenly, or stay left of the first bar when the bars are at their widest.
+  // Bars of one width, at most seven cells, and one-cell gaps, the newest at the right edge; the
+  // columns left over stay left of the first bar.
   let n = rows.len();
   let shown = room.div_ceil(2).min(n).max(1);
   let width = ((room + 1) / shown - 1).clamp(1, 7);
-  let rest = room + 1 - shown * (width + 1);
-  let (left, spread) = if width == 7 || shown == 1 { (rest, 0) } else { (0, rest) };
-  let at =
-    |i: usize| left + i * (width + 1) + (i * spread).div_ceil((shown - 1).max(1)).min(spread);
-  let bar = |i: usize| (at(i), width);
+  let left = room + 1 - shown * (width + 1);
+  let bar = |i: usize| (left + i * (width + 1), width);
   let sel = app.sel().min(n - 1);
   let first = n.saturating_sub(shown).min(sel);
   let style = match col {
@@ -594,9 +596,10 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     ])
   };
   let row = &rows[sel];
-  grid(f, &columns, vec![line(row, &row.label)], line(&app.total, "total"), numbers, 0, hits);
+  let (lines, total) = (vec![line(row, &row.label)], line(&app.total, "total"));
+  grid(f, &columns, lines, total, numbers, Some(0), 0, hits);
   // Bars take the clicks: the table's single row is the selected bar.
-  (hits.cols, hits.head, hits.rows) = (vec![], Rect::default(), Rect::default());
+  (hits.cols, hits.heads, hits.rows) = (vec![], vec![], vec![]);
 }
 
 /// A drill-down, in place of the list: its name, its rows with the opened row as their total and
@@ -612,8 +615,19 @@ fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let body = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
   let below = if d.paths.is_empty() { 0 } else { 2 };
   let room = Rect { height: body.height.saturating_sub(below).max(3), ..body };
-  let used = table(f, app, &d.rows, r, d.sessions, room, app.osel, hits);
-  let y = body.y + used;
+  // Its tables one under another, a blank line between them, the selection counted through all.
+  let mut y = body.y;
+  let mut first = 0;
+  for (name, rows) in &d.parts {
+    let area = Rect { y, height: room.bottom().saturating_sub(y), ..room };
+    if area.height < 3 {
+      break;
+    }
+    let sel = app.osel.checked_sub(first).filter(|x| *x < rows.len());
+    y += table(f, app, (name, rows, first), r, d.sessions, area, sel, hits) + 1;
+    first += rows.len();
+  }
+  let y = y - 1;
   if !d.paths.is_empty() && y + 2 <= area.bottom() {
     let paths = Line::from(vec![dim("  Paths "), Text::styled(d.paths.join(", "), TEXT)]);
     f.render_widget(Paragraph::new(paths), Rect::new(area.x, y + 1, area.width, 1));
@@ -624,8 +638,9 @@ fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
 fn help(f: &mut Frame, area: Rect) {
   let keys = [
     ("1 2 3", "projects / models / timeline"),
-    ("← →", "period: today, week, month, 30 days, all; wraps around"),
+    ("t T", "period: today, week, month, 30 days, all; wraps around"),
     ("↑ ↓", "select a row or a day; wraps around"),
+    ("← →", "on the timeline: the day before / after"),
     ("PgUp PgDn", "a page up / down"),
     ("Home End", "the first / last row"),
     ("enter", "open: project → models, model → projects, day → projects"),
@@ -634,7 +649,10 @@ fn help(f: &mut Frame, area: Rect) {
     ("S", "reverse the sort"),
     ("p", "provider: both / claude / codex"),
     ("/", "filter by name"),
-    ("mouse", "click a row or bar to select it, again to open it; a header sorts, again reverses"),
+    (
+      "mouse",
+      "click a row or bar to select it, again to open it; a header sorts, again reverses; the wheel moves 3 rows",
+    ),
     ("?", "this help"),
     ("q", "back; quits from a list"),
   ];
@@ -689,14 +707,14 @@ fn footer(app: &App, width: u16) -> Line<'static> {
       ("↑↓", "select", 2),
       ("s", "sort", 1),
       ("esc", "back", 7),
-      ("←→", "period", 0),
+      ("t", "period", 0),
       ("?", "help", 8),
     ],
     _ if app.tab == Tab::Timeline => &[
-      ("↑↓", "day", 6),
+      ("←→", "day", 6),
       ("enter", "open", 5),
       ("s", "bars", 4),
-      ("←→", "period", 3),
+      ("t", "period", 3),
       ("p", "provider", 1),
       ("1-3", "view", 0),
       ("?", "help", 8),
@@ -706,7 +724,7 @@ fn footer(app: &App, width: u16) -> Line<'static> {
       ("↑↓", "select", 6),
       ("enter", "open", 5),
       ("s", "sort", 4),
-      ("←→", "period", 3),
+      ("t", "period", 3),
       ("p", "provider", 1),
       ("1-3", "view", 0),
       ("/", "filter", 2),

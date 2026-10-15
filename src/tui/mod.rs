@@ -79,11 +79,27 @@ pub type Sort = (Col, bool);
 /// A drill-down: the opened row, what it shows and how its rows are sorted.
 pub struct Detail {
   pub row: Row,
-  pub rows: Vec<Row>,
+  /// Its tables, each by the header of its names: a project's models, a day's projects, a
+  /// model's speeds and efforts.
+  pub parts: Vec<(&'static str, Vec<Row>)>,
   pub paths: Vec<String>,
   pub sort: Sort,
   /// Whether its rows count sessions: the projects of a day do.
   pub sessions: bool,
+}
+
+impl Detail {
+  /// The rows of all its tables, in order; the selection counts through them.
+  pub fn rows(&self) -> Vec<&Row> {
+    self.parts.iter().flat_map(|x| &x.1).collect()
+  }
+
+  fn sort(&mut self, by: Sort) {
+    self.sort = by;
+    for part in &mut self.parts {
+      sort(&mut part.1, by);
+    }
+  }
 }
 
 /// Where the last frame put what a click can hit.
@@ -92,11 +108,12 @@ pub struct Hits {
   pub periods: Vec<(Rect, Span)>,
   pub provider: Rect,
   pub tabs: Vec<(Rect, Tab)>,
-  /// The header row of the table and the sortable columns' x ranges.
-  pub head: Rect,
+  /// The header rows of the tables and the sortable columns' x ranges.
+  pub heads: Vec<Rect>,
   pub cols: Vec<(u16, u16, Col)>,
-  /// The rows' area and the first row shown in it.
-  pub rows: Rect,
+  /// The tables' rows: their area and the index of the first one shown; the first table's
+  /// scrolling.
+  pub rows: Vec<(Rect, usize)>,
   pub offset: usize,
   /// The timeline's bars and the rows they stand for.
   pub bars: Vec<(Rect, usize)>,
@@ -108,6 +125,11 @@ impl Hits {
   /// The first row shown of a view the last frame drew, else none scrolled.
   pub fn offset_of(&self, view: (Tab, bool)) -> usize {
     if self.view == Some(view) { self.offset } else { 0 }
+  }
+
+  /// The rows a page holds: the first table's.
+  fn page(&self) -> usize {
+    self.rows.first().map_or(1, |x| usize::from(x.0.height).max(1))
   }
 }
 
@@ -176,8 +198,9 @@ impl App {
     let now = (self.tab, self.span.gran());
     let kept =
       self.shown.filter(|x| *x == now).and(self.list.get(self.sel())).map(|x| x.key.clone());
-    let okept = self.open.as_ref().and_then(|d| d.rows.get(self.osel)).map(|x| x.key.clone());
-    let (projects, total) = self.data.projects(self.span, self.prov, false);
+    let okept = self.open.as_ref().and_then(|d| d.rows().get(self.osel).map(|x| x.key.clone()));
+    // Every project: the list scrolls, `other` is for the text report.
+    let (projects, total) = self.data.projects(self.span, self.prov, true);
     self.total = total;
     self.unpriced = self.data.unpriced(self.span, self.prov);
     let mut list = match self.tab {
@@ -210,7 +233,7 @@ impl App {
       let sort = open.sort;
       let row = self.list.iter().find(|x| x.key == open.row.key).cloned();
       self.open = row.map(|x| self.detail(x, sort));
-      let rows = self.open.as_ref().map_or(&[][..], |x| &x.rows);
+      let rows = self.open.as_ref().map_or(vec![], |x| x.rows());
       let found = okept.and_then(|k| rows.iter().position(|x| x.key == k));
       self.osel = found.unwrap_or(self.osel).min(rows.len().saturating_sub(1));
     }
@@ -218,26 +241,26 @@ impl App {
 
   fn detail(&self, row: Row, sort: Sort) -> Detail {
     let (span, prov) = (self.span, self.prov);
-    let mut rows = match self.tab {
-      Tab::Projects => self.data.models(span, prov, Some(&row.key)),
-      Tab::Models => self.data.model_projects(span, prov, &row.key),
-      Tab::Timeline => self.data.bucket_projects(span, prov, row.day.unwrap_or(self.data.today)),
+    let day = row.day.unwrap_or(self.data.today);
+    let parts = match self.tab {
+      Tab::Projects => vec![("Model", self.data.models(span, prov, Some(&row.key)))],
+      Tab::Models => {
+        let [speed, effort] = self.data.model_usage(span, prov, &row.key);
+        vec![("Speed", speed), ("Effort", effort)]
+      }
+      Tab::Timeline => vec![("Project", self.data.bucket_projects(span, prov, day))],
     };
     let sessions = self.tab == Tab::Timeline;
     let sort = if sort.0 == Col::Sessions && !sessions { Col::Time.sorted() } else { sort };
-    self::sort(&mut rows, sort);
     let mut row = row;
     if sessions {
-      row.sessions = Some(rows.iter().filter_map(|x| x.sessions).sum());
+      row.sessions = Some(parts[0].1.iter().filter_map(|x| x.sessions).sum());
     }
     let project = self.tab == Tab::Projects;
-    Detail {
-      paths: if project { self.data.paths(&row.key) } else { vec![] },
-      rows,
-      row,
-      sort,
-      sessions,
-    }
+    let paths = if project { self.data.paths(&row.key) } else { vec![] };
+    let mut d = Detail { parts, paths, row, sort, sessions };
+    d.sort(sort);
+    d
   }
 
   /// Opens the selected row; `other` and empty days open nothing.
@@ -253,7 +276,7 @@ impl App {
   /// The selection of the list or the drill-down and its rows' count.
   fn selection(&mut self) -> (&mut usize, usize) {
     match &self.open {
-      Some(d) => (&mut self.osel, d.rows.len()),
+      Some(d) => (&mut self.osel, d.rows().len()),
       None => (&mut self.sel[self.tab as usize], self.list.len()),
     }
   }
@@ -263,7 +286,7 @@ impl App {
   fn nav(&mut self, code: KeyCode) {
     let page = match self.open.is_none() && self.tab == Tab::Timeline {
       true => 7,
-      false => usize::from(self.hits.borrow().rows.height).max(1),
+      false => self.hits.borrow().page(),
     };
     let (sel, len) = self.selection();
     if let Some(i) = step(code, *sel, page, len) {
@@ -275,10 +298,9 @@ impl App {
   fn sort_by(&mut self, by: Sort) {
     match &mut self.open {
       Some(d) => {
-        let key = d.rows.get(self.osel).map(|x| x.key.clone());
-        d.sort = by;
-        sort(&mut d.rows, by);
-        self.osel = d.rows.iter().position(|x| Some(&x.key) == key.as_ref()).unwrap_or(0);
+        let key = d.rows().get(self.osel).map(|x| x.key.clone());
+        d.sort(by);
+        self.osel = d.rows().iter().position(|x| Some(&x.key) == key.as_ref()).unwrap_or(0);
       }
       None => {
         self.sorts[self.tab as usize] = by;
@@ -348,8 +370,14 @@ impl App {
       KeyCode::Char('q') => return self.quit = true,
       KeyCode::Char('?') => return self.help = true,
       KeyCode::Char(c @ '1'..='3') => self.tab(c as usize - '1' as usize),
-      KeyCode::Left => self.span = Span::ALL[(self.span as usize + Span::ALL.len() - 1) % 5],
-      KeyCode::Right => self.span = Span::ALL[(self.span as usize + 1) % Span::ALL.len()],
+      KeyCode::Char('T') => self.span = Span::ALL[(self.span as usize + Span::ALL.len() - 1) % 5],
+      KeyCode::Char('t') if shift => {
+        self.span = Span::ALL[(self.span as usize + Span::ALL.len() - 1) % 5];
+      }
+      KeyCode::Char('t') => self.span = Span::ALL[(self.span as usize + 1) % Span::ALL.len()],
+      // On the timeline ← → move between bars as ↑ ↓ do; elsewhere they do nothing.
+      KeyCode::Left if self.bars() => return self.nav(KeyCode::Up),
+      KeyCode::Right if self.bars() => return self.nav(KeyCode::Down),
       KeyCode::Char('p') => self.next_provider(),
       KeyCode::Char('S') => return self.reverse(),
       KeyCode::Char('s') if shift => return self.reverse(),
@@ -363,6 +391,11 @@ impl App {
       _ => return,
     }
     self.refresh();
+  }
+
+  /// Whether the timeline's bars are on screen.
+  fn bars(&self) -> bool {
+    self.open.is_none() && self.tab == Tab::Timeline
   }
 
   /// `S`: the other direction; the timeline's days stay in order.
@@ -386,21 +419,27 @@ impl App {
     (self.open, self.help) = (None, false);
   }
 
-  /// Moves the selection `rows` rows (negative: up), stopping at the ends, and scrolls the list as
-  /// much, so the selected row keeps its place on screen until the list hits its top or end.
+  /// Moves the selection `rows` rows (negative: up), past an end around to the other as ↑ ↓ do,
+  /// and scrolls the list as much, so the selected row keeps its place on screen until the list
+  /// hits its top or end.
   fn wheel(&mut self, rows: isize) {
     let (sel, len) = self.selection();
     let Some(last) = len.checked_sub(1) else { return };
-    let (from, to) = (*sel, sel.saturating_add_signed(rows).min(last));
+    let from = *sel;
+    let to = match (from, rows < 0) {
+      (0, true) => last,
+      (_, false) if from == last => 0,
+      _ => from.saturating_add_signed(rows).min(last),
+    };
     *sel = to;
     let mut hits = self.hits.borrow_mut();
-    let page = usize::from(hits.rows.height).max(1);
+    let page = hits.page();
     hits.offset = ((hits.offset + to).saturating_sub(from)).min(len.saturating_sub(page));
   }
 
-  /// Clicks on periods, the provider, tabs, column headers, rows and bars; the wheel scrolls,
-  /// stopping at the ends; a click on the selected row or bar opens it (so does a double click),
-  /// anywhere while the help is open closes it.
+  /// Clicks on periods, the provider, tabs, column headers, rows and bars; the wheel scrolls; a
+  /// click on the selected row or bar opens it (so does a double click), anywhere while the help
+  /// is open closes it.
   pub fn mouse(&mut self, ev: MouseEvent) {
     let at = Position::new(ev.column, ev.row);
     match ev.kind {
@@ -419,7 +458,7 @@ impl App {
       self.next_provider();
     } else if let Some((_, tab)) = hits.tabs.iter().find(|x| x.0.contains(at)) {
       self.tab(*tab as usize);
-    } else if hits.head.contains(at) {
+    } else if hits.heads.iter().any(|x| x.contains(at)) {
       if let Some(&(_, _, col)) = hits.cols.iter().find(|x| (x.0..x.1).contains(&at.x)) {
         self.click_sort(col);
       }
@@ -430,10 +469,10 @@ impl App {
         false => self.sel[self.tab as usize] = i,
       }
       return;
-    } else if hits.rows.contains(at) {
-      let i = hits.offset + usize::from(at.y - hits.rows.y);
+    } else if let Some((rect, first)) = hits.rows.iter().find(|x| x.0.contains(at)) {
+      let i = first + usize::from(at.y - rect.y);
       let (sel, len) = match &self.open {
-        Some(d) => (self.osel, d.rows.len()),
+        Some(d) => (self.osel, d.rows().len()),
         None => (self.sel(), self.list.len()),
       };
       if i >= len {
@@ -595,16 +634,16 @@ mod tests {
   /// The fixtures, all of their history.
   fn app() -> App {
     let mut app = App::new(data::tests::data());
-    press(&mut app, KeyCode::Right);
-    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char('t'));
     app
   }
 
   /// Many projects, all of their history.
   fn many() -> App {
     let mut app = App::new(data::tests::many());
-    press(&mut app, KeyCode::Right);
-    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char('t'));
     app
   }
 
@@ -659,7 +698,7 @@ mod tests {
     let out = screen_of(&buf);
     assert!(!out.contains('╭') && !out.contains('█') && out.contains("Paths"), "{out}");
     let d = app.open.as_ref().unwrap();
-    let times: i64 = d.rows.iter().map(|x| x.active.unwrap()).sum();
+    let times: i64 = d.rows().into_iter().map(|x| x.active.unwrap()).sum();
     assert_eq!(times, d.row.active.unwrap(), "{out}");
     let y = find(&buf, "claude/claude-sonnet-5");
     assert_eq!(fg(&buf, y, "claude/claude-sonnet-5"), Color::Reset);
@@ -767,17 +806,19 @@ mod tests {
     assert_eq!(app.sel(), last);
     press(&mut app, KeyCode::Down);
     assert_eq!(app.sel(), 0);
-    // The wheel stops at the ends.
+    // The wheel wraps around at the ends too.
     wheel(&mut app, MouseEventKind::ScrollUp);
-    assert_eq!(app.sel(), 0);
-    press(&mut app, KeyCode::End);
-    wheel(&mut app, MouseEventKind::ScrollDown);
     assert_eq!(app.sel(), last);
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    assert_eq!(app.sel(), 0);
+    // ← → do nothing in a list.
+    press(&mut app, KeyCode::Right);
+    assert_eq!((app.sel(), app.span), (0, Span::All));
     // Periods wrap around too.
     assert_eq!(app.span, Span::All);
-    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Char('t'));
     assert_eq!(app.span, Span::Today);
-    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Char('T'));
     assert_eq!(app.span, Span::All);
     // A scrollbar in the right gutter when the rows don't fit, none when they do.
     let bar = |buf: &Buffer| {
@@ -832,20 +873,20 @@ mod tests {
     press(&mut app, KeyCode::Enter);
     let out = screen(&app);
     assert!(out.contains("claude/claude-sonnet-5") && out.contains(data::tests::REPO), "{out}");
-    let models = app.open.as_ref().unwrap().rows.len();
+    let models = app.open.as_ref().unwrap().rows().len();
     press(&mut app, KeyCode::Down);
     assert_eq!(app.osel, 1.min(models - 1));
     // A drill-down sorts on its own, keeping its selected row.
-    let key = app.open.as_ref().unwrap().rows[app.osel].key.clone();
+    let key = app.open.as_ref().unwrap().rows()[app.osel].key.clone();
     press(&mut app, KeyCode::Char('s'));
     let d = app.open.as_ref().unwrap();
-    assert_eq!((d.sort, &d.rows[app.osel].key), ((Col::Tokens, true), &key));
+    assert_eq!((d.sort, &d.rows()[app.osel].key), ((Col::Tokens, true), &key));
     assert_eq!(app.sorts[0], (Col::Time, true));
     // The opened row follows the provider: codex alone has no oss/demo models from claude.
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Char('p'));
     let open = app.open.as_ref().unwrap();
-    assert!(open.rows.iter().all(|x| x.key.starts_with("codex/")));
+    assert!(open.rows().into_iter().all(|x| x.key.starts_with("codex/")));
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Esc);
     assert!(app.open.is_none());
@@ -853,9 +894,67 @@ mod tests {
     press(&mut app, KeyCode::Char('2'));
     assert!(screen(&app).contains("codex/gpt-5.4"));
     press(&mut app, KeyCode::Enter);
-    assert!(screen(&app).contains("oss/demo"));
+    let out = screen(&app);
+    assert!(out.contains("Speed") && out.contains("Effort") && out.contains("standard"), "{out}");
     press(&mut app, KeyCode::Char('3'));
     assert!(app.list.iter().all(|x| x.day.is_some()));
+  }
+
+  #[test]
+  fn a_model_shows_its_speeds_and_efforts() {
+    let mut app = many();
+    press(&mut app, KeyCode::Char('2'));
+    // One row per model: fast and standard together.
+    assert_eq!(app.list.iter().filter(|x| x.key.contains("gpt-5.4")).count(), 1);
+    let i = app.list.iter().position(|x| x.key == "codex/gpt-5.4").unwrap();
+    app.sel[1] = i;
+    press(&mut app, KeyCode::Enter);
+    let buf = frame(&app);
+    let out = screen_of(&buf);
+    // A speed table and an effort table, each totalling the model.
+    let (speed, effort) = (find(&buf, "Speed"), find(&buf, "Effort"));
+    assert!(speed < effort && !out.contains("w/api"), "{out}");
+    let names = |from: u16, to: u16| {
+      (from + 1..to).map(|y| cells(&line(&buf, y))[0].clone()).collect::<Vec<_>>()
+    };
+    let mut speeds = names(speed, effort - 2);
+    speeds.sort();
+    assert_eq!(speeds, ["fast", "standard"], "{out}");
+    let total = (effort + 1..buf.area.height).find(|y| line(&buf, *y).contains("total")).unwrap();
+    let mut efforts = names(effort, total);
+    efforts.sort();
+    assert_eq!(efforts, ["high", "low"], "{out}");
+    let model = crate::output::duration(app.open.as_ref().unwrap().row.active.unwrap());
+    assert_eq!(cells(&line(&buf, total))[1], model);
+    // The selection goes through both tables.
+    press(&mut app, KeyCode::End);
+    assert_eq!(app.osel, 3);
+    assert!(line(&frame(&app), total - 1).starts_with('▶'));
+    // An effort that isn't logged reads `–`.
+    press(&mut app, KeyCode::Esc);
+    app.sel[1] = app.list.iter().position(|x| x.key == "claude/claude-unknown-1").unwrap();
+    press(&mut app, KeyCode::Enter);
+    let buf = frame(&app);
+    assert_eq!(cells(&line(&buf, find(&buf, "Effort") + 1))[0], "–");
+  }
+
+  #[test]
+  fn t_cycles_the_period_and_arrows_move_the_timeline() {
+    let mut app = App::new(data::tests::many());
+    assert_eq!(app.span, Span::Month);
+    press(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.span, Span::Days30);
+    press(&mut app, KeyCode::Char('T'));
+    press(&mut app, KeyCode::Char('T'));
+    assert_eq!(app.span, Span::Week);
+    press(&mut app, KeyCode::Char('3'));
+    let last = app.list.len() - 1;
+    assert_eq!(app.sel(), last);
+    press(&mut app, KeyCode::Left);
+    assert_eq!((app.sel(), app.span), (last - 1, Span::Week));
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.sel(), 0);
   }
 
   #[test]
@@ -877,7 +976,8 @@ mod tests {
         .map(|x| x.trim_end_matches('%').parse::<i64>().unwrap_or(0))
         .sum();
       assert_eq!(shares, 100, "{width}");
-      assert!(screen_of(&buf).contains("other (2 dirs)"));
+      // Every project, `other` only in the text report.
+      assert!(screen_of(&buf).contains("/tmp/b") && !screen_of(&buf).contains("other"));
       let long = "w/a-project-with-a-name-too-long-for-a-narrow-terminal";
       assert_eq!(screen_of(&buf).contains(long), width == 140, "{width}");
       assert!(width == 140 || line(&buf, find(&buf, "w/a-project-with-")).contains('…'));
@@ -905,7 +1005,7 @@ mod tests {
       let total = find(&buf, "total");
       assert_eq!(cells(&line(&buf, total))[1], project);
       let d = app.open.as_ref().unwrap();
-      for (y, row) in (head + 1..total).zip(&d.rows) {
+      for (y, row) in (head + 1..total).zip(d.rows()) {
         assert_eq!(cells(&line(&buf, y))[1], crate::output::duration(row.active.unwrap()));
       }
       assert!(!line(&buf, head).contains("Sessions"));
@@ -922,7 +1022,7 @@ mod tests {
         "sort" => press(&mut app, KeyCode::Char('s')),
         "reverse" => press(&mut app, KeyCode::Char('S')),
         "provider" => press(&mut app, KeyCode::Char('p')),
-        _ => press(&mut app, KeyCode::Left),
+        _ => press(&mut app, KeyCode::Char('T')),
       }
       assert_eq!(app.list[app.sel()].key, key, "after {change}");
     }
@@ -951,7 +1051,7 @@ mod tests {
   fn timeline_draws_a_bar_per_day() {
     let mut app = many();
     press(&mut app, KeyCode::Char('3'));
-    press(&mut app, KeyCode::Left); // 30 days
+    press(&mut app, KeyCode::Char('T')); // 30 days
     let last = app.list.len() - 1;
     assert_eq!((app.list.len(), app.sel()), (30, last));
     let buf = frame(&app);
@@ -971,6 +1071,10 @@ mod tests {
     let widths: Vec<usize> =
       bars.split(' ').filter(|t| blocks(t)).map(|t| t.chars().count()).collect();
     assert!(widths.windows(2).all(|w| w[0] == w[1]), "{out}");
+    // The busy days are next to each other: one-cell gaps between their bars.
+    let from = bars.find(|c| "▁▂▃▄▅▆▇█".contains(c)).unwrap();
+    let to = bars.rfind(|c| "▁▂▃▄▅▆▇█".contains(c)).unwrap();
+    assert!(!bars[from..to].contains("  "), "{out}");
     assert_eq!(fg(&buf, base - 2, "█"), Color::Yellow);
     // The newest bar ends at the right gutter; the newest day is empty, yet its slot is marked
     // on the axis and its numbers are dashes.
@@ -1015,24 +1119,24 @@ mod tests {
     assert_eq!(app.sel(), i);
     click(&mut app, rect.x, rect.bottom() - 1);
     let d = app.open.as_ref().unwrap();
-    assert_eq!(d.row.sessions, Some(d.rows.iter().filter_map(|x| x.sessions).sum()));
+    assert_eq!(d.row.sessions, Some(d.rows().into_iter().filter_map(|x| x.sessions).sum()));
     press(&mut app, KeyCode::Esc);
     // Days and weeks don't share a selection: a change between them starts at the newest.
     press(&mut app, KeyCode::Up);
     let day = app.list[app.sel()].key.clone();
-    press(&mut app, KeyCode::Left);
+    press(&mut app, KeyCode::Char('T'));
     assert_eq!(app.list[app.sel()].key, day);
-    press(&mut app, KeyCode::Right);
-    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char('t'));
     assert_eq!(app.span, Span::All);
     assert_eq!(app.sel(), app.list.len() - 1);
     assert!(line(&frame(&app), 3).contains("Cost by week"));
 
     let mut app = App::new(data::tests::data());
-    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Char('t'));
     assert_eq!(app.span, Span::Days30);
-    press(&mut app, KeyCode::Right);
-    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char('t'));
     assert_eq!(app.span, Span::Today);
     assert!(screen(&app).contains("No activity in this period"));
     press(&mut app, KeyCode::Char('3'));
@@ -1042,22 +1146,26 @@ mod tests {
   #[test]
   fn the_wheel_moves_three_rows_and_small_screens_say_so() {
     let mut app = many();
-    // Four rows in a list three high: the wheel moves three rows and the list as much, the
-    // selected row keeping its place until the end.
+    // Five rows in a list three high: the wheel moves three rows and the list as much, the
+    // selected row keeping its place until the end, then around to the top.
+    assert_eq!(app.list.len(), 5);
     frame_of(&app, 80, 10);
     wheel(&mut app, MouseEventKind::ScrollDown);
     assert_eq!(app.sel(), 3);
     let buf = frame_of(&app, 80, 10);
-    assert_eq!(app.hits.borrow().offset, 1);
-    assert!(line(&buf, 6).starts_with("▶ other"), "{}", screen_of(&buf));
-    // `other` stays last whatever the order, a name like the others.
-    press(&mut app, KeyCode::Char('S'));
-    let buf = frame_of(&app, 80, 24);
-    let y = find(&buf, "other (2 dirs)");
-    assert_eq!(y + 1, find(&buf, "total"), "{}", screen_of(&buf));
-    assert_eq!((buf[(2, y)].fg, buf[(2, y)].modifier), (Color::Reset, Modifier::empty()));
+    assert_eq!(app.hits.borrow().offset, 2);
+    assert!(line(&buf, 5).starts_with('▶'), "{}", screen_of(&buf));
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    assert_eq!(app.sel(), 4);
+    wheel(&mut app, MouseEventKind::ScrollDown);
+    assert_eq!(app.sel(), 0);
     // A drill-down too low for a scrollbar shows arrows where there is more.
     press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char('/'));
+    for c in "gpt".chars() {
+      press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Enter);
     press(&mut app, KeyCode::Enter);
     let buf = frame_of(&app, 80, 10);
     let edge: String = (0..10).map(|y| buf[(79, y)].symbol().to_string()).collect();

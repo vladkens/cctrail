@@ -27,6 +27,9 @@ struct Line {
   sidechain: Val,
   #[serde(rename = "isApiErrorMessage")]
   api_error: Val,
+  effort: Val,
+  #[serde(rename = "perTurnEffort")]
+  turn_effort: Val,
   message: Obj<Message>,
   #[serde(rename = "toolUseResult")]
   result: Obj<ToolResult>,
@@ -284,6 +287,9 @@ fn record_assistant(
   if event.model.is_none() {
     event.model = message.model.str().map(String::from);
   }
+  if event.effort.is_none() {
+    event.effort = line.turn_effort.str().or(line.effort.str()).map(String::from);
+  }
   if let Some(raw) = &message.usage.0 {
     let usage = raw.usage();
     if event.usage.is_none_or(|x| usage.total() > x.total()) {
@@ -493,5 +499,22 @@ mod tests {
     );
     let usage = serde_json::from_str::<RawUsage>(&raw).unwrap().usage();
     assert_eq!((usage.cache_write_5m, usage.cache_write_1h), (max, 1));
+  }
+
+  #[test]
+  fn reads_the_effort_of_a_turn() {
+    let line = |s: &str| serde_json::from_str::<Obj<Line>>(s).unwrap().0.unwrap();
+    let mut session = Session::new("s", true, "/repo", Provider::Claude);
+    let (mut calls, mut turns) = (vec![], HashMap::new());
+    let lines = [
+      r#"{"type": "assistant", "effort": "high", "perTurnEffort": "max", "message": {"id": "a", "usage": {"input_tokens": 1}}}"#,
+      r#"{"type": "assistant", "effort": "low", "message": {"id": "b", "usage": {"input_tokens": 1}}}"#,
+      r#"{"type": "assistant", "message": {"id": "c", "usage": {"input_tokens": 1}}}"#,
+    ];
+    for x in lines {
+      record_assistant(&mut session, &mut calls, &mut turns, &line(x));
+    }
+    let effort: Vec<_> = session.events.iter().map(|x| x.effort.as_deref()).collect();
+    assert_eq!(effort, [Some("max"), Some("low"), None]);
   }
 }
