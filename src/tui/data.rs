@@ -85,6 +85,8 @@ pub struct Data {
   times: RefCell<Kept<Times>>,
   /// `bucket_models` of the last span and provider asked for.
   buckets: RefCell<Kept<Buckets>>,
+  /// `model_rank` of the last provider asked for.
+  rank: RefCell<Option<(Option<Provider>, Vec<String>)>>,
 }
 
 impl Data {
@@ -111,6 +113,7 @@ impl Data {
       today,
       times: RefCell::default(),
       buckets: RefCell::default(),
+      rank: RefCell::default(),
     }
   }
 
@@ -317,6 +320,23 @@ impl Data {
     }
     rows.sort_by_key(|x| x.day);
     rows
+  }
+
+  /// The models by their tokens over all of the history, most first: an order that doesn't change
+  /// with the period or what is shown, for their colors.
+  pub fn model_rank(&self, prov: Option<Provider>) -> std::cell::Ref<'_, Vec<String>> {
+    if self.rank.borrow().as_ref().is_none_or(|x| x.0 != prov) {
+      let mut tokens: HashMap<String, u64> = HashMap::new();
+      for (si, ei) in self.events(prov) {
+        let (s, e) = (&self.sessions[si], &self.sessions[si].events[ei]);
+        let t = tokens.entry(model_key(s.provider, model(e))).or_default();
+        *t = t.saturating_add(e.usage.unwrap_or_default().total());
+      }
+      let mut rank: Vec<(String, u64)> = tokens.into_iter().collect();
+      rank.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+      *self.rank.borrow_mut() = Some((prov, rank.into_iter().map(|x| x.0).collect()));
+    }
+    std::cell::Ref::map(self.rank.borrow(), |x| &x.as_ref().unwrap().1)
   }
 
   /// Each timeline bucket's models with their time, tokens and cost; the time as in `times`, each

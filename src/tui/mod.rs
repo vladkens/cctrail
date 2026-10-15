@@ -129,6 +129,8 @@ pub struct Hits {
   pub bars: Vec<(Rect, usize)>,
   /// The tab and whether a drill-down was drawn: what `offset` is of.
   pub view: Option<(Tab, bool)>,
+  /// How far the help can scroll.
+  pub help_max: u16,
 }
 
 impl Hits {
@@ -157,6 +159,8 @@ pub struct App {
   /// The selected row of the drill-down.
   pub osel: usize,
   pub help: bool,
+  /// The first line of the help shown, when it doesn't fit.
+  pub help_top: u16,
   pub filter: String,
   pub typing: bool,
   /// The rows of the current tab, sorted and filtered, and the period's total.
@@ -183,6 +187,7 @@ impl App {
       open: None,
       osel: 0,
       help: false,
+      help_top: 0,
       filter: String::new(),
       typing: false,
       list: vec![],
@@ -359,10 +364,16 @@ impl App {
       }
       return self.refresh();
     }
-    // The help takes every key while open, as macmon's: Esc, `?` and `q` close it.
+    // The help takes every key while open, as macmon's: Esc, ←, `?` and `q` close it, ↑ ↓
+    // scroll it when it doesn't fit.
     if self.help {
-      if matches!(key.code, KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('?' | 'q')) {
-        self.help = false;
+      match key.code {
+        KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('?' | 'q') => {
+          self.help = false;
+        }
+        KeyCode::Up => self.scroll_help(-1),
+        KeyCode::Down => self.scroll_help(1),
+        _ => {}
       }
       return;
     }
@@ -376,7 +387,7 @@ impl App {
       _ if back && self.filter.is_empty() => return,
       _ if back => self.filter.clear(),
       KeyCode::Char('q') => return self.quit = true,
-      KeyCode::Char('?') => return self.help = true,
+      KeyCode::Char('?') => return (self.help, self.help_top) = (true, 0),
       KeyCode::Char(c @ '1'..='3') => self.tab(c as usize - '1' as usize),
       KeyCode::Char('T') => self.span = Span::ALL[(self.span as usize + Span::ALL.len() - 1) % 5],
       KeyCode::Char('t') if shift => {
@@ -436,12 +447,21 @@ impl App {
     hits.offset = ((hits.offset + to).saturating_sub(from)).min(len.saturating_sub(page));
   }
 
+  /// Scrolls the help by `lines`, as far as the last frame left lines below it.
+  fn scroll_help(&mut self, lines: isize) {
+    let max = self.hits.borrow().help_max;
+    self.help_top = self.help_top.saturating_add_signed(lines as i16).min(max);
+  }
+
   /// Clicks on periods, the provider, tabs, column headers, rows and bars; the wheel scrolls; a
   /// click on the selected row or bar opens it (so does a double click), anywhere while the help
   /// is open closes it.
   pub fn mouse(&mut self, ev: MouseEvent) {
     let at = Position::new(ev.column, ev.row);
     match ev.kind {
+      // Over the help, the wheel scrolls it, not the list under it.
+      MouseEventKind::ScrollUp if self.help => return self.scroll_help(-WHEEL_ROWS),
+      MouseEventKind::ScrollDown if self.help => return self.scroll_help(WHEEL_ROWS),
       MouseEventKind::ScrollUp => return self.wheel(-WHEEL_ROWS),
       MouseEventKind::ScrollDown => return self.wheel(WHEEL_ROWS),
       MouseEventKind::Down(MouseButton::Left) => {}
@@ -1093,14 +1113,15 @@ mod tests {
     assert_eq!(app.list[0].day.unwrap(), jiff::civil::date(2026, 1, 10));
     let buf = frame(&app);
     let out = screen_of(&buf);
-    // The top half: a choice of what the bars show, the legend, the largest value on the axis.
+    // The top half: a choice of what the bars show, the largest value, the legend.
     assert!(line(&buf, 1).starts_with("  Time Tokens Cost  by day"), "{out}");
     assert_eq!((fg(&buf, 1, "Time"), fg(&buf, 1, "Tokens")), (Color::Cyan, Color::DarkGray));
     for model in ["claude-sonnet-5", "claude-unknown-1", "gpt-5.4"] {
       assert!(line(&buf, 1).contains(&format!("■ {model}")), "{out}");
     }
     let max = app.list.iter().filter_map(|x| x.active).max().unwrap();
-    assert!(line(&buf, 2).contains(&crate::output::duration(max)), "{out}");
+    let largest = format!("by day · max {}", crate::output::duration(max));
+    assert!(line(&buf, 1).contains(&largest), "{out}");
     // The bottom half: a divider, then the days as a table with its total.
     let divider = (1..29).find(|y| raw(&buf, *y).starts_with('├')).unwrap();
     assert_eq!(divider, 15, "{out}");
@@ -1134,7 +1155,8 @@ mod tests {
     assert_eq!(app.list[app.sel()].day.unwrap(), jiff::civil::date(2026, 1, 8));
     let buf = frame(&app);
     let (rect, _) = *app.hits.borrow().bars.iter().find(|x| x.1 == app.sel()).unwrap();
-    assert_eq!(buf[(rect.x, rect.y)].bg, Color::Indexed(236));
+    let low = rect.bottom() - 3;
+    assert_eq!((buf[(rect.x, low)].fg, buf[(rect.x, low)].bg), (Color::Reset, Color::Reset));
     // `s` or a click on the choice picks what the bars show.
     press(&mut app, KeyCode::Char('s'));
     press(&mut app, KeyCode::Char('s'));
@@ -1214,5 +1236,99 @@ mod tests {
     assert_eq!(app.sel(), 3);
     pump(&mut app, spin(1), &mut wheeled, now + std::time::Duration::from_millis(40));
     assert_eq!(app.sel(), 4);
+  }
+
+  /// The color of the legend's square for `model` on line 1.
+  fn square(buf: &Buffer, model: &str) -> Color {
+    fg(buf, 1, &format!("■ {model}"))
+  }
+
+  #[test]
+  fn models_keep_their_colors_and_the_legend_names_them() {
+    let mut app = many();
+    press(&mut app, KeyCode::Char('3'));
+    let buf = frame(&app);
+    let models = ["gpt-5.4", "claude-sonnet-5", "claude-unknown-1"];
+    let colors: Vec<Color> = models.map(|m| square(&buf, m)).to_vec();
+    // The same colors whatever the bars show and whatever the period (a model without a price
+    // has no cost to show).
+    for key in ['s', 's', 'T', 't', 't'] {
+      press(&mut app, KeyCode::Char(key));
+      let buf = frame(&app);
+      for (model, color) in models.iter().zip(&colors) {
+        if line(&buf, 1).contains(&format!("■ {model}")) {
+          assert_eq!(square(&buf, model), *color, "{}", screen_of(&buf));
+        }
+      }
+    }
+    // Narrow, the names are cut or fold into `other`, and every color in the bars is named.
+    for width in [60, 80] {
+      let buf = frame_of(&app, width, 30);
+      let named: std::collections::HashSet<Color> =
+        (1..width - 1).filter(|x| buf[(*x, 1)].symbol() == "■").map(|x| buf[(x, 1)].fg).collect();
+      let drawn: std::collections::HashSet<Color> = (2..14)
+        .flat_map(|y| (1..width - 1).map(move |x| (x, y)))
+        .filter(|p| "▁▂▃▄▅▆▇█".contains(buf[*p].symbol()) && buf[*p].fg != Color::Reset)
+        .map(|p| buf[p].fg)
+        .collect();
+      assert!(drawn.is_subset(&named), "{width}: {}", screen_of(&buf));
+    }
+  }
+
+  #[test]
+  fn narrow_tables_drop_columns_and_never_cut_numbers() {
+    let app = many();
+    for (width, gone) in [(60, &["Sessions", "Share"][..]), (44, &["Sessions", "Share", "Tokens"])]
+    {
+      let buf = frame_of(&app, width, 24);
+      let head = cells(&line(&buf, find(&buf, "Project")));
+      assert!(gone.iter().all(|x| !head.contains(&x.to_string())), "{width}: {head:?}");
+      assert!(head.contains(&"Time ↓".to_string()), "{width}: {head:?}");
+      let y = find(&buf, "w/api");
+      let row = cells(&line(&buf, y));
+      assert_eq!(row[1], crate::output::duration(app.list[0].active.unwrap()), "{width}");
+      assert!(row[0] == "w/api" && line(&buf, find(&buf, "total")).contains("18h 36m"));
+    }
+  }
+
+  #[test]
+  fn the_help_scrolls_and_closes_with_left() {
+    let mut app = many();
+    press(&mut app, KeyCode::Char('?'));
+    let buf = frame_of(&app, 60, 20);
+    assert!(!screen_of(&buf).contains("quits from a list"), "{}", screen_of(&buf));
+    for _ in 0..20 {
+      press(&mut app, KeyCode::Down);
+    }
+    let buf = frame_of(&app, 60, 20);
+    assert!(screen_of(&buf).contains("quits from a list"), "{}", screen_of(&buf));
+    // The wheel scrolls the help, not the list under it.
+    let top = app.help_top;
+    wheel(&mut app, MouseEventKind::ScrollUp);
+    assert!(top > 0 && app.help_top < top && app.sel() == 0);
+    press(&mut app, KeyCode::Left);
+    assert!(!app.help);
+  }
+
+  #[test]
+  fn an_empty_period_totals_dashes_and_dates_are_even() {
+    let mut app = App::new(data::tests::data());
+    press(&mut app, KeyCode::Char('3'));
+    for _ in 0..3 {
+      press(&mut app, KeyCode::Char('t'));
+    }
+    assert_eq!(app.span, Span::Today);
+    let buf = frame(&app);
+    let total = cells(&line(&buf, find(&buf, "total")));
+    assert_eq!(total[1..], ["–", "–", "–", "–", "–"], "{}", screen_of(&buf));
+    // At 140 columns over 30 days, the dates under the bars are as far apart from each other.
+    let mut app = many();
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('T'));
+    let buf = frame_of(&app, 140, 30);
+    let axis = (2..15).find(|y| line(&buf, *y).contains('━')).unwrap();
+    let dates = line(&buf, axis + 1);
+    let at: Vec<usize> = dates.match_indices('-').map(|x| dates[..x.0].chars().count()).collect();
+    assert!(at.len() > 3 && at.windows(3).all(|w| w[1] - w[0] == w[2] - w[1]), "{dates}");
   }
 }

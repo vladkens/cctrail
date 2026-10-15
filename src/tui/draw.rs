@@ -33,6 +33,8 @@ const SELECTED: Style = Style::new().bg(Color::Indexed(236));
 const VERSION: &str = concat!("cctrail v", env!("CARGO_PKG_VERSION"));
 /// The `▶ ` column on the left, matched by as much room on the right.
 const GUTTER: u16 = 2;
+/// Fewest cells for the names before columns give way.
+const NAME_MIN: usize = 12;
 /// Room for a sort arrow (` ↓`) after a header; a column fits its header, the mark and a space.
 const MARK: u16 = 2;
 
@@ -161,7 +163,7 @@ pub fn draw(f: &mut Frame, app: &App) {
   }
   // The help is a box over the whole screen, as macmon's.
   if app.help {
-    help(f, area);
+    hits.help_max = help(f, area, app.help_top);
   }
   *app.hits.borrow_mut() = hits;
 }
@@ -419,40 +421,45 @@ fn table(
     columns.push(column(Col::Sessions, "Sessions", 9));
   }
   columns.push(column(Col::Share, "Share", 6));
-  let mut widths: Vec<Constraint> = columns.iter().map(|x| x.width).collect();
-  widths.push(Constraint::Length(GUTTER - 1));
-  let name_width = layout(&widths, area)[0].width as usize;
+  // Columns go when the names would get too few cells, as macmon's: Sessions first, then Share,
+  // Tokens, Cost; never the sorted one, so a number is never cut.
+  let name_width = |columns: &[Column]| {
+    let mut widths: Vec<Constraint> = columns.iter().map(|x| x.width).collect();
+    widths.push(Constraint::Length(GUTTER - 1));
+    layout(&widths, area)[0].width as usize
+  };
+  for col in [Col::Sessions, Col::Share, Col::Tokens, Col::Cost] {
+    if name_width(&columns) >= NAME_MIN {
+      break;
+    }
+    if col != sort.0 {
+      columns.retain(|x| x.col != col);
+    }
+  }
+  let name_width = name_width(&columns);
 
   let of = sort.0.share();
   let share = shares(&rows.iter().map(|x| of.of(x)).collect::<Vec<_>>());
-  let cells = |x: &Row, label: &str, share: String| {
+  let cells = |x: &Row, label: &str, share: &str| {
     let dash = || num("–".into(), NONE);
-    // A day with nothing in it: dashes, not zeros.
-    let blank = x.tokens == 0 && x.active.unwrap_or(0) == 0 && label != "total";
-    let mut cells = vec![
-      Cell::from(cut(label, name_width)).style(TEXT),
-      match x.active.filter(|_| !blank) {
-        Some(t) => num(duration(t), TIME),
-        None => dash(),
-      },
-      if blank { dash() } else { num(toks(x.tokens), TEXT) },
-      if x.unpriced || blank { dash() } else { num(money(x.cost), COST) },
-    ];
-    if sessions {
-      match blank {
-        true => cells.push(dash()),
-        false => cells.push(num(x.sessions.map_or(String::new(), |x| x.to_string()), TEXT)),
-      }
-    }
-    // An unknown cost has no share of the cost either.
-    cells.push(match (x.unpriced && of == Col::Cost) || blank {
-      true => dash(),
-      false => num(share, TEXT),
-    });
-    TableRow::new(cells)
+    // Nothing in it (a day, or a period's total): dashes, not zeros.
+    let blank = x.tokens == 0 && x.active.unwrap_or(0) == 0;
+    let cell = |col: Col| match col {
+      Col::Name => Cell::from(cut(label, name_width)).style(TEXT),
+      _ if blank => dash(),
+      Col::Time => x.active.map_or_else(dash, |t| num(duration(t), TIME)),
+      Col::Tokens => num(toks(x.tokens), TEXT),
+      Col::Cost if x.unpriced => dash(),
+      Col::Cost => num(money(x.cost), COST),
+      Col::Sessions => num(x.sessions.map_or(String::new(), |x| x.to_string()), TEXT),
+      // An unknown cost has no share of the cost either.
+      Col::Share if x.unpriced && of == Col::Cost => dash(),
+      Col::Share => num(share.to_string(), TEXT),
+    };
+    TableRow::new(columns.iter().map(|c| cell(c.col)).collect::<Vec<_>>())
   };
-  let lines = rows.iter().zip(share).map(|(x, s)| cells(x, &x.label, s)).collect();
-  let all = if rows.iter().any(|x| of.of(x) > 0.0) { "100%".into() } else { String::new() };
+  let lines = rows.iter().zip(&share).map(|(x, s)| cells(x, &x.label, s)).collect();
+  let all = if rows.iter().any(|x| of.of(x) > 0.0) { "100%" } else { "" };
   let total = cells(total, "total", all);
   grid(f, &columns, lines, total, area, sel, first, hits)
 }
@@ -499,12 +506,16 @@ fn short(key: &str) -> &str {
   key.split_once('/').map_or(key, |x| x.1)
 }
 
-/// Bars of what `app.bars` picks, a bar per day stacked by model, the largest value on the axis,
-/// the dates under some bars; the choice of time, tokens or cost and the legend above them.
+/// Bars of what `app.bars` picks, a bar per day stacked by model, the dates under some bars; the
+/// choice of time, tokens or cost, the largest value and the legend above them.
 fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let col = app.bars;
   let week = app.span.gran() == crate::metrics::Granularity::Week;
-  // The choice: clickable, the picked one in the selection color, as the periods.
+  let mut days: Vec<(usize, &Row)> = app.list.iter().enumerate().collect();
+  days.sort_by_key(|x| x.1.day);
+  let max = days.iter().map(|x| col.of(x.1)).fold(0.0, f64::max);
+  // The choice: clickable, the picked one in the selection color, as the periods; then the
+  // largest value, so the bars take the whole width.
   let names = [(Col::Time, "Time"), (Col::Tokens, "Tokens"), (Col::Cost, "Cost")];
   let mut x = area.x + GUTTER;
   let mut spans = vec![];
@@ -515,61 +526,55 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     x += name.len() as u16 + 1;
   }
   spans.push(dim(if week { " by week" } else { " by day" }));
+  if max > 0.0 {
+    let top = days.iter().max_by(|a, b| col.of(a.1).total_cmp(&col.of(b.1))).unwrap().1;
+    let (text, style) = value(col, top);
+    spans.extend([dim(" · max "), Text::styled(text, style)]);
+  }
   let choice = Line::from(spans);
   let used = choice.width() as u16;
   f.render_widget(choice, Rect { x: area.x + GUTTER, height: 1, ..area });
-
-  let mut days: Vec<(usize, &Row)> = app.list.iter().enumerate().collect();
-  days.sort_by_key(|x| x.1.day);
-  let max = days.iter().map(|x| col.of(x.1)).fold(0.0, f64::max);
   if max == 0.0 {
     let rest = Rect { y: area.y + 2, height: area.height.saturating_sub(2), ..area };
     return f.render_widget(Paragraph::new(dim("  No activity in this period")), rest);
   }
-  // The models by their part of the period, the largest four in colors, the rest together.
+
+  // The models in colors: the largest by all-time tokens keep theirs on every screen; as many as
+  // the legend can name, the rest together in `other`.
   let models = app.data.bucket_models(app.span, app.prov);
-  let mut sums: std::collections::HashMap<&str, f64> = Default::default();
-  for x in models.values().flatten() {
-    *sums.entry(&x.key).or_default() += col.of(x);
-  }
-  let mut ranked: Vec<(&str, f64)> = sums.into_iter().filter(|x| x.1 > 0.0).collect();
-  ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(b.0)));
-  let top: Vec<&str> = ranked.iter().take(MODELS.len()).map(|x| x.0).collect();
-  let color = |key: &str| top.iter().position(|x| *x == key).map_or(OTHER, |i| MODELS[i]);
-  // The legend, right-aligned on the choice's line, as much of it as fits.
-  let mut legend: Vec<(String, Color)> =
-    top.iter().map(|x| (short(x).to_string(), color(x))).collect();
-  if ranked.len() > top.len() {
-    legend.push(("other".into(), OTHER));
-  }
+  let rank = app.data.model_rank(app.prov);
+  let present: std::collections::HashSet<&str> =
+    models.values().flatten().filter(|x| col.of(x) > 0.0).map(|x| x.key.as_str()).collect();
+  let ranked: Vec<(usize, &str)> = rank
+    .iter()
+    .take(MODELS.len())
+    .enumerate()
+    .filter(|x| present.contains(x.1.as_str()))
+    .map(|(i, k)| (i, k.as_str()))
+    .collect();
   let room = usize::from(area.width.saturating_sub(GUTTER * 2 + used + 2));
-  let mut spans: Vec<Text> = vec![];
-  for (name, c) in legend {
-    let item = [Text::styled("■ ", Style::new().fg(c)), Text::styled(format!("{name}  "), TEXT)];
-    if Line::from(spans.clone()).width() + item[0].width() + item[1].width() > room + 2 {
-      break;
-    }
-    spans.extend(item);
-  }
-  let legend = Line::from(spans);
-  let w = (legend.width() as u16).saturating_sub(2);
+  let (colored, legend) = legend(&ranked, present.len(), room);
+  let w = legend.width() as u16;
   f.render_widget(legend, Rect::new(area.right() - GUTTER - w, area.y, w, 1));
 
   // Below the choice: the bars, the axis, the dates.
   let height = area.height.saturating_sub(3);
   let bars = Rect { y: area.y + 1, height, ..area };
-  let top_label =
-    value(col, days.iter().max_by(|a, b| col.of(a.1).total_cmp(&col.of(b.1))).unwrap().1).0;
-  let axis = top_label.chars().count() as u16 + 1;
-  let x0 = area.x + GUTTER + axis;
+  let x0 = area.x + GUTTER;
   let room = usize::from(area.right().saturating_sub(GUTTER + x0));
-  // Bars of one width, at most seven cells, and one-cell gaps, the newest at the right edge; the
-  // columns left over stay left of the first bar.
+  // Bars of one width, at most seven cells, and gaps of one width, as fill the room best, the
+  // newest at the right edge; the columns left over stay left of the first bar.
   let n = days.len();
   let shown = room.div_ceil(2).min(n).max(1);
-  let width = ((room + 1) / shown - 1).clamp(1, 7);
-  let left = room + 1 - shown * (width + 1);
-  let bar = |i: usize| (left + i * (width + 1), width);
+  let fit = |gap: usize| {
+    let width = ((room + gap) / shown).saturating_sub(gap).clamp(1, 7);
+    (shown * (width + gap) - gap, width, gap)
+  };
+  let (_, width, gap) =
+    [fit(1), fit(2)].into_iter().filter(|x| x.0 <= room).max().unwrap_or(fit(1));
+  let pitch = width + gap;
+  let left = (room + gap).saturating_sub(shown * pitch);
+  let bar = |i: usize| (left + i * pitch, width);
   let sel = days.iter().position(|x| x.0 == app.sel()).unwrap_or(n - 1);
   let first = n.saturating_sub(shown).min(sel);
   let empty: Vec<Row> = vec![];
@@ -582,38 +587,33 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
       true => ((v / max * height as f64 * 8.0).round() as usize).max(1),
       false => 0,
     };
-    // The cells of each model, the largest at the bottom, the top cell (part of one maybe) in the
-    // color of the model on top.
+    // The cells of each model, by rank from the bottom, `other` on top; the selected bar whole
+    // in the text color, so it stands out on light and dark themes.
     let parts = row.day.and_then(|d| models.get(&d)).unwrap_or(&empty);
-    let mut stack: Vec<(Color, f64)> = top.iter().map(|k| (color(k), 0.0)).collect();
+    let mut stack: Vec<(Color, f64)> = colored.iter().map(|x| (MODELS[x.0], 0.0)).collect();
     stack.push((OTHER, 0.0));
     for p in parts {
-      let at = top.iter().position(|k| *k == p.key).unwrap_or(top.len());
+      let at = colored.iter().position(|x| x.1 == p.key).unwrap_or(colored.len());
       stack[at].1 += col.of(p);
     }
     let sum: f64 = stack.iter().map(|x| x.1).sum();
     let cells = eighths.div_ceil(8);
     let counts = match sum > 0.0 {
-      true => largest_remainder(
-        &stack.iter().map(|x| x.1 / sum * cells as f64).collect::<Vec<_>>(),
-        cells as i64,
-      ),
+      true => {
+        let parts: Vec<f64> = stack.iter().map(|x| x.1 / sum * cells as f64).collect();
+        largest_remainder(&parts, cells as i64)
+      }
       false => vec![0; stack.len()],
     };
     let mut colors: Vec<Color> = vec![];
     for (k, c) in counts.iter().enumerate() {
       colors.extend(std::iter::repeat_n(stack[k].0, *c as usize));
     }
-    let picked = i == sel;
     for line in 0..height as usize {
       let y = bars.bottom() - 1 - line as u16;
-      let c = colors.get(line).copied().unwrap_or(OTHER);
-      let mut style = Style::new().fg(c);
-      if picked {
-        style = style.patch(SELECTED);
-      }
+      let c = if i == sel { Color::Reset } else { colors.get(line).copied().unwrap_or(OTHER) };
       for w in 0..width as u16 {
-        buf[(x + w, y)].set_symbol(bar_cell(eighths, line)).set_style(style);
+        buf[(x + w, y)].set_symbol(bar_cell(eighths, line)).set_style(Style::new().fg(c));
       }
     }
     hits.bars.push((Rect::new(x, bars.y, width as u16, height + 2), *index));
@@ -623,26 +623,21 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   buf.set_string(x0, base, "─".repeat(room), DIM);
   let (dx, width) = bar(sel - first);
   buf.set_string(x0 + dx as u16, base, "━".repeat(width), Style::new().fg(Color::Cyan));
-  // Dates centred under their bars: the selected one, then every few counted back from the
-  // newest, two cells apart at least.
+  // Dates under their bars every few bars, counted back from the newest, all shifted as far as
+  // the newest must be to stay on screen, so the gaps are even; the selected one always.
   let date = |x: &Row| {
     x.day
       .map_or(String::new(), |d| if week { d.to_string() } else { d.strftime("%m-%d").to_string() })
   };
   let wide: usize = if week { 10 } else { 5 };
   let last = first + shown - 1;
-  // Centred under its bar, kept on screen at the right edge.
   let centred = |i: usize| {
     let (dx, width) = bar(i - first);
     (dx + width / 2).saturating_sub(wide / 2)
   };
-  let place = |i: usize| centred(i).min(room.saturating_sub(wide));
-  // Every few bars, so that labels fit over the narrowest gaps, and the newest, pushed left of
-  // its centre to stay on screen, still leaves room for the one before it.
-  let pushed = centred(last) - place(last);
-  let every = (wide + 2 + pushed).div_ceil(width + 1);
-  // The selected and the newest always (the selected first), then the others where they fit,
-  // two cells clear of each other.
+  let pushed = centred(last).saturating_sub(room.saturating_sub(wide));
+  let place = |i: usize| centred(i).saturating_sub(pushed);
+  let every = (wide + 2).div_ceil(pitch);
   let mut marks: Vec<(usize, usize)> = vec![];
   for i in [sel, last].into_iter().chain((first..=last).rev().step_by(every)) {
     if marks.iter().all(|(m, j)| *j != i && place(i).abs_diff(*m) >= wide + 2) {
@@ -654,16 +649,48 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     let style = if i == sel { Style::new().fg(Color::Cyan) } else { DIM };
     buf.set_stringn(x0 + x as u16, base + 1, date(days[i].1), wide, style);
   }
-  let label = |text: String, y| {
-    (
-      Paragraph::new(Line::from(dim(text)).right_aligned()),
-      Rect::new(area.x, y, x0 - area.x - 1, 1),
-    )
-  };
-  let (p, r) = label(top_label, bars.y);
-  f.render_widget(p, r);
-  let (p, r) = label("0".into(), bars.bottom() - 1);
-  f.render_widget(p, r);
+}
+
+/// The legend for `ranked` models (their rank, their key) out of `present` ones in `room` cells:
+/// as many as it can name, the names cut to fit when they must; `other` when any is left out.
+/// Returns the models that get their color and the legend.
+fn legend<'a>(
+  ranked: &[(usize, &'a str)],
+  present: usize,
+  room: usize,
+) -> (Vec<(usize, &'a str)>, Line<'static>) {
+  for count in (0..=ranked.len()).rev() {
+    let shown = &ranked[..count];
+    let other = present > count;
+    // Each item is `■ name` and two spaces; the names as long as the room allows.
+    let items = count + usize::from(other);
+    let fixed = items * 4 + if other { 5 } else { 0 };
+    let longest = shown.iter().map(|x| short(x.1).chars().count()).max().unwrap_or(0);
+    let fits = |cap: usize| {
+      fixed + shown.iter().map(|x| short(x.1).chars().count().min(cap)).sum::<usize>() <= room + 2
+    };
+    let cap = match fits(longest) {
+      true => longest,
+      false => (4..longest).rev().find(|c| fits(*c)).unwrap_or(0),
+    };
+    if count > 0 && cap < 4 {
+      continue;
+    }
+    let mut spans = vec![];
+    for (i, key) in shown {
+      spans.push(Text::styled("■ ", Style::new().fg(MODELS[*i])));
+      spans.push(Text::styled(format!("{}  ", cut(short(key), cap)), TEXT));
+    }
+    if other && fixed <= room + 2 {
+      spans.extend([Text::styled("■ ", Style::new().fg(OTHER)), Text::styled("other", TEXT)]);
+    }
+    let mut line = Line::from(spans);
+    if let Some(last) = line.spans.last_mut() {
+      last.content = last.content.trim_end().to_string().into();
+    }
+    return (shown.to_vec(), line);
+  }
+  (vec![], Line::default())
 }
 
 /// A drill-down, in place of the list: its tables one under another, a blank line between them,
@@ -683,8 +710,9 @@ fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   }
 }
 
-/// The keys in a rounded box centered over `area`, wrapped by words when narrow.
-fn help(f: &mut Frame, area: Rect) {
+/// The keys in a rounded box centered over `area`, wrapped by words when narrow, from line `top`
+/// when they don't fit, with a scrollbar then. Returns how far it can scroll.
+fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
   let keys = [
     ("1 2 3", "projects / models / timeline"),
     ("t T", "period: today, week, month, 30 days, all; wraps around"),
@@ -741,7 +769,14 @@ fn help(f: &mut Frame, area: Rect) {
     .border_style(DIM)
     .title(title)
     .title(close);
-  f.render_widget(Paragraph::new(lines).block(block), rect);
+  let shown = rect.height.saturating_sub(2);
+  let max = (lines.len() as u16).saturating_sub(shown);
+  let top = top.min(max);
+  let len = lines.len();
+  f.render_widget(Paragraph::new(lines).block(block).scroll((top, 0)), rect);
+  let rows = Rect { y: rect.y + 1, height: shown, ..rect };
+  boxes::draw_scrollbar(f, rect.right() - 1, rows, len, usize::from(top));
+  max
 }
 
 #[cfg(test)]
