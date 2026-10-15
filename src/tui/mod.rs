@@ -1282,6 +1282,7 @@ mod tests {
       let squares = legend.matches('■').count();
       assert!(squares != 1 || !legend.contains("■ other"), "{width}: {legend}");
       assert!(width < 60 || squares >= 2, "{width}: {legend}");
+      assert!(!legend.contains("  ·"), "{width}: {legend}");
     }
   }
 
@@ -1344,5 +1345,32 @@ mod tests {
     press(&mut app, KeyCode::Down);
     let buf = frame_of(&app, 140, 30);
     assert_eq!(line(&buf, axis + 1), dates);
+  }
+
+  #[test]
+  fn dates_never_overlap_at_any_width_or_period() {
+    for span in Span::ALL {
+      let mut app = App::new(data::tests::long());
+      press(&mut app, KeyCode::Char('3'));
+      while app.span != span {
+        press(&mut app, KeyCode::Char('t'));
+      }
+      let wide = if span == Span::All { 10 } else { 5 };
+      for width in 40..=140 {
+        let buf = frame_of(&app, width, 30);
+        let Some(axis) = (2..15).find(|y| line(&buf, *y).contains('━')) else { continue };
+        let dates = line(&buf, axis + 1);
+        // Every label whole (no two run together) and two cells from the next.
+        let (mut at, mut end) = (0, None);
+        for label in dates.split(' ') {
+          if !label.is_empty() {
+            assert_eq!(label.len(), wide, "{span:?} {width}: {dates:?}");
+            assert!(end.is_none_or(|e| e + 2 <= at), "{span:?} {width}: {dates:?}");
+            end = Some(at + label.len());
+          }
+          at += label.len() + 1;
+        }
+      }
+    }
   }
 }

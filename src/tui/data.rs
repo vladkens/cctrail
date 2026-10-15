@@ -530,6 +530,29 @@ pub mod tests {
     data_of(sessions())
   }
 
+  /// One project with a few minutes every day for the 150 days up to 2026-01-10.
+  pub fn long() -> Data {
+    let tz = jiff::tz::TimeZone::system();
+    let today = jiff::civil::date(2026, 1, 10);
+    let mut sessions = vec![];
+    for d in 0..150 {
+      let day = today.checked_sub(jiff::Span::new().days(d)).unwrap();
+      let mut s = Session::new(&format!("s{d}"), true, "/w/api", Provider::Claude);
+      let start = day.at(10, 0, 0, 0).to_zoned(tz.clone()).unwrap().timestamp().as_microsecond();
+      for k in 0..(d % 7 + 2) {
+        s.events.push(Event {
+          ts: Some(start + k * 60_000_000),
+          usage: Some(crate::model::Usage { input: 1000 * (d as u64 + 1), ..Default::default() }),
+          model: Some("claude-sonnet-5".into()),
+          ..Default::default()
+        });
+      }
+      sessions.push(s);
+    }
+    let config = Config::parse("[projects]\n\"w/api\" = [\"/w/api\"]\n", None).unwrap();
+    Data::new(sessions, config, today)
+  }
+
   /// Projects of every size, a model without a price, one used fast some days, efforts logged
   /// for some turns, and two unconfigured dirs small enough to fold into `other` in the text
   /// report, over the three days before 2026-01-10.

@@ -553,8 +553,8 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     .collect();
   let variants = [
     vec![by.clone(), dim(" · max "), largest.clone()],
-    vec![dim(" · max "), largest.clone()],
-    vec![dim(" · "), largest.clone()],
+    vec![dim("· max "), largest.clone()],
+    vec![dim("· "), largest.clone()],
   ];
   let fitted = variants.iter().find_map(|extra| {
     let mut line = spans.clone();
@@ -652,10 +652,20 @@ fn chart(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     (dx + width / 2).saturating_sub(wide / 2)
   };
   let pushed = centred(last).saturating_sub(room.saturating_sub(wide));
-  let place = |i: usize| centred(i).saturating_sub(pushed);
+  // Where a label goes, if it fits there whole: not cut at the left edge.
+  let place = |i: usize| {
+    let (dx, width) = bar(i - first);
+    (dx + width / 2).checked_sub(wide / 2 + pushed)
+  };
   let every = (wide + 2).div_ceil(pitch);
-  let mut marks: Vec<(usize, usize)> =
-    (first..=last).rev().step_by(every).map(|i| (place(i), i)).collect();
+  // Each two cells clear of the one drawn after it, by where they are drawn.
+  let mut marks: Vec<(usize, usize)> = vec![];
+  for i in (first..=last).rev().step_by(every) {
+    let Some(x) = place(i) else { continue };
+    if marks.last().is_none_or(|(next, _)| x + wide + 2 <= *next) {
+      marks.push((x, i));
+    }
+  }
   marks.sort();
   for (x, i) in marks {
     let style = if i == sel { Style::new().fg(Color::Cyan) } else { DIM };
