@@ -300,7 +300,8 @@ impl App {
     if let Some(row) = row.filter(|x| x.tokens > 0 || x.active.unwrap_or(0) > 0) {
       let sort = self.sorts[self.tab as usize];
       self.open = Some(self.detail(row.clone(), sort));
-      self.osel = 0;
+      // A drill-down takes no filter: the one being typed is kept as it is.
+      (self.osel, self.typing) = (0, false);
     }
   }
 
@@ -1505,5 +1506,18 @@ mod tests {
     assert_eq!(app.span, Span::Days30);
     assert_ne!(app.list[0].key, key);
     assert_eq!(app.list[app.sel()].key, key);
+  }
+
+  #[test]
+  fn opening_a_row_ends_the_filter_input() {
+    let mut app = many();
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('w'));
+    let buf = frame(&app);
+    let y = find(&buf, "▶");
+    click(&mut app, 5, y);
+    assert!(app.open.is_some() && !app.typing);
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.open.is_none() && app.filter == "w" && !app.quit);
   }
 }

@@ -232,8 +232,10 @@ impl Data {
       }
       let part = |e: &Event| {
         let effort = e.effort.as_deref().unwrap_or(UNKNOWN);
+        // A failed response answered nothing: the time stays with the model before it.
         e.model
           .as_ref()
+          .filter(|_| !e.failed)
           .map(|_| format!("{}\0{}\0{effort}", model_key(s.provider, model(e)), is_fast(e)))
       };
       // A session that names no model is the unknown one, as its usage is.
@@ -367,7 +369,8 @@ impl Data {
     let counted = self.counted(span, prov);
     let mut stamps: HashMap<String, Vec<Ts>> = HashMap::new();
     for s in self.sessions.iter().filter(|s| prov.is_none_or(|p| s.provider == p)) {
-      let key = |e: &Event| e.model.as_ref().map(|_| model_key(s.provider, model(e)));
+      let key =
+        |e: &Event| e.model.as_ref().filter(|_| !e.failed).map(|_| model_key(s.provider, model(e)));
       let mut last = s.events.iter().find_map(key).unwrap_or(model_key(s.provider, "unknown"));
       for e in &s.events {
         last = key(e).unwrap_or(last);
@@ -903,5 +906,19 @@ pub mod tests {
     let day = data.timeline(Span::Month, None, None).into_iter().find(|x| x.tokens > 0).unwrap();
     assert_eq!((total.sessions, day.sessions), (Some(0), Some(0)));
     assert_eq!(data.bucket_sessions(Span::Month, None, &[day.day.unwrap()]), 0);
+  }
+
+  #[test]
+  fn a_failed_response_owns_no_time() {
+    // User at 10:00, an API error naming a synthetic model, then the answer of model A.
+    let mut s =
+      session("s", &[(600, None, 0), (601, Some("<synthetic>"), 0), (605, Some("a"), 10)]);
+    s.events[1].failed = true;
+    let data = data_with(vec![s], jiff::civil::date(2026, 1, 10));
+    let models = data.models(Span::All, None, None);
+    assert_eq!(models.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), ["claude/a"]);
+    let days = data.bucket_models(Span::Month, None);
+    let keys: Vec<&str> = days.values().flatten().map(|x| x.key.as_str()).collect();
+    assert_eq!(keys, ["claude/a"]);
   }
 }
