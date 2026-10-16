@@ -234,13 +234,13 @@ impl App {
     let needle = self.filter.to_lowercase();
     list.retain(|x| x.label.to_lowercase().contains(&needle));
     // With a filter, the total is of the rows shown; the timeline's is of its days, as the usage
-    // report's, with the period's sessions (a session on two days counts once).
+    // report's, a session on two of them counted once.
     if !needle.is_empty() || self.tab == Tab::Timeline {
-      let sessions = self.total.sessions;
       self.total = sum(&list);
-      if needle.is_empty() {
-        self.total.sessions = sessions;
-      }
+    }
+    if self.tab == Tab::Timeline {
+      let days: Vec<_> = list.iter().filter_map(|x| x.day).collect();
+      self.total.sessions = Some(self.data.bucket_sessions(self.span, self.prov, &days));
     }
     let found = kept.and_then(|k| list.iter().position(|x| x.key == k));
     let sel = &mut self.sel[self.tab as usize];
@@ -1406,7 +1406,8 @@ mod tests {
     let tz = jiff::tz::TimeZone::system();
     let at =
       |day: i8| jiff::civil::date(2026, 1, day).at(10, 0, 0, 0).to_zoned(tz.clone()).unwrap();
-    let mut s = crate::model::Session::new("s", true, "/w/api", Provider::Claude);
+    let dir = format!("{}/w/api", data::tests::ROOT);
+    let mut s = crate::model::Session::new("s", true, &dir, Provider::Claude);
     let usage = Some(crate::model::Usage { input: 10, ..Default::default() });
     let model = Some("a".to_string());
     s.events.push(crate::model::Event {
@@ -1416,12 +1417,29 @@ mod tests {
       ..Default::default()
     });
     s.events.push(crate::model::Event::activity(at(8).timestamp().as_microsecond()));
-    let config = Config::parse("[projects]\n\"w/api\" = [\"/w/api\"]\n", None).unwrap();
-    let mut app = App::new(Data::new(vec![s], config, jiff::civil::date(2026, 1, 10)));
+    let mut both = s.clone();
+    let data = Data::new(vec![s], data::tests::api_config(), jiff::civil::date(2026, 1, 10));
+    let mut app = App::new(data);
     assert_eq!(app.total.active, Some(10 * 60_000_000));
     press(&mut app, KeyCode::Char('3'));
     let days: i64 = app.list.iter().filter_map(|x| x.active).sum();
     assert_eq!((app.total.active, days), (Some(5 * 60_000_000), 5 * 60_000_000));
+
+    // A session with usage on both days counts once in the total, with a filter on its days too.
+    let usage = Some(crate::model::Usage { input: 10, ..Default::default() });
+    both.events[1].usage = usage;
+    both.events[1].model = Some("a".to_string());
+    let data = Data::new(vec![both], data::tests::api_config(), jiff::civil::date(2026, 1, 10));
+    let mut app = App::new(data);
+    press(&mut app, KeyCode::Char('3'));
+    assert_eq!(app.total.sessions, Some(1));
+    press(&mut app, KeyCode::Char('/'));
+    for c in "2026-01-0".chars() {
+      press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.list.iter().filter(|x| x.tokens > 0).count(), 2);
+    assert_eq!(app.total.sessions, Some(1));
   }
 
   #[test]

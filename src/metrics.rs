@@ -558,7 +558,7 @@ pub fn active_by_name<'a>(
 }
 
 /// Splits `[start, end)` at local midnights.
-fn split_by_day(start: Ts, end: Ts) -> Vec<(Date, i64)> {
+pub fn split_by_day(start: Ts, end: Ts) -> Vec<(Date, i64)> {
   let mut parts = vec![];
   let mut cur = start;
   while cur < end {

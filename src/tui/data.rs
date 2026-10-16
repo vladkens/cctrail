@@ -290,12 +290,14 @@ impl Data {
       }
       _ => vec![],
     };
-    // Sessions per bucket: those with usage in it.
+    // Sessions per bucket: the main ones with usage in it, as the projects count them.
+    let mains = self.mains();
     let mut sessions: HashMap<Date, std::collections::HashSet<(Provider, &str)>> = HashMap::new();
     for &(si, ei) in &events {
-      if let Some(ts) = self.sessions[si].events[ei].ts.filter(|x| range.contains(*x)) {
-        let day = gran.bucket(metrics::local_date(ts));
-        sessions.entry(day).or_default().insert(self.sessions[si].root());
+      let root = self.sessions[si].root();
+      let ts = self.sessions[si].events[ei].ts.filter(|x| range.contains(*x));
+      if let Some(ts) = ts.filter(|_| mains.contains(&root)) {
+        sessions.entry(gran.bucket(metrics::local_date(ts))).or_default().insert(root);
       }
     }
     for (day, x) in buckets {
@@ -360,26 +362,29 @@ impl Data {
       row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
     }
     // Activity stamps, as the timeline counts them, to the model of the session's last response,
-    // as in `model_times`.
-    let counted = self.timeline_stamps(span, prov);
+    // as in `model_times`; the windows cut at midnight, so a day gets the part of a window from
+    // the day before.
+    let counted = self.counted(span, prov);
     let mut stamps: HashMap<String, Vec<Ts>> = HashMap::new();
-    for (si, s) in self.sessions.iter().enumerate() {
-      let Some(counted) = counted.get(&si) else { continue };
+    for s in self.sessions.iter().filter(|s| prov.is_none_or(|p| s.provider == p)) {
       let key = |e: &Event| e.model.as_ref().map(|_| model_key(s.provider, model(e)));
       let mut last = s.events.iter().find_map(key).unwrap_or(model_key(s.provider, "unknown"));
       for e in &s.events {
         last = key(e).unwrap_or(last);
-        if let Some(ts) = e.ts.filter(|x| counted.contains(x)) {
-          stamps.entry(format!("{}\0{last}", bucket(ts))).or_default().push(ts);
+        if let Some(ts) = e.ts.filter(|x| !e.failed && counted(s, *x)) {
+          stamps.entry(last.clone()).or_default().push(ts);
         }
       }
     }
-    let by: HashMap<&str, Vec<Ts>> = stamps.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-    let mut per: HashMap<Date, Vec<(String, i64)>> = HashMap::new();
-    for (k, v) in metrics::active_by_name(&by, &range) {
-      let (day, model) = k.split_once('\0').unwrap();
-      per.entry(day.parse().unwrap()).or_default().push((model.to_string(), v));
+    let mut per: HashMap<Date, HashMap<String, i64>> = HashMap::new();
+    for ((model, day), micros) in by_name_and_day(&stamps) {
+      if range.contains_day(day) {
+        *per.entry(gran.bucket(day)).or_default().entry(model).or_default() += micros;
+      }
     }
+    let per = per
+      .into_iter()
+      .map(|(day, x)| (day, x.into_iter().map(|(k, v)| (k, v / MICROS)).collect::<Vec<_>>()));
     let totals: HashMap<Date, i64> = self
       .timeline(span, prov, None)
       .iter()
@@ -404,9 +409,16 @@ impl Data {
     let stats = metrics::stats_by(&self.sessions, &events, &range, &self.config, By::Project);
     // The time as the timeline counts it, a window from the day before reaching into it included,
     // then cut to the bucket's days.
+    let counted = self.counted(span, prov);
     let mut stamps: HashMap<&str, Vec<Ts>> = HashMap::new();
-    for (si, counted) in self.timeline_stamps(span, prov) {
-      stamps.entry(self.names[si].0.as_str()).or_default().extend(counted);
+    for (si, s) in self.sessions.iter().enumerate() {
+      if prov.is_none_or(|p| s.provider == p) {
+        let mine = s.events.iter().filter(|e| !e.failed).filter_map(|e| e.ts);
+        stamps
+          .entry(self.names[si].0.as_str())
+          .or_default()
+          .extend(mine.filter(|x| counted(s, *x)));
+      }
     }
     let active = metrics::active_by_name(&stamps, &range);
     let mut rows: Vec<Row> = stats
@@ -440,33 +452,46 @@ impl Data {
     rows
   }
 
-  /// Each session's activity stamps as the timeline counts them (`usage_by_period`): those on the
-  /// days of a bucket it has usage in, within the span.
-  fn timeline_stamps(&self, span: Span, prov: Option<Provider>) -> HashMap<usize, Vec<Ts>> {
+  /// Whether the timeline counts a session's activity stamp (`usage_by_period`): on a day of a
+  /// bucket the session has usage in, within the span.
+  fn counted(&self, span: Span, prov: Option<Provider>) -> impl Fn(&Session, Ts) -> bool + '_ {
     let range = span.range(self.today);
     let gran = span.gran();
-    let bucket = |ts: Ts| gran.bucket(metrics::local_date(ts));
     let used: std::collections::HashSet<((Provider, &str), Date)> = self
       .events(prov)
       .into_iter()
       .filter_map(|(si, ei)| {
         let ts = self.sessions[si].events[ei].ts.filter(|x| range.contains(*x))?;
-        Some((self.sessions[si].root(), bucket(ts)))
+        Some((self.sessions[si].root(), gran.bucket(metrics::local_date(ts))))
       })
       .collect();
-    let mut out: HashMap<usize, Vec<Ts>> = HashMap::new();
-    for (si, s) in self.sessions.iter().enumerate() {
-      if prov.is_some_and(|p| s.provider != p) {
-        continue;
-      }
-      for ts in s.events.iter().filter(|e| !e.failed).filter_map(|e| e.ts) {
-        let day = metrics::local_date(ts);
-        if range.contains_day(day) && used.contains(&(s.root(), gran.bucket(day))) {
-          out.entry(si).or_default().push(ts);
-        }
-      }
+    move |s: &Session, ts: Ts| {
+      let day = metrics::local_date(ts);
+      range.contains_day(day) && used.contains(&(s.root(), gran.bucket(day)))
     }
-    out
+  }
+
+  /// The main sessions' roots: sessions the projects count.
+  fn mains(&self) -> std::collections::HashSet<(Provider, &str)> {
+    self.sessions.iter().filter(|x| x.is_main).map(|x| x.root()).collect()
+  }
+
+  /// The main sessions with usage in the timeline's buckets of `days`, each once.
+  pub fn bucket_sessions(&self, span: Span, prov: Option<Provider>, days: &[Date]) -> usize {
+    let range = span.range(self.today);
+    let gran = span.gran();
+    let mains = self.mains();
+    let roots: std::collections::HashSet<(Provider, &str)> = self
+      .events(prov)
+      .into_iter()
+      .filter(|(si, ei)| {
+        let ts = self.sessions[*si].events[*ei].ts.filter(|x| range.contains(*x));
+        ts.is_some_and(|x| days.contains(&gran.bucket(metrics::local_date(x))))
+      })
+      .map(|(si, _)| self.sessions[si].root())
+      .filter(|x| mains.contains(x))
+      .collect();
+    roots.len()
   }
 
   /// Tokens on models without a price in the span, as the text report lists them.
@@ -487,6 +512,39 @@ impl Data {
     paths.dedup();
     paths
   }
+}
+
+/// Microseconds per name and local day: time when several names are active at once is divided
+/// between them, as `metrics::active_by_name` does, and each window is cut at midnight.
+fn by_name_and_day(stamps: &HashMap<String, Vec<Ts>>) -> HashMap<(String, Date), i64> {
+  let mut changes: std::collections::BTreeMap<Ts, Vec<(&str, bool)>> = Default::default();
+  for (name, x) in stamps {
+    for (start, end) in metrics::activity_windows(x) {
+      changes.entry(start).or_default().push((name, true));
+      changes.entry(end).or_default().push((name, false));
+    }
+  }
+  let mut active: std::collections::BTreeSet<&str> = Default::default();
+  let mut out: HashMap<(String, Date), i64> = HashMap::new();
+  let mut prev: Option<Ts> = None;
+  for (ts, items) in changes {
+    if let Some(prev) = prev.filter(|_| !active.is_empty()) {
+      for (day, x) in metrics::split_by_day(prev, ts) {
+        let n = active.len() as i64;
+        for (i, name) in active.iter().enumerate() {
+          *out.entry((name.to_string(), day)).or_default() += x / n + i64::from((i as i64) < x % n);
+        }
+      }
+    }
+    for (name, begins) in items {
+      match begins {
+        true => active.insert(name),
+        false => active.remove(name),
+      };
+    }
+    prev = Some(ts);
+  }
+  out
 }
 
 /// An empty row for `key`; `UNKNOWN` reads `–`.
@@ -572,6 +630,13 @@ pub mod tests {
 
   /// The fixtures' `/repo`, absolute on this platform: Windows needs a drive.
   pub const REPO: &str = if cfg!(windows) { "C:/repo" } else { "/repo" };
+  /// What makes the synthetic fixtures' paths absolute on this platform.
+  pub const ROOT: &str = if cfg!(windows) { "C:" } else { "" };
+
+  /// The config of `w/api` at `{ROOT}/w/api`.
+  pub fn api_config() -> Config {
+    Config::parse(&format!("[projects]\n\"w/api\" = [\"{ROOT}/w/api\"]\n"), None).unwrap()
+  }
 
   fn fixtures(dir: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(dir)
@@ -604,7 +669,7 @@ pub mod tests {
     let mut sessions = vec![];
     for d in 0..150 {
       let day = today.checked_sub(jiff::Span::new().days(d)).unwrap();
-      let mut s = Session::new(&format!("s{d}"), true, "/w/api", Provider::Claude);
+      let mut s = Session::new(&format!("s{d}"), true, &format!("{ROOT}/w/api"), Provider::Claude);
       let start = day.at(10, 0, 0, 0).to_zoned(tz.clone()).unwrap().timestamp().as_microsecond();
       for k in 0..(d % 7 + 2) {
         s.events.push(Event {
@@ -616,16 +681,19 @@ pub mod tests {
       }
       sessions.push(s);
     }
-    let config = Config::parse("[projects]\n\"w/api\" = [\"/w/api\"]\n", None).unwrap();
-    Data::new(sessions, config, today)
+    Data::new(sessions, api_config(), today)
   }
 
   /// Projects of every size, a model without a price, one used fast some days, efforts logged
   /// for some turns, and two unconfigured dirs small enough to fold into `other` in the text
   /// report, over the three days before 2026-01-10.
   pub fn many() -> Data {
-    let long = "/w/a-project-with-a-name-too-long-for-a-narrow-terminal";
-    let dirs = [("/w/api", 40), ("/w/web", 20), (long, 10), ("/tmp/a", 1), ("/tmp/b", 1)];
+    let name = "a-project-with-a-name-too-long-for-a-narrow-terminal";
+    let dirs = [("/w/api", 40), ("/w/web", 20), ("/w/a-project", 10), ("/tmp/a", 1), ("/tmp/b", 1)];
+    let dirs = dirs.map(|(dir, weight)| {
+      let dir = if dir == "/w/a-project" { format!("/w/{name}") } else { dir.to_string() };
+      (format!("{ROOT}{dir}"), weight)
+    });
     let models = [
       (Provider::Claude, "claude-sonnet-5"),
       (Provider::Claude, "claude-unknown-1"),
@@ -635,7 +703,8 @@ pub mod tests {
     let mut sessions = vec![];
     for d in 1..=3 {
       let day = jiff::civil::date(2026, 1, 6 + d);
-      for (dir, weight) in dirs {
+      for (dir, weight) in &dirs {
+        let weight = *weight;
         for (i, (prov, model)) in models.iter().enumerate() {
           let mut s = Session::new(&format!("{dir}-{d}-{i}"), true, dir, *prov);
           let start = day.at(9 + 3 * i as i8, 0, 0, 0).to_zoned(tz.clone()).unwrap();
@@ -655,8 +724,7 @@ pub mod tests {
       }
     }
     let config = format!(
-      "[projects]\n\"w/api\" = [\"/w/api\"]\n\"w/web\" = [\"/w/web\"]\n\"w/{}\" = [{long:?}]\n",
-      &long[3..]
+      "[projects]\n\"w/api\" = [\"{ROOT}/w/api\"]\n\"w/web\" = [\"{ROOT}/w/web\"]\n\"w/{name}\" = [\"{ROOT}/w/{name}\"]\n"
     );
     Data::new(sessions, Config::parse(&config, None).unwrap(), jiff::civil::date(2026, 1, 10))
   }
@@ -750,12 +818,12 @@ pub mod tests {
     assert_eq!(unknown, [("unknown", "–")]);
   }
 
-  /// A session in `/w/api` of `(minutes from 2026-01-07 00:00 local, model, tokens)`, an event
+  /// A session in `w/api` of `(minutes from 2026-01-07 00:00 local, model, tokens)`, an event
   /// without tokens being user activity.
   fn session(id: &str, events: &[(i64, Option<&str>, u64)]) -> Session {
     let tz = jiff::tz::TimeZone::system();
     let start = jiff::civil::date(2026, 1, 7).at(0, 0, 0, 0).to_zoned(tz).unwrap();
-    let mut s = Session::new(id, true, "/w/api", Provider::Claude);
+    let mut s = Session::new(id, true, &format!("{ROOT}/w/api"), Provider::Claude);
     for (min, model, tokens) in events {
       s.events.push(Event {
         ts: Some(start.timestamp().as_microsecond() + min * 60_000_000),
@@ -768,8 +836,7 @@ pub mod tests {
   }
 
   fn data_with(sessions: Vec<Session>, today: Date) -> Data {
-    let config = Config::parse("[projects]\n\"w/api\" = [\"/w/api\"]\n", None).unwrap();
-    Data::new(sessions, config, today)
+    Data::new(sessions, api_config(), today)
   }
 
   const DAY: i64 = 24 * 60;
@@ -812,5 +879,29 @@ pub mod tests {
     let row = data.timeline(Span::Month, None, None).into_iter().find(|x| x.day == Some(day));
     assert_eq!(minutes(&[row.unwrap()]), 9);
     assert_eq!(minutes(&data.bucket_projects(Span::Month, None, day)), 9);
+  }
+
+  #[test]
+  fn a_day_splits_its_time_between_the_models_across_midnight() {
+    // Model A at 23:59, model B at 09:00 the next day: that day has 4 minutes of A, 5 of B.
+    let s = session("s", &[(DAY - 1, Some("a"), 10), (DAY + 540, Some("b"), 10)]);
+    let data = data_with(vec![s], jiff::civil::date(2026, 1, 10));
+    let models = data.bucket_models(Span::Month, None);
+    let day = &models[&jiff::civil::date(2026, 1, 8)];
+    let of =
+      |key: &str| day.iter().find(|x| x.key == key).map_or(0, |x| minutes(std::slice::from_ref(x)));
+    assert_eq!((of("claude/a"), of("claude/b")), (4, 5), "{day:?}");
+  }
+
+  #[test]
+  fn a_day_counts_main_sessions_only() {
+    // An agent's log without its main session's: usage, but no session, as the projects count.
+    let mut s = session("agent", &[(600, Some("a"), 10)]);
+    s.is_main = false;
+    let data = data_with(vec![s], jiff::civil::date(2026, 1, 10));
+    let (_, total) = data.projects(Span::Month, None, true);
+    let day = data.timeline(Span::Month, None, None).into_iter().find(|x| x.tokens > 0).unwrap();
+    assert_eq!((total.sessions, day.sessions), (Some(0), Some(0)));
+    assert_eq!(data.bucket_sessions(Span::Month, None, &[day.day.unwrap()]), 0);
   }
 }
