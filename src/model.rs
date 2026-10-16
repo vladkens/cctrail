@@ -111,8 +111,12 @@ pub struct Event {
   pub effort: Option<String>,
   /// Claude's `(message.id, requestId)`, shared by copies of one API response across files.
   pub identity: Option<(String, Option<String>)>,
-  /// The harness's own cost estimate (pi's), used for a model the price catalog lacks.
+  /// The harness's own cost estimate (pi's): for a model the price catalog lacks, and for
+  /// `summed` usage.
   pub cost: Option<f64>,
+  /// Usage of several requests at once: priced at the harness's estimate when there is one, as the
+  /// catalog would price it as one request, at its long-context rate past the threshold.
+  pub summed: bool,
   pub sidechain: bool,
   pub failed: bool,
 }

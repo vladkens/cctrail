@@ -172,6 +172,9 @@ pub fn priced(provider: Provider, event: &Event) -> bool {
 }
 
 fn estimate(catalog: &Catalog, provider: Provider, e: &Event) -> Option<f64> {
+  if e.summed && e.cost.is_some() {
+    return e.cost;
+  }
   let day = e.ts.map(local_date);
   match lookup(catalog, provider, e.model.as_deref().unwrap_or(""), day) {
     Some(x) => Some(x.cost(&e.usage.unwrap_or_default(), e.speed)),
@@ -394,6 +397,10 @@ mod tests {
     assert_eq!(estimate(&catalog, Provider::Pi, &event("claude-m", Some(9.0))), Some(1.0));
     assert_eq!(estimate(&catalog, Provider::Pi, &event("glm-5", Some(0.25))), Some(0.25));
     assert_eq!(estimate(&catalog, Provider::Pi, &event("glm-5", None)), None);
+    // Usage summed over several requests at the harness's estimate, else the catalog's.
+    let summed = |cost| Event { summed: true, ..event("claude-m", cost) };
+    assert_eq!(estimate(&catalog, Provider::Pi, &summed(Some(0.5))), Some(0.5));
+    assert_eq!(estimate(&catalog, Provider::Pi, &summed(None)), Some(1.0));
   }
 
   #[test]

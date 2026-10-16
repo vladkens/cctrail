@@ -10,9 +10,9 @@
 </div>
 
 `cctrail` reads the local history of Claude Code, Codex and [pi](https://pi.dev) and shows, for
-each project, how much time you spent in it, how many tokens it used and what that would cost at API prices. It needs no
-setup: repositories are found from the sessions themselves, with agent worktrees and clones counted
-as one project.
+each project, how much time you spent in it, how many tokens it used and what that would cost at
+API prices. It needs no setup: repositories are found from the sessions themselves, with agent
+worktrees and clones counted as one project.
 
 ## Install
 

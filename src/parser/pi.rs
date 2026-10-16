@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -21,6 +21,8 @@ struct Line {
   id: Val,
   timestamp: Val,
   cwd: Val,
+  #[serde(rename = "parentSession")]
+  parent: Val,
   #[serde(rename = "modelId")]
   model_id: Val,
   model: Val,
@@ -35,6 +37,8 @@ struct Line {
 struct Message {
   role: Val,
   model: Val,
+  #[serde(rename = "responseModel")]
+  response_model: Val,
   usage: Obj<RawUsage>,
   #[serde(rename = "stopReason")]
   stop: Val,
@@ -89,13 +93,13 @@ impl RawUsage {
 // MARK: Sessions
 
 /// What a copy of an entry shares with the original: its kind, the entry's and the message's
-/// time, and its usage. `/fork`, `/clone` and `--fork` copy the entries of the source session into
-/// the new file verbatim, but a v1 source migrated on the way gets new entry ids.
-type Key = (&'static str, Option<Ts>, Option<i64>, Option<Usage>);
+/// time, model and usage. `/fork`, `/clone` and `--fork` copy the entries of the source session
+/// into the new file verbatim, but a v1 source migrated on the way gets new entry ids.
+type Key = (&'static str, Option<Ts>, Option<i64>, Option<String>, Option<Usage>);
 
 struct Parsed {
-  /// When the session was created, from its header.
-  created: Option<Ts>,
+  /// The file name of the session it was forked from.
+  parent: Option<String>,
   session: Session,
   keys: Vec<Key>,
 }
@@ -123,25 +127,38 @@ pub fn roots() -> Vec<PathBuf> {
   std::iter::once(default).chain(custom).collect()
 }
 
-/// Sessions under the roots, each its own main session in the directory of its header. Copied
-/// entries count once, in the session created first: forks share no usage with their source.
+/// Sessions under the roots, each its own main session in the directory of its header. A fork's
+/// copies of its source's entries count only in the source.
 pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
-  // The pi-subagents extension keeps debug copies of its agents' sessions there.
+  let name = |x: &Path| x.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+  // A session file found under two roots counts once. The pi-subagents extension keeps debug
+  // copies of its agents' sessions in `subagent-artifacts`.
+  let mut names = HashSet::new();
   let files: Vec<PathBuf> = jsonl_files(roots)
     .into_iter()
     .filter(|x| !x.components().any(|x| x.as_os_str() == "subagent-artifacts"))
+    .filter(|x| names.insert(name(x)))
     .collect();
-  let mut parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x)).collect();
-  // Stable: files created at the same time keep their path order.
-  parsed.sort_by_key(|x| (x.created.is_none(), x.created));
+  let parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x)).collect();
 
-  let mut seen: HashSet<Key> = HashSet::new();
+  // The source is found by its file name, unique by its id, wherever its directory is now.
+  let index: HashMap<String, usize> = files.iter().enumerate().map(|(i, x)| (name(x), i)).collect();
+  let keep: Vec<Vec<bool>> = parsed
+    .iter()
+    .enumerate()
+    .map(|(i, x)| {
+      let source = x.parent.as_ref().and_then(|x| index.get(x)).filter(|x| **x != i);
+      let copied: HashSet<&Key> =
+        source.map(|x| parsed[*x].keys.iter().collect()).unwrap_or_default();
+      x.keys.iter().map(|k| !copied.contains(k)).collect()
+    })
+    .collect();
+
   let mut sessions = vec![];
-  for x in parsed {
+  for (x, keep) in parsed.into_iter().zip(keep) {
     let mut session = x.session;
     let events = std::mem::take(&mut session.events);
-    session.events =
-      events.into_iter().zip(x.keys).filter_map(|(e, k)| seen.insert(k).then_some(e)).collect();
+    session.events = events.into_iter().zip(keep).filter_map(|(e, k)| k.then_some(e)).collect();
     if !session.events.is_empty() {
       sessions.push(session);
     }
@@ -154,7 +171,7 @@ fn parse_file(path: &Path) -> Parsed {
   let stem = path.file_stem().map(|x| x.to_string_lossy()).unwrap_or_default();
   let id = stem.rsplit_once('_').map_or(&*stem, |x| x.1);
   let mut session = Session::new(id, true, "unknown", Provider::Pi);
-  let mut created = None;
+  let mut parent = None;
   let mut header = false;
   // The session's model and thinking level as last selected or used.
   let mut model: Option<String> = None;
@@ -164,7 +181,8 @@ fn parse_file(path: &Path) -> Parsed {
   jsonl(path, |line: Line, _| {
     let message = line.message.0.as_ref();
     let millis = message.and_then(|x| x.timestamp.ordinal());
-    let ts = parse_ts(&line.timestamp).or(millis.and_then(|x| x.checked_mul(1000)));
+    let at = millis.and_then(|x| jiff::Timestamp::from_millisecond(x).ok());
+    let ts = parse_ts(&line.timestamp).or(at.map(|x| x.as_microsecond()));
     let new = |usage: &RawUsage, model: Option<String>| Event {
       ts,
       usage: Some(usage.usage()),
@@ -172,11 +190,15 @@ fn parse_file(path: &Path) -> Parsed {
       cost: usage.cost(),
       ..Default::default()
     };
+    // Usage that pi sums over several requests: a split turn's compaction (the history and the
+    // turn's prefix), a tool's nested calls.
+    let summed =
+      |usage: &RawUsage, model: Option<String>| Event { summed: true, ..new(usage, model) };
 
     let event = match (line.kind.str(), message.map(|x| (x, x.role.str()))) {
       (Some("session"), _) if !header => {
         header = true;
-        created = ts;
+        parent = line.parent.str().and_then(|x| x.rsplit(['/', '\\']).next()).map(String::from);
         if let Some(x) = line.id.str().filter(|x| !x.is_empty()) {
           session.id = x.to_string();
           session.root_id = x.to_string();
@@ -207,7 +229,8 @@ fn parse_file(path: &Path) -> Parsed {
         let event = Event {
           ts,
           usage,
-          model: model.clone(),
+          // The model that answered, when the provider served another (a fallback, a router's).
+          model: m.response_model.str().map(String::from).or_else(|| model.clone()),
           effort: m.thinking.str().map(String::from).or_else(|| effort.clone()),
           cost: raw.and_then(RawUsage::cost),
           // An error after the response began still bills the tokens it carries.
@@ -217,9 +240,9 @@ fn parse_file(path: &Path) -> Parsed {
         Some(("assistant", event))
       }
       // Requests apart from the turns, which pi counts in a session's totals too. A tool's nested
-      // model work sums calls to any models, so it has no model: its cost is pi's.
+      // calls may go to any models, so they have none.
       (Some("message"), Some((m, Some("toolResult")))) => {
-        m.usage.0.as_ref().map(|x| ("tool", new(x, None)))
+        m.usage.0.as_ref().map(|x| ("tool", summed(x, None)))
       }
       // Requests outside the conversation, such as cache warming, name their model.
       (Some("usage"), _) => line.usage.0.as_ref().map(|x| {
@@ -229,18 +252,18 @@ fn parse_file(path: &Path) -> Parsed {
       // A summary of compacted or abandoned history runs on the session's model, which pi
       // doesn't log with it.
       (Some("compaction" | "branch_summary"), _) => {
-        line.usage.0.as_ref().map(|x| ("summary", new(x, model.clone())))
+        line.usage.0.as_ref().map(|x| ("summary", summed(x, model.clone())))
       }
       _ => None,
     };
     if let Some((kind, event)) = event {
-      keys.push((kind, ts, millis, event.usage));
+      keys.push((kind, ts, millis, event.model.clone(), event.usage));
       session.events.push(event);
     }
     true
   });
 
-  Parsed { created, session, keys }
+  Parsed { parent, session, keys }
 }
 
 #[cfg(test)]
@@ -263,14 +286,45 @@ mod tests {
     assert_eq!(sessions.len(), 2);
     assert_eq!((main.workdir.as_str(), main.root_id.as_str()), ("/repo", "pi-main-1"));
     assert_eq!((fork.workdir.as_str(), fork.root_id.as_str()), ("/other", "pi-fork-1"));
-    // The fork, read first by its path, holds only its own prompt and response: the source keeps
-    // the copied ones, the one with a new id too.
+    // The fork holds only its own prompt and response: the source keeps the copied ones, the one
+    // with a new id too, wherever the source's directory is now.
     assert_eq!((fork.events.len(), total(fork)), (2, 10));
     assert_eq!(total(main), 11_220);
 
     // The same sessions under a second root count once.
     let twice = parse(&[fixtures(), fixtures()]);
     assert_eq!(twice.iter().map(total).sum::<u64>(), 11_230);
+  }
+
+  #[test]
+  fn counts_what_no_source_holds() {
+    let dir = std::env::temp_dir().join(format!("cctrail-pi-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let header = |id: &str, parent: &str| {
+      format!(
+        r#"{{"type":"session","id":"{id}","timestamp":"2026-01-01T00:00:00Z","cwd":"/r","parentSession":"{parent}"}}"#
+      )
+    };
+    let usage = |model: &str| {
+      format!(
+        r#"{{"type":"usage","timestamp":"2026-01-01T00:00:01Z","model":"{model}","usage":{{"input":100}}}}"#
+      )
+    };
+    let reply = r#"{"type":"message","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","model":"a","responseModel":"b","usage":{"input":10}}}"#;
+    let late = r#"{"type":"message","message":{"role":"user","timestamp":300000000000000}}"#;
+    let file =
+      |name: &str, lines: &[&str]| std::fs::write(dir.join(name), lines.join("\n")).unwrap();
+    // Alike entries in one session, in a session that isn't their fork, in a fork whose source is
+    // gone: all count. A time out of range is no time.
+    file("1_one.jsonl", &[&header("one", ""), &usage("x"), &usage("y"), reply, late]);
+    file("2_two.jsonl", &[&header("two", "/gone/0_zero.jsonl"), &usage("x"), reply]);
+    let sessions = parse(std::slice::from_ref(&dir));
+    let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
+    assert_eq!((total(find("one")), total(find("two"))), (210, 110));
+    assert_eq!(find("one").events.len(), 3);
+    // The model that answered.
+    assert_eq!(find("two").events[1].model.as_deref(), Some("b"));
+    std::fs::remove_dir_all(&dir).unwrap();
   }
 
   #[test]
