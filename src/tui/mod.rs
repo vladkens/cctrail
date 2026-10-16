@@ -216,7 +216,12 @@ impl App {
   /// Rebuilds the rows for the current tab, period, provider, sort and filter.
   fn refresh(&mut self) {
     // The selection follows its row across sorting, period and provider changes.
-    let now = (self.tab, self.span.gran());
+    // Only the timeline's rows change with the buckets: weeks for all of the history, else days.
+    let gran = match self.tab {
+      Tab::Timeline => self.span.gran(),
+      _ => crate::metrics::Granularity::Day,
+    };
+    let now = (self.tab, gran);
     let kept =
       self.shown.filter(|x| *x == now).and(self.list.get(self.sel())).map(|x| x.key.clone());
     let okept = self.open.as_ref().and_then(|d| d.rows().get(self.osel).map(|x| x.key.clone()));
@@ -407,7 +412,8 @@ impl App {
       KeyCode::Char('S') => return self.reverse(),
       KeyCode::Char('s') if shift => return self.reverse(),
       KeyCode::Char('s') => return self.next_sort(),
-      KeyCode::Char('/') => return self.typing = true,
+      // The filter is the lists'; a drill-down's rows have none.
+      KeyCode::Char('/') if self.open.is_none() => return self.typing = true,
       KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
         return self.nav(key.code);
       }
@@ -1456,5 +1462,48 @@ mod tests {
     press(&mut app, KeyCode::Home);
     let out = screen_of(&frame_of(&app, 100, 12));
     assert!(out.contains("Speed") && out.contains(" ▶ "), "{out}");
+  }
+
+  #[test]
+  fn a_drill_down_takes_no_filter_and_lists_keep_their_row_across_all() {
+    let mut app = many();
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('/'));
+    assert!(!app.typing && app.open.is_some());
+    press(&mut app, KeyCode::Char('z'));
+    assert!(app.filter.is_empty() && app.open.is_some());
+    press(&mut app, KeyCode::Esc);
+    // The selected project stays selected from All to a period and back, though weeks and days
+    // differ on the timeline: `old` leads over all of the history, `new` over the last 30 days.
+    let tz = jiff::tz::TimeZone::system();
+    let session = |dir: &str, day: jiff::civil::Date, minutes: i64| {
+      let mut s = crate::model::Session::new(
+        dir,
+        true,
+        &format!("{}{dir}", data::tests::ROOT),
+        Provider::Claude,
+      );
+      let start = day.at(10, 0, 0, 0).to_zoned(tz.clone()).unwrap().timestamp().as_microsecond();
+      for k in 0..minutes {
+        let usage = Some(crate::model::Usage { input: 10, ..Default::default() });
+        let (ts, model) = (Some(start + k * 60_000_000), Some("a".to_string()));
+        s.events.push(crate::model::Event { ts, usage, model, ..Default::default() });
+      }
+      s
+    };
+    let today = jiff::civil::date(2026, 1, 10);
+    let old = |day, minutes| session("/old", day, minutes);
+    let sessions =
+      vec![old(jiff::civil::date(2025, 6, 1), 60), old(today, 2), session("/new", today, 10)];
+    let mut app = App::new(Data::new(sessions, data::tests::api_config(), today));
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Home);
+    assert_eq!((app.span, app.sel()), (Span::All, 0));
+    let key = app.list[0].key.clone();
+    press(&mut app, KeyCode::Char('T'));
+    assert_eq!(app.span, Span::Days30);
+    assert_ne!(app.list[0].key, key);
+    assert_eq!(app.list[app.sel()].key, key);
   }
 }

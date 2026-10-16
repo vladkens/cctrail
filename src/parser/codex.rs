@@ -335,9 +335,8 @@ fn parse_file(rollout: &Rollout) -> Parsed {
         if let Some(x) = p.service_tier.str() {
           speed = Speed::parse(x);
         }
-        if let Some(x) = p.effort.str() {
-          effort = Some(x.to_string());
-        }
+        // Each turn's context says its effort; one without leaves the turn's unknown.
+        effort = p.effort.str().map(String::from);
       }
       (_, Some("thread_settings_applied")) if event_msg => {
         if let Some(x) = p.thread_settings.0.as_ref().and_then(|x| x.service_tier.str()) {
@@ -633,12 +632,14 @@ mod tests {
       count(4, 3),
       line(5, "turn_context", r#"{"effort":"low"}"#),
       count(6, 4),
+      line(7, "turn_context", r#"{"effort":null}"#),
+      count(8, 5),
     ];
     std::fs::create_dir_all(base.join("sessions")).unwrap();
     std::fs::write(base.join("sessions/rollout.jsonl"), lines.join("\n")).unwrap();
     let sessions = parse(std::slice::from_ref(&base));
     let effort: Vec<_> = sessions[0].events.iter().map(|x| x.effort.as_deref()).collect();
-    assert_eq!(effort, [None, Some("high"), Some("high"), Some("low")]);
+    assert_eq!(effort, [None, Some("high"), Some("high"), Some("low"), None]);
     std::fs::remove_dir_all(&base).unwrap();
   }
 }
