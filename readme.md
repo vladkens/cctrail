@@ -88,9 +88,10 @@ Repositories outside the config keep their own rows and form the `@unmapped` gro
   its day, so a later price cut doesn't reprice old usage. Prices come from the models.dev git
   history and are refreshed in the background once a day (`cctrail update-pricing` does it now,
   `CCTRAIL_NO_UPDATE=1` turns it off). `codex-auto-review`, which has no price, counts as
-  `gpt-6-luna`. pi's requests are priced by their model whatever the provider (Bedrock's
-  `us.anthropic.claude-…` as Claude), and at pi's own estimate for a model models.dev lacks; tokens
-  on other unpriced models are listed below the report.
+  `gpt-6-luna`. pi's models read and are priced alike whatever the provider (Bedrock's
+  `us.anthropic.claude-opus-4-6-v1` as `claude-opus-4-6`, a router's `openai/gpt-5.4` as
+  `gpt-5.4`), at pi's own estimate for a model models.dev lacks; tokens on other unpriced models
+  are listed below the report.
 
 ## License
 

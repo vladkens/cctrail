@@ -350,9 +350,14 @@ fn pi_usage_json() {
     models.push((x["provider"].clone(), x["model"].clone(), x["cost_usd"].clone()));
   }
   models.sort_by_key(|x| x.1.to_string());
-  // Bedrock's Claude at the catalog's price, a model outside it at pi's own.
-  let bedrock = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
-  let expected = [("glm-5", 0.25), ("gpt-5", 0.00454875), ("unknown", 0.02), (bedrock, 0.020775)];
+  // Bedrock's Claude by its own name at the catalog's price, `openai/gpt-5` through a router as
+  // `gpt-5`, a model outside the catalog at pi's own price.
+  let expected = [
+    ("claude-sonnet-4-5-20250929", 0.020775),
+    ("glm-5", 0.25),
+    ("gpt-5", 0.00454875),
+    ("unknown", 0.02),
+  ];
   let expected: Vec<_> = expected.map(|(m, c)| (json!("pi"), json!(m), json!(c))).into();
   assert_eq!(models, expected);
 

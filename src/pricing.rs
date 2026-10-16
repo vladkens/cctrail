@@ -1,6 +1,5 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -191,28 +190,7 @@ fn lookup<'a>(
   day: Option<Date>,
 ) -> Option<&'a Price> {
   let model = ALIASES.iter().find(|x| x.0 == model).map_or(model, |x| x.1);
-  let model = match p {
-    Provider::Pi => Cow::Owned(catalog_id(model)),
-    _ => Cow::Borrowed(model),
-  };
-  p.catalogs().iter().find_map(|x| pick(catalog.get(*x)?.get(model.as_ref())?, day))
-}
-
-/// A model id as pi logs it from any provider, as the catalog names it: without a router's vendor
-/// (`anthropic/claude-sonnet-4.5`), Bedrock's region, vendor and version
-/// (`us.anthropic.claude-opus-4-6-v1:0`) or Vertex's date (`claude-opus-4-1@20250805`), and with
-/// dashes in Claude's version (`claude-sonnet-4.5`).
-fn catalog_id(model: &str) -> String {
-  let digits = |x: &str| !x.is_empty() && x.bytes().all(|c| c.is_ascii_digit());
-  let id = model.rsplit('/').next().unwrap_or(model);
-  let id = id.split('@').next().unwrap_or(id);
-  let id = id.find("anthropic.").map_or(id, |i| &id[i + "anthropic.".len()..]);
-  let id = id.rsplit_once(':').filter(|x| digits(x.1)).map_or(id, |x| x.0);
-  let id = id.rsplit_once("-v").filter(|x| digits(x.1)).map_or(id, |x| x.0);
-  match id.starts_with("claude-") {
-    true => id.replace('.', "-"),
-    false => id.to_string(),
-  }
+  p.catalogs().iter().find_map(|x| pick(catalog.get(*x)?.get(model)?, day))
 }
 
 fn pick(prices: &[Price], day: Option<Date>) -> Option<&Price> {
@@ -358,29 +336,15 @@ mod tests {
 
   #[test]
   fn finds_the_models_pi_calls() {
-    let ids = [
-      ("us.anthropic.claude-opus-4-6-v1", "claude-opus-4-6"),
-      ("anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
-      ("anthropic/claude-sonnet-4.5", "claude-sonnet-4-5"),
-      ("claude-opus-4-1@20250805", "claude-opus-4-1"),
-      ("openai/gpt-5.4", "gpt-5.4"),
-      ("gpt-5.6-sol", "gpt-5.6-sol"),
-      ("glm-5", "glm-5"),
-    ];
-    for (logged, id) in ids {
-      assert_eq!(catalog_id(logged), id);
-    }
-
     let catalog = parse(BUNDLED).unwrap();
     let day = Some(jiff::civil::date(2026, 10, 1));
-    // Each from its own catalog; Claude Code's and Codex's ids only as logged.
+    // pi's in either catalog, Claude Code's and Codex's only in their own.
     let opus = lookup(&catalog, Provider::Claude, "claude-opus-4-6", day).unwrap();
-    let bedrock = "us.anthropic.claude-opus-4-6-v1";
-    assert_eq!(lookup(&catalog, Provider::Pi, bedrock, day), Some(opus));
-    assert_eq!(lookup(&catalog, Provider::Claude, bedrock, day), None);
+    assert_eq!(lookup(&catalog, Provider::Pi, "claude-opus-4-6", day), Some(opus));
+    assert_eq!(lookup(&catalog, Provider::Codex, "claude-opus-4-6", day), None);
     let gpt = lookup(&catalog, Provider::Codex, "gpt-5.4", day).unwrap();
-    assert_eq!(lookup(&catalog, Provider::Pi, "openai/gpt-5.4", day), Some(gpt));
-    assert_eq!(lookup(&catalog, Provider::Codex, "openai/gpt-5.4", day), None);
+    assert_eq!(lookup(&catalog, Provider::Pi, "gpt-5.4", day), Some(gpt));
+    assert_eq!(lookup(&catalog, Provider::Claude, "gpt-5.4", day), None);
   }
 
   #[test]

@@ -90,6 +90,23 @@ impl RawUsage {
   }
 }
 
+/// A model id as pi logs it from any provider, as the price catalog names it: without a router's
+/// vendor (`anthropic/claude-sonnet-4.5`), Bedrock's region, vendor and version
+/// (`us.anthropic.claude-opus-4-6-v1:0`) or Vertex's date (`claude-opus-4-1@20250805`), and with
+/// dashes in Claude's version (`claude-sonnet-4.5`). One model reads the same by any route.
+fn model_id(model: &str) -> String {
+  let digits = |x: &str| !x.is_empty() && x.bytes().all(|c| c.is_ascii_digit());
+  let id = model.rsplit('/').next().unwrap_or(model);
+  let id = id.split('@').next().unwrap_or(id);
+  let id = id.find("anthropic.").map_or(id, |i| &id[i + "anthropic.".len()..]);
+  let id = id.rsplit_once(':').filter(|x| digits(x.1)).map_or(id, |x| x.0);
+  let id = id.rsplit_once("-v").filter(|x| digits(x.1)).map_or(id, |x| x.0);
+  match id.starts_with("claude-") {
+    true => id.replace('.', "-"),
+    false => id.to_string(),
+  }
+}
+
 // MARK: Sessions
 
 /// What a copy of an entry shares with the original: its kind, the entry's and the message's
@@ -235,7 +252,7 @@ fn parse_file(path: &Path) -> Parsed {
         None
       }
       (Some("model_change"), _) => {
-        model = line.model_id.str().map(String::from).or(model.take());
+        model = line.model_id.str().map(model_id).or(model.take());
         None
       }
       (Some("thinking_level_change"), _) => {
@@ -248,7 +265,7 @@ fn parse_file(path: &Path) -> Parsed {
       }
       (Some("message"), Some((m, Some("assistant")))) => {
         if let Some(x) = m.model.str() {
-          model = Some(x.to_string());
+          model = Some(model_id(x));
         }
         let raw = m.usage.0.as_ref();
         let usage = raw.map(RawUsage::usage);
@@ -256,7 +273,7 @@ fn parse_file(path: &Path) -> Parsed {
           ts,
           usage,
           // The model that answered, when the provider served another (a fallback, a router's).
-          model: m.response_model.str().map(String::from).or_else(|| model.clone()),
+          model: m.response_model.str().map(model_id).or_else(|| model.clone()),
           effort: m.thinking.str().map(String::from).or_else(|| effort.clone()),
           cost: raw.and_then(RawUsage::cost),
           // An error after the response began still bills the tokens it carries.
@@ -272,7 +289,7 @@ fn parse_file(path: &Path) -> Parsed {
       }
       // Requests outside the conversation, such as cache warming, name their model.
       (Some("usage"), _) => line.usage.0.as_ref().map(|x| {
-        let name = line.model.str().map(String::from).or_else(|| model.clone());
+        let name = line.model.str().map(model_id).or_else(|| model.clone());
         ("usage", new(x, name))
       }),
       // A summary of compacted or abandoned history runs on the session's model, which pi
@@ -376,7 +393,7 @@ mod tests {
     let main = sessions.iter().find(|x| x.id == "pi-main-1").unwrap();
     let billed: Vec<_> = main.events.iter().filter(|x| x.usage.is_some()).collect();
     let models: Vec<_> = billed.iter().map(|x| x.model.as_deref().unwrap_or("-")).collect();
-    let bedrock = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+    let bedrock = "claude-sonnet-4-5-20250929";
     assert_eq!(models, ["gpt-5", bedrock, bedrock, bedrock, "glm-5", "-"]);
     let failed: Vec<_> = billed.iter().map(|x| x.failed).collect();
     assert_eq!(failed, [false, false, true, false, false, false]);
@@ -387,6 +404,23 @@ mod tests {
     assert_eq!(costs, [Some(0.01), None, None, None, Some(0.25), Some(0.02)]);
     // Two prompts and a shell command.
     assert_eq!(main.events.iter().filter(|x| x.usage.is_none()).count(), 3);
+  }
+
+  #[test]
+  fn names_a_model_alike_by_any_route() {
+    let ids = [
+      ("us.anthropic.claude-opus-4-6-v1", "claude-opus-4-6"),
+      ("anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
+      ("anthropic/claude-sonnet-4.5", "claude-sonnet-4-5"),
+      ("claude-opus-4-1@20250805", "claude-opus-4-1"),
+      ("openai/gpt-6-astra", "gpt-6-astra"),
+      ("gpt-5.6-sol", "gpt-5.6-sol"),
+      ("google/gemini-4-argon", "gemini-4-argon"),
+      ("glm-5", "glm-5"),
+    ];
+    for (logged, id) in ids {
+      assert_eq!(model_id(logged), id);
+    }
   }
 
   #[test]
