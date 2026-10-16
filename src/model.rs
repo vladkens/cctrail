@@ -9,6 +9,7 @@ pub type Ts = i64;
 pub enum Provider {
   Claude,
   Codex,
+  Pi,
 }
 
 impl Provider {
@@ -16,6 +17,7 @@ impl Provider {
     match s {
       "claude" => Some(Self::Claude),
       "codex" => Some(Self::Codex),
+      "pi" => Some(Self::Pi),
       _ => None,
     }
   }
@@ -24,13 +26,16 @@ impl Provider {
     match self {
       Self::Claude => "claude",
       Self::Codex => "codex",
+      Self::Pi => "pi",
     }
   }
 
-  pub fn pricing_key(self) -> &'static str {
+  /// The price catalogs its models are in: pi calls the models of any provider.
+  pub fn catalogs(self) -> &'static [&'static str] {
     match self {
-      Self::Claude => "anthropic",
-      Self::Codex => "openai",
+      Self::Claude => &["anthropic"],
+      Self::Codex => &["openai"],
+      Self::Pi => &["anthropic", "openai"],
     }
   }
 }
@@ -51,7 +56,7 @@ impl Speed {
   }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Usage {
   pub input: u64,
   pub cache_write_5m: u64,
@@ -106,6 +111,8 @@ pub struct Event {
   pub effort: Option<String>,
   /// Claude's `(message.id, requestId)`, shared by copies of one API response across files.
   pub identity: Option<(String, Option<String>)>,
+  /// The harness's own cost estimate (pi's), used for a model the price catalog lacks.
+  pub cost: Option<f64>,
   pub sidechain: bool,
   pub failed: bool,
 }

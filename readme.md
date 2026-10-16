@@ -9,8 +9,8 @@
 
 </div>
 
-`cctrail` reads the local history of Claude Code and Codex and shows, for each project, how much
-time you spent in it, how many tokens it used and what that would cost at API prices. It needs no
+`cctrail` reads the local history of Claude Code, Codex and [pi](https://pi.dev) and shows, for
+each project, how much time you spent in it, how many tokens it used and what that would cost at API prices. It needs no
 setup: repositories are found from the sessions themselves, with agent worktrees and clones counted
 as one project.
 
@@ -36,7 +36,7 @@ cctrail days             # per day; also weeks, months, and --models for a break
 ```
 
 `--since` and `--until` take inclusive `YYYY-MM-DD` dates instead of a period, `--provider
-claude|codex` reads one harness only, and `--json` prints everything with full paths and exact
+claude|codex|pi` reads one harness only, and `--json` prints everything with full paths and exact
 counts. Weeks start on Monday. `cctrail --help` lists it all.
 
 `cctrail` without arguments on a terminal opens the interactive view: projects, models and a
@@ -75,6 +75,9 @@ Repositories outside the config keep their own rows and form the `@unmapped` gro
 - **History:** Claude Code from `~/.claude/projects`, Codex from `~/.codex/sessions` and
   `~/.codex/archived_sessions`, plus the same in every profile beside them (`~/.claude-work`,
   `~/.codex-personal`). `CLAUDE_CONFIG_DIR` and `CODEX_HOME` replace all of them with one root.
+  pi from `~/.pi/agent/sessions` (`PI_CODING_AGENT_DIR` moves the agent directory) and an absolute
+  `sessionDir` from its `settings.json`; `PI_CODING_AGENT_SESSION_DIR` replaces both. A forked pi
+  session counts only what it added to the copy of its source.
   Claude Code deletes sessions older than 30 days by default: raise
   [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically)
   to keep a long history.
@@ -85,7 +88,9 @@ Repositories outside the config keep their own rows and form the `@unmapped` gro
   its day, so a later price cut doesn't reprice old usage. Prices come from the models.dev git
   history and are refreshed in the background once a day (`cctrail update-pricing` does it now,
   `CCTRAIL_NO_UPDATE=1` turns it off). `codex-auto-review`, which has no price, counts as
-  `gpt-6-luna`; tokens on other unpriced models are listed below the report.
+  `gpt-6-luna`. pi's requests are priced by their model whatever the provider (Bedrock's
+  `us.anthropic.claude-…` as Claude), and at pi's own estimate for a model models.dev lacks; tokens
+  on other unpriced models are listed below the report.
 
 ## License
 

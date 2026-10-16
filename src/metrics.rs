@@ -306,8 +306,7 @@ pub fn usage_by_period(
     let Some(ts) = event.ts.filter(|x| range.contains(*x)) else { continue };
     let bucket = gran.bucket(local_date(ts));
     let usage = event.usage.unwrap_or_default();
-    let cost =
-      pricing::cost(session.provider, event.model.as_deref(), Some(ts), &usage, event.speed);
+    let cost = pricing::cost(session.provider, event);
     let summary = summaries.entry(bucket).or_default();
     summary.usage += usage;
     summary.cost += cost;
@@ -425,8 +424,7 @@ pub fn stats_by(
     let stat = stats.entry(name).or_insert_with(|| new_stat(si));
     let usage = event.usage.unwrap_or_default();
     stat.usage += usage;
-    let model = event.model.as_deref();
-    stat.cost += pricing::cost(session.provider, model, event.ts, &usage, event.speed);
+    stat.cost += pricing::cost(session.provider, event);
   }
 
   for (name, seconds) in active_by_name(&stamps, range) {
@@ -469,7 +467,8 @@ pub fn combine_stats<'a>(name: &str, stats: impl IntoIterator<Item = &'a Stat>) 
   total
 }
 
-/// Tokens on models the price catalog lacks, by model, most first: their cost counts as 0.
+/// Tokens on models the price catalog lacks and the harness didn't price, by model, most first:
+/// their cost counts as 0.
 pub fn unpriced(
   sessions: &[Session],
   events: &[(usize, usize)],
@@ -481,7 +480,7 @@ pub fn unpriced(
     if range.bounded() && !event.ts.is_some_and(|x| range.contains(x)) {
       continue;
     }
-    if pricing::price(session.provider, event.model.as_deref(), event.ts).is_none() {
+    if !pricing::priced(session.provider, event) {
       let model = event.model.as_deref().unwrap_or("unknown");
       let x = models.entry(model).or_default();
       *x = x.saturating_add(event.usage.map_or(0, |x| x.total()));

@@ -61,6 +61,7 @@ fn tmp(name: &str) -> PathBuf {
 struct Run {
   claude: PathBuf,
   codex: PathBuf,
+  pi: PathBuf,
   config: Option<PathBuf>,
   cwd: Option<PathBuf>,
   cache: PathBuf,
@@ -72,10 +73,16 @@ impl Run {
     Self {
       claude: fixtures().join(claude),
       codex: fixtures().join(codex),
+      pi: fixtures().join("missing"),
       config,
       cwd: None,
       cache: fixtures().join("missing"),
     }
+  }
+
+  fn pi(mut self, path: &str) -> Self {
+    self.pi = fixtures().join(path);
+    self
   }
 
   fn config(mut self, path: impl AsRef<Path>) -> Self {
@@ -86,6 +93,7 @@ impl Run {
   fn exec(&self, args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
     cmd.args(args).env("CLAUDE_CONFIG_DIR", &self.claude).env("CODEX_HOME", &self.codex);
+    cmd.env("PI_CODING_AGENT_DIR", &self.pi).env_remove("PI_CODING_AGENT_SESSION_DIR");
     // The user's downloaded prices must not change the numbers, and tests never download.
     cmd.env("XDG_CACHE_HOME", &self.cache).env("CCTRAIL_NO_UPDATE", "1").env_remove("COLUMNS");
     match &self.config {
@@ -320,6 +328,47 @@ fn codex_usage_json() {
   assert_eq!(totals, [&json!(435), &json!(20)]);
 }
 
+fn total_of(run: &Run, args: &[&str]) -> Value {
+  run.json(args)["total"]["usage"]["total"].clone()
+}
+
+#[test]
+fn pi_usage_json() {
+  let run = Run::new("claude/projects", "missing").pi("pi");
+  let value = run.json(&["days", "--provider", "pi", "--models", "--json"]);
+  assert_eq!(value["query"]["provider"], "pi");
+  // A fork's copies of its source's entries count once.
+  let total = &value["total"];
+  assert_eq!(
+    (&total["usage"]["total"], &total["usage"]["reasoning"]),
+    (&json!(11_230), &json!(100))
+  );
+  assert_eq!(total["cost_usd"], 0.29532375);
+  let mut models = vec![];
+  for x in value["periods"].as_array().unwrap().iter().flat_map(|x| x["models"].as_array().unwrap())
+  {
+    models.push((x["provider"].clone(), x["model"].clone(), x["cost_usd"].clone()));
+  }
+  models.sort_by_key(|x| x.1.to_string());
+  // Bedrock's Claude at the catalog's price, a model outside it at pi's own.
+  let bedrock = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+  let expected = [("glm-5", 0.25), ("gpt-5", 0.00454875), ("unknown", 0.02), (bedrock, 0.020775)];
+  let expected: Vec<_> = expected.map(|(m, c)| (json!("pi"), json!(m), json!(c))).into();
+  assert_eq!(models, expected);
+
+  // Every provider by default, one with --provider.
+  assert_eq!(total_of(&run, &["--json"]), 11_230 + 427);
+  assert_eq!(total_of(&run, &["--provider", "claude", "--json"]), 427);
+
+  // An absolute `sessionDir` in pi's settings holds sessions too.
+  let mut run = Run::new("missing", "missing");
+  run.pi = tmp("pi-agent");
+  let settings = json!({"sessionDir": fixtures().join("pi/sessions")});
+  std::fs::write(run.pi.join("settings.json"), settings.to_string()).unwrap();
+  assert_eq!(total_of(&run, &["--json"]), 11_230);
+  std::fs::remove_dir_all(&run.pi).unwrap();
+}
+
 #[test]
 fn stats_json_over_all_fixtures() {
   let value = Run::new("", "").config("config.toml").json(&["--json"]);
@@ -405,6 +454,7 @@ fn prices_each_day_at_its_rate() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
     cmd.args(["days", "--json"]).env("TZ", tz).env("CCTRAIL_NO_UPDATE", "1");
     cmd.env("CLAUDE_CONFIG_DIR", &run.claude).env("CODEX_HOME", &run.codex);
+    cmd.env("PI_CODING_AGENT_DIR", &run.pi).env_remove("PI_CODING_AGENT_SESSION_DIR");
     cmd.env("XDG_CACHE_HOME", &run.cache).env("CCTRAIL_CONFIG", fixtures().join("empty.toml"));
     let value: Value = serde_json::from_slice(&cmd.output().unwrap().stdout).unwrap();
     value["periods"]

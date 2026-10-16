@@ -195,8 +195,8 @@ impl Data {
       let row = rows.entry(key(s, e)).or_insert_with_key(|key| row_of(key));
       let usage = e.usage.unwrap_or_default();
       row.tokens = row.tokens.saturating_add(usage.total());
-      row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
-      row.unpriced |= pricing::price(s.provider, e.model.as_deref(), e.ts).is_none();
+      row.cost += pricing::cost(s.provider, e);
+      row.unpriced |= !pricing::priced(s.provider, e);
     }
     rows.into_values().collect()
   }
@@ -361,7 +361,7 @@ impl Data {
       let row = out.entry(bucket(ts)).or_default().entry(key).or_insert_with_key(|k| row_of(k));
       let usage = e.usage.unwrap_or_default();
       row.tokens = row.tokens.saturating_add(usage.total());
-      row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
+      row.cost += pricing::cost(s.provider, e);
     }
     // Activity stamps, as the timeline counts them, to the model of the session's last response,
     // as in `model_times`; the windows cut at midnight, so a day gets the part of a window from
