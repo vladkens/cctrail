@@ -93,11 +93,14 @@ impl RawUsage {
 // MARK: Sessions
 
 /// What a copy of an entry shares with the original: its kind, the entry's and the message's
-/// time, model and usage. `/fork`, `/clone` and `--fork` copy the entries of the source session
-/// into the new file verbatim, but a v1 source migrated on the way gets new entry ids.
-type Key = (&'static str, Option<Ts>, Option<i64>, Option<String>, Option<Usage>);
+/// time and its usage. `/fork`, `/clone` and `--fork` copy the entries of the source session into
+/// the new file verbatim, but a v1 source migrated on the way gets new entry ids, and a branch
+/// copied alone lacks the model changes of the others.
+type Key = (&'static str, Option<Ts>, Option<i64>, Option<Usage>);
 
 struct Parsed {
+  /// When the session was created, from its header.
+  created: Option<Ts>,
   /// The file name of the session it was forked from.
   parent: Option<String>,
   session: Session,
@@ -128,31 +131,52 @@ pub fn roots() -> Vec<PathBuf> {
 }
 
 /// Sessions under the roots, each its own main session in the directory of its header. A fork's
-/// copies of its source's entries count only in the source.
+/// copies of its source's entries count only in the source; when the source is gone, in the first
+/// fork created.
 pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
   let name = |x: &Path| x.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
-  // A session file found under two roots counts once. The pi-subagents extension keeps debug
-  // copies of its agents' sessions in `subagent-artifacts`.
-  let mut names = HashSet::new();
-  let files: Vec<PathBuf> = jsonl_files(roots)
-    .into_iter()
-    .filter(|x| !x.components().any(|x| x.as_os_str() == "subagent-artifacts"))
-    .filter(|x| names.insert(name(x)))
-    .collect();
+  let size = |x: &Path| std::fs::metadata(x).map_or(0, |x| x.len());
+  // A session file found under two roots counts once, the longest copy. The pi-subagents
+  // extension keeps debug copies of its agents' sessions in `subagent-artifacts`.
+  let mut longest: HashMap<String, PathBuf> = HashMap::new();
+  for x in jsonl_files(roots) {
+    if x.components().any(|x| x.as_os_str() == "subagent-artifacts") {
+      continue;
+    }
+    let best = longest.entry(name(&x)).or_insert_with(|| x.clone());
+    if size(&x) > size(best) {
+      *best = x;
+    }
+  }
+  let mut files: Vec<PathBuf> = longest.into_values().collect();
+  files.sort();
   let parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x)).collect();
 
   // The source is found by its file name, unique by its id, wherever its directory is now.
   let index: HashMap<String, usize> = files.iter().enumerate().map(|(i, x)| (name(x), i)).collect();
-  let keep: Vec<Vec<bool>> = parsed
-    .iter()
-    .enumerate()
-    .map(|(i, x)| {
-      let source = x.parent.as_ref().and_then(|x| index.get(x)).filter(|x| **x != i);
-      let copied: HashSet<&Key> =
-        source.map(|x| parsed[*x].keys.iter().collect()).unwrap_or_default();
-      x.keys.iter().map(|k| !copied.contains(k)).collect()
-    })
-    .collect();
+  let mut order: Vec<usize> = (0..parsed.len()).collect();
+  order.sort_by_key(|i| (parsed[*i].created.is_none(), parsed[*i].created));
+  let mut orphans: HashMap<&str, HashSet<&Key>> = HashMap::new();
+  let mut keep: Vec<Vec<bool>> = vec![vec![]; parsed.len()];
+  for i in order {
+    let x = &parsed[i];
+    let Some(parent) = x.parent.as_deref() else {
+      keep[i] = vec![true; x.keys.len()];
+      continue;
+    };
+    keep[i] = match index.get(parent).filter(|x| **x != i) {
+      Some(j) => {
+        let copied: HashSet<&Key> = parsed[*j].keys.iter().collect();
+        x.keys.iter().map(|k| !copied.contains(k)).collect()
+      }
+      None => {
+        let copied = orphans.entry(parent).or_default();
+        let keep = x.keys.iter().map(|k| !copied.contains(k)).collect();
+        copied.extend(&x.keys);
+        keep
+      }
+    };
+  }
 
   let mut sessions = vec![];
   for (x, keep) in parsed.into_iter().zip(keep) {
@@ -171,6 +195,7 @@ fn parse_file(path: &Path) -> Parsed {
   let stem = path.file_stem().map(|x| x.to_string_lossy()).unwrap_or_default();
   let id = stem.rsplit_once('_').map_or(&*stem, |x| x.1);
   let mut session = Session::new(id, true, "unknown", Provider::Pi);
+  let mut created = None;
   let mut parent = None;
   let mut header = false;
   // The session's model and thinking level as last selected or used.
@@ -198,6 +223,7 @@ fn parse_file(path: &Path) -> Parsed {
     let event = match (line.kind.str(), message.map(|x| (x, x.role.str()))) {
       (Some("session"), _) if !header => {
         header = true;
+        created = ts;
         parent = line.parent.str().and_then(|x| x.rsplit(['/', '\\']).next()).map(String::from);
         if let Some(x) = line.id.str().filter(|x| !x.is_empty()) {
           session.id = x.to_string();
@@ -257,13 +283,13 @@ fn parse_file(path: &Path) -> Parsed {
       _ => None,
     };
     if let Some((kind, event)) = event {
-      keys.push((kind, ts, millis, event.model.clone(), event.usage));
+      keys.push((kind, ts, millis, event.usage));
       session.events.push(event);
     }
     true
   });
 
-  Parsed { parent, session, keys }
+  Parsed { created, parent, session, keys }
 }
 
 #[cfg(test)]
@@ -297,7 +323,7 @@ mod tests {
   }
 
   #[test]
-  fn counts_what_no_source_holds() {
+  fn counts_copies_once_by_lineage() {
     let dir = std::env::temp_dir().join(format!("cctrail-pi-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let header = |id: &str, parent: &str| {
@@ -324,6 +350,23 @@ mod tests {
     assert_eq!(find("one").events.len(), 3);
     // The model that answered.
     assert_eq!(find("two").events[1].model.as_deref(), Some("b"));
+
+    // Another fork of the gone source, created later, shares the first one's copies. A fork of it
+    // copied a summary without the model change before it, as a branch copied alone.
+    let summary = r#"{"type":"compaction","timestamp":"2026-01-01T00:00:03Z","usage":{"input":5}}"#;
+    let change = r#"{"type":"model_change","timestamp":"2026-01-01T00:00:02Z","modelId":"m"}"#;
+    let later = header("three", "0_zero.jsonl").replace("00:00:00", "00:00:09");
+    file("3_three.jsonl", &[&later, change, &usage("x"), reply, summary]);
+    file("4_four.jsonl", &[&header("four", "3_three.jsonl"), summary]);
+    // A longer copy of `one` under a second root wins.
+    let other = dir.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let longer = [&header("one", "") as &str, &usage("x"), &usage("y"), reply, &usage("z")];
+    std::fs::write(other.join("1_one.jsonl"), longer.join("\n")).unwrap();
+    let sessions = parse(&[dir.clone(), other]);
+    let total = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
+    let totals = ["one", "two", "three", "four"].map(total);
+    assert_eq!(totals, [310, 110, 5, 0]);
     std::fs::remove_dir_all(&dir).unwrap();
   }
 
