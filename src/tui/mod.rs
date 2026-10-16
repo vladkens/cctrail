@@ -233,9 +233,14 @@ impl App {
     self.all = list.len();
     let needle = self.filter.to_lowercase();
     list.retain(|x| x.label.to_lowercase().contains(&needle));
-    // With a filter, the total is of the rows shown.
-    if !needle.is_empty() {
+    // With a filter, the total is of the rows shown; the timeline's is of its days, as the usage
+    // report's, with the period's sessions (a session on two days counts once).
+    if !needle.is_empty() || self.tab == Tab::Timeline {
+      let sessions = self.total.sessions;
       self.total = sum(&list);
+      if needle.is_empty() {
+        self.total.sessions = sessions;
+      }
     }
     let found = kept.and_then(|k| list.iter().position(|x| x.key == k));
     let sel = &mut self.sel[self.tab as usize];
@@ -1392,5 +1397,46 @@ mod tests {
         }
       }
     }
+  }
+
+  #[test]
+  fn the_timeline_totals_its_days() {
+    // Usage one day, only user activity the next: the projects count both windows, the days
+    // the first only, and the timeline's total is its days'.
+    let tz = jiff::tz::TimeZone::system();
+    let at =
+      |day: i8| jiff::civil::date(2026, 1, day).at(10, 0, 0, 0).to_zoned(tz.clone()).unwrap();
+    let mut s = crate::model::Session::new("s", true, "/w/api", Provider::Claude);
+    let usage = Some(crate::model::Usage { input: 10, ..Default::default() });
+    let model = Some("a".to_string());
+    s.events.push(crate::model::Event {
+      ts: Some(at(7).timestamp().as_microsecond()),
+      usage,
+      model,
+      ..Default::default()
+    });
+    s.events.push(crate::model::Event::activity(at(8).timestamp().as_microsecond()));
+    let config = Config::parse("[projects]\n\"w/api\" = [\"/w/api\"]\n", None).unwrap();
+    let mut app = App::new(Data::new(vec![s], config, jiff::civil::date(2026, 1, 10)));
+    assert_eq!(app.total.active, Some(10 * 60_000_000));
+    press(&mut app, KeyCode::Char('3'));
+    let days: i64 = app.list.iter().filter_map(|x| x.active).sum();
+    assert_eq!((app.total.active, days), (Some(5 * 60_000_000), 5 * 60_000_000));
+  }
+
+  #[test]
+  fn a_drill_down_scrolls_to_the_selected_table() {
+    let mut app = many();
+    press(&mut app, KeyCode::Char('2'));
+    app.sel[1] = app.list.iter().position(|x| x.key == "codex/gpt-5.4").unwrap();
+    press(&mut app, KeyCode::Enter);
+    // Too low for both tables: the selection in the effort table brings it into view.
+    press(&mut app, KeyCode::End);
+    let buf = frame_of(&app, 100, 12);
+    let out = screen_of(&buf);
+    assert!(out.contains("Effort") && out.contains(" ▶ "), "{out}");
+    press(&mut app, KeyCode::Home);
+    let out = screen_of(&frame_of(&app, 100, 12));
+    assert!(out.contains("Speed") && out.contains(" ▶ "), "{out}");
   }
 }

@@ -723,16 +723,32 @@ fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let d = app.open.as_ref().unwrap();
   let name = ["models", "usage", "projects"][app.tab as usize];
   let area = boxed(f, app, area, list_titles(app, area.width, name), hits);
+  // The tables from the first that lets the selected one fit under it, so the selection is in
+  // view; arrows on the right border where tables are out of it.
+  let starts: Vec<usize> =
+    d.parts.iter().scan(0, |n, x| Some(std::mem::replace(n, *n + x.1.len()))).collect();
+  let picked = starts.iter().rposition(|x| *x <= app.osel).unwrap_or(0);
+  let high = |part: &[(&str, Vec<Row>)]| part.iter().map(|x| x.1.len() as u16 + 3).sum::<u16>();
+  let from =
+    (0..=picked).find(|i| high(&d.parts[*i..=picked]) <= area.height + 1).unwrap_or(picked);
   let mut y = area.y;
-  let mut first = 0;
-  for (name, rows) in &d.parts {
+  let mut last = from;
+  for (i, (name, rows)) in d.parts.iter().enumerate().skip(from) {
     let room = Rect { y, height: area.bottom().saturating_sub(y), ..area };
     if room.height < 3 {
       break;
     }
+    let first = starts[i];
     let sel = app.osel.checked_sub(first).filter(|x| *x < rows.len());
     y += table(f, app, (name, rows, first), &d.row, d.sessions, room, sel, hits) + 1;
-    first += rows.len();
+    last = i;
+  }
+  let buf = f.buffer_mut();
+  if from > 0 {
+    buf[(area.right(), area.y)].set_symbol("↑");
+  }
+  if last + 1 < d.parts.len() {
+    buf[(area.right(), area.bottom() - 1)].set_symbol("↓");
   }
 }
 
