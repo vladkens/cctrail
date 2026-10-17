@@ -674,10 +674,11 @@ fn model(e: &Event) -> &str {
   e.model.as_deref().unwrap_or(UNKNOWN)
 }
 
-/// The model an event's time goes to: none for a failed response, which answered nothing, or for
-/// cache warming, which ran unattended; their time stays with the model before.
+/// The model an event's time goes to: none for a failed response, which answered nothing, for
+/// cache warming, which ran unattended, or for Claude Code's own messages (an interruption, an
+/// error), which name the model `<synthetic>`; their time stays with the model before.
 fn named(e: &Event) -> Option<&str> {
-  e.model.as_deref().filter(|_| e.active())
+  e.model.as_deref().filter(|x| e.active() && *x != "<synthetic>")
 }
 
 /// A model's row: its name without a date at the end (`claude-sonnet-4-5-20250929`), so one
@@ -1120,6 +1121,20 @@ pub mod tests {
       ["claude-sonnet-4-5-20250929", "gpt-4o-2024-08-06", "gpt-5.4", "-20250929", "a-2025"];
     let keys = keys.map(model_key);
     assert_eq!(keys, ["claude-sonnet-4-5", "gpt-4o-2024-08-06", "gpt-5.4", "-20250929", "a-2025"]);
+  }
+
+  #[test]
+  fn synthetic_messages_own_no_time() {
+    // Model A, an interruption Claude Code logs as `<synthetic>`, then the user: all A's time.
+    let s = session("s", &[(600, Some("a"), 10), (602, Some("<synthetic>"), 0), (604, None, 0)]);
+    let data = data_with(vec![s], jiff::civil::date(2026, 1, 10));
+    let models = data.models(Span::All, None, None);
+    let rows: Vec<_> =
+      models.iter().map(|x| (x.key.as_str(), minutes(std::slice::from_ref(x)))).collect();
+    assert_eq!(rows, [("a", 9)]);
+    let days = data.bucket_models(Span::Month, None);
+    let keys: Vec<&str> = days.values().flatten().map(|x| x.key.as_str()).collect();
+    assert_eq!((keys, minutes(days.values().next().unwrap())), (vec!["a"], 9));
   }
 
   #[test]
