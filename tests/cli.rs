@@ -369,7 +369,8 @@ fn pi_usage_json() {
   let mut run = Run::new("missing", "missing");
   run.pi = tmp("pi-agent");
   let settings = json!({"sessionDir": fixtures().join("pi/sessions")});
-  std::fs::write(run.pi.join("settings.json"), settings.to_string()).unwrap();
+  // Written with a byte order mark, as some Windows editors save.
+  std::fs::write(run.pi.join("settings.json"), format!("\u{feff}{settings}")).unwrap();
   assert_eq!(total_of(&run, &["--json"]), 11_230);
   std::fs::remove_dir_all(&run.pi).unwrap();
 }

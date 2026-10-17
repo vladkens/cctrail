@@ -90,15 +90,34 @@ impl RawUsage {
   }
 }
 
+/// Bedrock's model vendors: its ids are `[<region>.]<vendor>.<model>`.
+const VENDORS: [&str; 10] = [
+  "anthropic",
+  "openai",
+  "amazon",
+  "meta",
+  "mistral",
+  "cohere",
+  "deepseek",
+  "qwen",
+  "ai21",
+  "writer",
+];
+
 /// A model id as pi logs it from any provider, as the price catalog names it: without a router's
 /// vendor (`anthropic/claude-sonnet-4.5`), Bedrock's region, vendor and version
-/// (`us.anthropic.claude-opus-4-6-v1:0`) or Vertex's date (`claude-opus-4-1@20250805`), and with
-/// dashes in Claude's version (`claude-sonnet-4.5`). One model reads the same by any route.
+/// (`us.anthropic.claude-opus-4-6-v1:0`, `global.openai.gpt-6-astra`) or Vertex's date
+/// (`claude-opus-4-1@20250805`), and with dashes in Claude's version (`claude-sonnet-4.5`). One
+/// model reads the same by any route.
 fn model_id(model: &str) -> String {
   let digits = |x: &str| !x.is_empty() && x.bytes().all(|c| c.is_ascii_digit());
   let id = model.rsplit('/').next().unwrap_or(model);
   let id = id.split('@').next().unwrap_or(id);
-  let id = id.find("anthropic.").map_or(id, |i| &id[i + "anthropic.".len()..]);
+  let vendor = |v: &str| match id.strip_prefix(v).and_then(|x| x.strip_prefix('.')) {
+    Some(x) => Some(id.len() - x.len()),
+    None => id.find(&format!(".{v}.")).map(|i| i + v.len() + 2),
+  };
+  let id = VENDORS.iter().filter_map(|v| vendor(v)).min().map_or(id, |i| &id[i..]);
   let id = id.rsplit_once(':').filter(|x| digits(x.1)).map_or(id, |x| x.0);
   let id = id.rsplit_once("-v").filter(|x| digits(x.1)).map_or(id, |x| x.0);
   match id.starts_with("claude-") {
@@ -139,7 +158,10 @@ pub fn roots() -> Vec<PathBuf> {
     None => home.clone().unwrap_or_else(|| ".".into()).join(".pi/agent"),
   };
   let settings = std::fs::read(agent.join("settings.json")).ok();
-  let settings = settings.and_then(|x| serde_json::from_slice::<serde_json::Value>(&x).ok());
+  let settings = settings.and_then(|x| {
+    let x = x.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&x);
+    serde_json::from_slice::<serde_json::Value>(x).ok()
+  });
   // A relative `sessionDir` is below each project's directory, where cctrail can't find it.
   let custom = settings.as_ref().and_then(|x| expand(x.get("sessionDir")?.as_str()?));
   let default = agent.join("sessions");
@@ -147,9 +169,10 @@ pub fn roots() -> Vec<PathBuf> {
   std::iter::once(default).chain(custom).collect()
 }
 
-/// Sessions under the roots, each its own main session in the directory of its header. A fork's
-/// copies of its source's entries count only in the source; when the source is gone, in the first
-/// fork created.
+/// Sessions under the roots, each its own main session in the directory of its header. An entry
+/// copied between forks counts once in their lineage (the sessions forked from one another): in
+/// the session created first that holds it. A fork of a gone session can't name the rest of its
+/// lineage, so its copies are looked for in every session created before it.
 pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
   let name = |x: &Path| x.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
   let size = |x: &Path| std::fs::metadata(x).map_or(0, |x| x.len());
@@ -171,28 +194,33 @@ pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
 
   // The source is found by its file name, unique by its id, wherever its directory is now.
   let index: HashMap<String, usize> = files.iter().enumerate().map(|(i, x)| (name(x), i)).collect();
+  // A lineage is named by its oldest ancestor, a session file or a gone one; the depth counts the
+  // forks down from it.
+  let lineage = |i: usize| {
+    let (mut at, mut depth) = (name(&files[i]), 0);
+    while depth < files.len() {
+      match index.get(&at).and_then(|x| parsed[*x].parent.as_ref()) {
+        Some(x) if *x != at => (at, depth) = (x.clone(), depth + 1),
+        _ => break,
+      }
+    }
+    (at, depth)
+  };
+  let lineages: Vec<(String, usize)> = (0..parsed.len()).map(lineage).collect();
+  // Sources before their forks, whatever their headers' times say.
   let mut order: Vec<usize> = (0..parsed.len()).collect();
-  order.sort_by_key(|i| (parsed[*i].created.is_none(), parsed[*i].created));
-  let mut orphans: HashMap<&str, HashSet<&Key>> = HashMap::new();
+  order.sort_by_key(|i| (lineages[*i].1, parsed[*i].created.is_none(), parsed[*i].created));
+  let mut held: HashMap<String, HashSet<&Key>> = HashMap::new();
+  let mut all: HashSet<&Key> = HashSet::new();
   let mut keep: Vec<Vec<bool>> = vec![vec![]; parsed.len()];
   for i in order {
-    let x = &parsed[i];
-    let Some(parent) = x.parent.as_deref() else {
-      keep[i] = vec![true; x.keys.len()];
-      continue;
-    };
-    keep[i] = match index.get(parent).filter(|x| **x != i) {
-      Some(j) => {
-        let copied: HashSet<&Key> = parsed[*j].keys.iter().collect();
-        x.keys.iter().map(|k| !copied.contains(k)).collect()
-      }
-      None => {
-        let copied = orphans.entry(parent).or_default();
-        let keep = x.keys.iter().map(|k| !copied.contains(k)).collect();
-        copied.extend(&x.keys);
-        keep
-      }
-    };
+    let keys = &parsed[i].keys;
+    let root = &lineages[i].0;
+    let gone = !index.contains_key(root);
+    let copied = held.entry(root.clone()).or_default();
+    keep[i] = keys.iter().map(|k| !copied.contains(k) && !(gone && all.contains(k))).collect();
+    copied.extend(keys);
+    all.extend(keys);
   }
 
   let mut sessions = vec![];
@@ -293,9 +321,12 @@ fn parse_file(path: &Path) -> Parsed {
         ("usage", new(x, name))
       }),
       // A summary of compacted or abandoned history runs on the session's model, which pi
-      // doesn't log with it.
-      (Some("compaction" | "branch_summary"), _) => {
+      // doesn't log with it. A split turn's compaction is two requests, a branch's summary one.
+      (Some("compaction"), _) => {
         line.usage.0.as_ref().map(|x| ("summary", summed(x, model.clone())))
+      }
+      (Some("branch_summary"), _) => {
+        line.usage.0.as_ref().map(|x| ("summary", new(x, model.clone())))
       }
       _ => None,
     };
@@ -357,10 +388,13 @@ mod tests {
     let late = r#"{"type":"message","message":{"role":"user","timestamp":300000000000000}}"#;
     let file =
       |name: &str, lines: &[&str]| std::fs::write(dir.join(name), lines.join("\n")).unwrap();
-    // Alike entries in one session, in a session that isn't their fork, in a fork whose source is
-    // gone: all count. A time out of range is no time.
-    file("1_one.jsonl", &[&header("one", ""), &usage("x"), &usage("y"), reply, late]);
-    file("2_two.jsonl", &[&header("two", "/gone/0_zero.jsonl"), &usage("x"), reply]);
+    // Alike entries in one session count, and a fork's whose source is gone. A time out of range
+    // is no time.
+    let (x, y) = (usage("x"), usage("y"));
+    let moved = |x: &str| x.replace("00:00:0", "00:00:5");
+    let (own_x, own_reply) = (moved(&x), moved(reply));
+    file("1_one.jsonl", &[&header("one", ""), &x, &y, reply, late]);
+    file("2_two.jsonl", &[&header("two", "/gone/0_zero.jsonl"), &own_x, &own_reply]);
     let sessions = parse(std::slice::from_ref(&dir));
     let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
     assert_eq!((total(find("one")), total(find("two"))), (210, 110));
@@ -373,7 +407,7 @@ mod tests {
     let summary = r#"{"type":"compaction","timestamp":"2026-01-01T00:00:03Z","usage":{"input":5}}"#;
     let change = r#"{"type":"model_change","timestamp":"2026-01-01T00:00:02Z","modelId":"m"}"#;
     let later = header("three", "0_zero.jsonl").replace("00:00:00", "00:00:09");
-    file("3_three.jsonl", &[&later, change, &usage("x"), reply, summary]);
+    file("3_three.jsonl", &[&later, change, &own_x, &own_reply, summary]);
     file("4_four.jsonl", &[&header("four", "3_three.jsonl"), summary]);
     // A longer copy of `one` under a second root wins.
     let other = dir.join("other");
@@ -384,6 +418,56 @@ mod tests {
     let total = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
     let totals = ["one", "two", "three", "four"].map(total);
     assert_eq!(totals, [310, 110, 5, 0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn counts_copies_once_past_a_gone_fork() {
+    let dir = std::env::temp_dir().join(format!("cctrail-pi-chain-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let header = |id: &str, t: u8, parent: &str| {
+      let parent = if parent.is_empty() { "null".into() } else { format!(r#""/s/{parent}""#) };
+      format!(
+        r#"{{"type":"session","id":"{id}","timestamp":"2026-01-01T00:00:0{t}Z","cwd":"/r","parentSession":{parent}}}"#
+      )
+    };
+    let reply = |t: u8, n: u64| {
+      format!(
+        r#"{{"type":"message","timestamp":"2026-01-01T00:01:0{t}Z","message":{{"role":"assistant","model":"m","usage":{{"input":{n}}}}}}}"#
+      )
+    };
+    let file =
+      |name: &str, lines: &[&str]| std::fs::write(dir.join(name), lines.join("\n")).unwrap();
+    // a → b → c, with b gone: c's copy of a's reply counts in a, its copy of b's in c.
+    file("1_a.jsonl", &[&header("a", 1, ""), &reply(1, 100)]);
+    file(
+      "3_c.jsonl",
+      &[&header("c", 3, "2_b.jsonl"), &reply(1, 100), &reply(2, 200), &reply(3, 300)],
+    );
+    // An unrelated session alike to a's reply, created before c, still counts.
+    file("0_z.jsonl", &[&header("z", 0, ""), &reply(1, 100)]);
+    let sessions = parse(std::slice::from_ref(&dir));
+    let total = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
+    assert_eq!((total("a"), total("c"), total("z")), (100, 500, 100));
+    std::fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn prices_a_branch_summary_as_one_request() {
+    let dir = std::env::temp_dir().join(format!("cctrail-pi-summary-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lines = [
+      r#"{"type":"session","id":"s","timestamp":"2026-01-01T00:00:00Z","cwd":"/r"}"#,
+      r#"{"type":"model_change","timestamp":"2026-01-01T00:00:01Z","modelId":"m"}"#,
+      r#"{"type":"branch_summary","timestamp":"2026-01-01T00:00:02Z","usage":{"input":5}}"#,
+      r#"{"type":"compaction","timestamp":"2026-01-01T00:00:03Z","usage":{"input":7}}"#,
+    ];
+    std::fs::write(dir.join("1_s.jsonl"), lines.join("\n")).unwrap();
+    let sessions = parse(std::slice::from_ref(&dir));
+    // A compaction may sum a split turn's two requests; a branch's summary is one.
+    let summed: Vec<_> =
+      sessions[0].events.iter().map(|x| (x.model.as_deref(), x.summed)).collect();
+    assert_eq!(summed, [(Some("m"), false), (Some("m"), true)]);
     std::fs::remove_dir_all(&dir).unwrap();
   }
 
@@ -416,6 +500,10 @@ mod tests {
       ("openai/gpt-6-astra", "gpt-6-astra"),
       ("gpt-5.6-sol", "gpt-5.6-sol"),
       ("google/gemini-4-argon", "gemini-4-argon"),
+      ("openai.gpt-5.4", "gpt-5.4"),
+      ("global.openai.gpt-6-astra", "gpt-6-astra"),
+      ("apac.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
+      ("eu.amazon.nova-pro-v1:0", "nova-pro"),
       ("glm-5", "glm-5"),
     ];
     for (logged, id) in ids {
