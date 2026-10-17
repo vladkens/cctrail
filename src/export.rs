@@ -322,6 +322,33 @@ mod tests {
       );
       std::fs::create_dir_all(home.join("claude/projects/app")).unwrap();
       std::fs::write(home.join("claude/projects/app/s-home-1.jsonl"), line).unwrap();
+      // An agent launch without usage stays in its session; an fx agent without requests names
+      // its model.
+      let launch = [
+        r#"{"type": "assistant", "timestamp": "2026-01-02T00:00:01Z", "message": {"id": "m1", "model": "claude-opus-4-6", "content": [{"type": "tool_use", "id": "t1", "name": "Agent"}], "usage": {"input_tokens": 1}}}"#,
+        r#"{"type": "user", "timestamp": "2026-01-02T00:00:02Z", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1"}]}, "toolUseResult": {"status": "async_launched", "agentId": "launch-x9", "usage": null}}"#,
+      ];
+      std::fs::write(home.join("claude/projects/app/s-launch-1.jsonl"), launch.join("\n")).unwrap();
+      let fx = |path: &str, data: &str| {
+        let path = home.join("fx/sessions").join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, data).unwrap();
+      };
+      fx("fx-m/session.json", r#"{"workspace_root": "/repo", "model": "codex/gpt-6-astra"}"#);
+      fx(
+        "fx-m/usage-v2.json",
+        r#"{"snapshot": {"models": [{"model": "codex/gpt-6-astra", "input_tokens": 10, "request_count": 1}]}}"#,
+      );
+      fx("fx-m/events.jsonl", r#"{"timestamp_ms": 1791201660000, "event": {"assistant": {}}}"#);
+      fx(
+        "fx-a/session.json",
+        r#"{"workspace_root": "/repo", "model": "codex/gpt-5.6-luna", "subagent_child": true}"#,
+      );
+      fx("fx-a/subagent/owner.json", r#"{"parent_id": "fx-m"}"#);
+      fx(
+        "fx-a/events.jsonl",
+        r#"{"timestamp_ms": 1791201600000, "event": {"user": {"text": "hi"}}}"#,
+      );
       let harnesses = [
         (Provider::Claude, vec![home.join("claude")]),
         (Provider::Codex, vec![home.join("codex")]),
@@ -348,6 +375,11 @@ mod tests {
         let got = format!("{:#?}", parser::combine(*p, roots, mine));
         assert_eq!(got, format!("{:#?}", parser::parse(*p, roots, Some(&dict))), "{set} {p:?}");
         assert!(got.contains("Prompt"));
+        match p {
+          Provider::Claude => assert!(!got.contains("launch-x9")),
+          Provider::Fx => assert!(got.contains("gpt-5.6-luna")),
+          _ => {}
+        }
       }
       // Its events and token totals, each file once.
       let mut seen = HashSet::new();
