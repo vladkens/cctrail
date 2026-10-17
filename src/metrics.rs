@@ -127,7 +127,7 @@ impl DateRange {
     Self::of(period, today)
   }
 
-  fn of(period: Period, today: Date) -> Self {
+  pub fn of(period: Period, today: Date) -> Self {
     let range = |a: Date, b: Date| Self { since: Some(a), until: Some(b) };
     let yesterday = today.yesterday().unwrap();
     let week = Granularity::Week.bucket(today);
@@ -521,7 +521,7 @@ fn active_by_day(stamps: Vec<Ts>) -> BTreeMap<Date, i64> {
 }
 
 /// Seconds per name; time when several names are active at once is divided between them.
-fn active_by_name<'a>(
+pub fn active_by_name<'a>(
   stamps: &HashMap<&'a str, Vec<Ts>>,
   range: &DateRange,
 ) -> HashMap<&'a str, i64> {
@@ -558,7 +558,7 @@ fn active_by_name<'a>(
 }
 
 /// Splits `[start, end)` at local midnights.
-fn split_by_day(start: Ts, end: Ts) -> Vec<(Date, i64)> {
+pub fn split_by_day(start: Ts, end: Ts) -> Vec<(Date, i64)> {
   let mut parts = vec![];
   let mut cur = start;
   while cur < end {

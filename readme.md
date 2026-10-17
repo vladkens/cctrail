@@ -26,7 +26,8 @@ Or take a prebuilt binary for macOS, Linux or Windows from the
 ## Usage
 
 ```sh
-cctrail                  # time, tokens and cost per project, all time
+cctrail                  # on a terminal: the interactive view (projects, models, timeline)
+cctrail all              # time, tokens and cost per project as text, all time
 cctrail this-month       # for a period: today, yesterday, this-week, last-week, this-month, last-month
 cctrail --all            # every row; by default rows past 95% of the time are summed up as `other`
 cctrail --by group       # per group from the config, or --by dir per working directory
@@ -37,6 +38,16 @@ cctrail days             # per day; also weeks, months, and --models for a break
 `--since` and `--until` take inclusive `YYYY-MM-DD` dates instead of a period, `--provider
 claude|codex` reads one harness only, and `--json` prints everything with full paths and exact
 counts. Weeks start on Monday. `cctrail --help` lists it all.
+
+`cctrail` without arguments on a terminal opens the interactive view: projects, models and a
+timeline (a chart of the days stacked by model over their list) for today, this week, this month,
+the last 30 days or all time; `t` and `T` switch the period. `→` or `enter` opens a row (a
+project's models, a model's speeds and efforts, a day's projects) and `←`, `esc` or `q` goes back,
+`s` sorts by the next column and `S` reverses (on the timeline `s` switches the bars between time,
+tokens and cost), `p` switches the provider, `/` filters, `?` lists the keys. The mouse works too:
+a click selects a row or a bar and a second one opens it, a column header sorts, a click on a
+view, period or provider switches it, the wheel scrolls. Any argument, `--json` or a pipe prints
+the text report instead.
 
 ## Projects
 

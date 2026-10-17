@@ -23,8 +23,9 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 - Keep the build fast: prefer a small own routine to a generic dependency that compiles far more
   code than cctrail uses (`cargo build --timings`). The dependencies are serde/serde_json (history
   and JSON output), toml (config), jiff (local time zones), rayon (parallel parsing), anyhow, ureq
-  (`update-pricing`) and libc (terminal width). No clap, table or color crates: arguments, tables
-  and ANSI colors are hand-rolled. Change dependencies only with `cargo add` / `cargo remove` /
+  (`update-pricing`), libc (terminal width) and ratatui with only its crossterm backend (the
+  interactive view). No clap, table or color crates for the text report: its arguments, tables and
+  ANSI colors are hand-rolled. Change dependencies only with `cargo add` / `cargo remove` /
   `cargo upgrade`, never by hand.
 - The CLI is what `cctrail --help` shows and the JSON output carries `schema_version`: change
   either only with the person's approval.
@@ -34,8 +35,9 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 
 - One binary crate, flat modules: `cli` (arguments, commands), `config`, `model`,
   `parser/{claude,codex}`, `workdir` (worktrees and same-named clones folded into their
-  repository), `metrics`, `output` (tables, JSON), `pricing`. Keep it within ~3000 lines of Rust,
-  tests excluded; simplify before growing past it.
+  repository), `metrics`, `output` (tables, JSON), `pricing`, `tui` (the interactive view, on the
+  same accounting). Keep it within ~3500 lines of Rust, tests excluded; simplify before growing
+  past it.
 - Treat history as untrusted input: harnesses change formats and leave truncated lines. Skip what
   doesn't parse, never panic or fail the run on it.
 - Errors go through `anyhow` with the path or value that failed. Comment only format quirks of a

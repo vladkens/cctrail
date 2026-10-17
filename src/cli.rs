@@ -349,7 +349,7 @@ fn update_pricing() -> Result<()> {
 }
 
 /// The sessions, with the price catalog refreshed beside the parsing when it is due.
-fn sessions(provider: Option<Provider>) -> Vec<Session> {
+pub fn sessions(provider: Option<Provider>) -> Vec<Session> {
   let refresh = pricing::refresh();
   let sessions = parse_history(provider);
   pricing::finish(refresh);
@@ -369,6 +369,7 @@ pub fn help() -> String {
     "Time, tokens and cost per project from local Claude Code and Codex history.
 
 Usage:
+  cctrail                                     the interactive view (on a terminal)
   cctrail [period] [--by project|group|dir] [--all]
                                               statistics per project
   cctrail here                                the current directory's project
