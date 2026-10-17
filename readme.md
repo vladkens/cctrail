@@ -77,10 +77,9 @@ start on Monday. `cctrail --help` lists it all.
 timeline (a chart of the days stacked by model over their list) and swears for today, this week,
 this month, the last 30 days or all time. Press `?` in it to see the keys.
 
-Swears lists per model your prompts to it, the share of them with swearing, their words and swear
-words per 1,000 words. Score, from 0 to 100, is that share pulled toward your overall one by 30
-prompts, so a model you barely used sits near your average instead of at the top; prompts to no
-known model are `<unknown>`.
+Swears shows how often you scold each model: the share of your prompts swearing at it, and a
+Score that pulls that share toward your average, so a model you barely used doesn't top the list.
+[How it counts](#swearing).
 
 <div align="center">
   <img src="docs/images/projects.svg" alt="The projects of cctrail's interactive view for the last 30 days: time, tokens, cost, sessions and share per project, with the total" />
@@ -144,19 +143,30 @@ to keep a long history.
 
 ### Swearing
 
-The Swears view counts only what you typed in a main session: no tool output, nothing the harness
-adds (slash commands and their output, reminders, environment context, skills, notifications,
-summaries of compacted history), no prompts that agents get from a model, and none of `codex exec`
-or the Claude Agent SDK, which scripts and other agents send. A prompt counts toward the model that
-answered last before it, the first ones of a session toward the first to answer; one that a fork
-or a copied file repeats counts once. Rates show from 10 prompts up. Only each prompt's counts of
-words and swear words are kept, never its text, and only for the interactive view.
+The Swears view: how often you scold each model, adjusted for how much you used it.
 
-The words come from [`src/swear/en.txt`](src/swear/en.txt) and
-[`src/swear/ru.txt`](src/swear/ru.txt), one per line: `word` matches the word, `stem*` every word
-it starts, `!word` and `!stem*` never match (a stem's false positives); a word written as an entry
-in a prompt (`stem*`, as in a pasted list) isn't swearing. Your own lists in that format go in
-`~/.config/cctrail/swear/*.txt`. Lists for other languages are welcome as pull requests.
+- **Text:** your own prompts in main sessions. Not the harness's (tool output, slash commands and
+  their output, reminders, environment context, skills, notifications, compaction summaries), not
+  the prompts agents get from a model, not `codex exec` or the Claude Agent SDK, which scripts send.
+- **Pastes:** no harness marks them, so these go: code in backticks or ` ``` ` fences, quoted
+  lines (`> `), and runs of 3+ lines that aren't prose (few letters, times, dates, paths,
+  `key: value`, table rows, code).
+- **Swearing:** a word in [`en.txt`](src/swear/en.txt), [`ru.txt`](src/swear/ru.txt) or the
+  insult lists [`insult-en.txt`](src/swear/insult-en.txt), [`insult-ru.txt`](src/swear/insult-ru.txt).
+  One entry a line: `word`, `stem*` (every word it starts), `!word` or `!stem*` (never: a stem's
+  false positives), `>word` in an insult list (only next to an addressee). A word written as an
+  entry in a prompt (`stem*`, from a pasted list) isn't swearing.
+- **Directed:** a prompt with an insult anywhere, or a swear word within 3 words of `ты`/`you` and
+  their forms, or of a model's or agent's name (`астра`, `claude`, `агент`, `model`…).
+- **Attribution:** to the model that answered last before the prompt, the first ones of a session
+  to the first to answer; a prompt that a fork or copied file repeats counts once.
+- **Columns:** `% directed` and `% any` are shares of your prompts with directed or any swearing.
+  Score is `(directed + 30 × overall) / (msgs + 30) × 100`, overall being your directed share in
+  the period: a few prompts can't move a model far from your average. Shares need 10 prompts;
+  prompts to no known model are `<unknown>`.
+- **Privacy:** each prompt keeps only counts and a hash, never its text, and only for this view.
+- **Your lists:** `~/.config/cctrail/swear/*.txt`, insults in `insult-*.txt`. Lists for other
+  languages are welcome as pull requests.
 
 ### Time
 

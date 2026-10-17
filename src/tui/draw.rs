@@ -848,7 +848,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
     ),
     (
       "swears",
-      "per model: your prompts, % swearing at the model (an insult, or a swear word near `you` / `ты`), their words, % with any swearing; Score (0 to 100) is the directed % pulled toward your overall one by 30 prompts, so barely used models sit near the average; past 300 words a prompt counts as pasted",
+      "per model: your prompts, % swearing at the model (an insult, or a swear word near `you` / `ты`), their words, % with any swearing; Score (0 to 100) is the directed % pulled toward your overall one by 30 prompts, so barely used models sit near the average; pasted text doesn't count",
     ),
     ("?", "this help"),
     ("q", "back; quits from a list"),
