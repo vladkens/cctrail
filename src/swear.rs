@@ -97,14 +97,22 @@ impl Dict {
   }
 
   /// A prompt's counts: its words (split at anything but letters), the swear words among them
-  /// and a hash of them all. Its text isn't kept.
+  /// and a hash of them all. Its text isn't kept. A word right before a `*` is a dictionary entry
+  /// written out (`бля*` in a pasted report), no swearing.
   pub fn prompt(&self, ts: Ts, text: &str) -> Prompt {
     let text = normalize(text);
-    let words: Vec<&str> =
-      text.split(|c: char| !c.is_alphabetic()).filter(|x| !x.is_empty()).collect();
+    // Each word and whether a `*` follows it.
+    let (mut words, mut start): (Vec<(&str, bool)>, Option<usize>) = (vec![], None);
+    for (i, c) in text.char_indices().chain([(text.len(), ' ')]) {
+      match (c.is_alphabetic(), start) {
+        (true, None) => start = Some(i),
+        (false, Some(from)) => (words.push((&text[from..i], c == '*')), start = None).1,
+        _ => {}
+      }
+    }
     let mut hash = DefaultHasher::new();
-    words.hash(&mut hash);
-    let swears = words.iter().filter(|x| self.find(x).is_some()).count();
+    words.iter().for_each(|x| x.0.hash(&mut hash));
+    let swears = words.iter().filter(|x| !x.1 && self.find(x.0).is_some()).count();
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     Prompt {
       ts,
@@ -382,6 +390,9 @@ mod tests {
     assert_eq!(dict.prompt(1, "ну блядь опять fucking times!").hash, x.hash);
     assert_ne!(dict.prompt(1, "ну блядь").hash, x.hash);
     assert_eq!(dict.prompt(1, "…").words, 0);
+    // Entries written out, as in a pasted report, are words but no swearing.
+    let x = dict.prompt(1, "блядь, top words: бля* 9230, еб* 31, fuck *");
+    assert_eq!((x.words, x.swears), (6, 2));
   }
 
   #[test]

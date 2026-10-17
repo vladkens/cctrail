@@ -154,9 +154,9 @@ words and swear words are kept, never its text, and only for the interactive vie
 
 The words come from [`src/swear/en.txt`](src/swear/en.txt) and
 [`src/swear/ru.txt`](src/swear/ru.txt), one per line: `word` matches the word, `stem*` every word
-it starts, `!word` and `!stem*` never match (a stem's false positives). Your own lists in that
-format go in `~/.config/cctrail/swear/*.txt`. Lists for other languages are welcome as pull
-requests.
+it starts, `!word` and `!stem*` never match (a stem's false positives); a word written as an entry
+in a prompt (`stem*`, as in a pasted list) isn't swearing. Your own lists in that format go in
+`~/.config/cctrail/swear/*.txt`. Lists for other languages are welcome as pull requests.
 
 ### Time
 
