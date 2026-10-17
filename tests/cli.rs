@@ -562,49 +562,73 @@ fn swears() -> Run {
 #[test]
 fn counts_swearing_per_model() {
   let run = swears();
+  let legend = "\
+With swearing: prompts with a swear word · % of prompts: of your prompts to that model
+per 1k words: swear words per 1,000 words you typed to that model
+";
+  // Every model of the fixtures has fewer than 100 prompts: all in `other`.
   let out = run.stdout(&["swears"]);
   let expected = "\
-Model                      Prompts Swearing  Share Top words
-claude-sonnet-4-5                2        2 100.0% fuck* 1, бля* 1
-claude-sonnet-4-5-20250929       1        1 100.0% бля* 1
-gpt-5.5                          1        1 100.0% shit* 1
-gpt-5.4                          3        2  66.7% fuck* 1, wtf 1
-gpt-6-astra                      3        2  66.7% shit* 1, wtf 1
-claude-opus-4-6                  2        1  50.0% wtf 1
-gpt-5                            2        1  50.0% fuck* 1
-total                           14       10  71.4% fuck* 3, wtf 3, shit* 2
-";
-  assert_eq!(out, expected);
+Model            Prompts With swearing % of prompts ↓ per 1k words Top words
+other (7 models)      14            10          71.4%        312.5 fuck* 3, wtf 3, shit* 2
+total                 14            10          71.4%        312.5 fuck* 3, wtf 3, shit* 2
 
+7 models under 100 prompts in other · run cctrail swears --all for all
+";
+  assert_eq!(out, format!("{expected}{legend}"));
+  let out = run.stdout(&["swears", "--all"]);
+  let expected = "\
+Model                      Prompts With swearing % of prompts ↓ per 1k words Top words
+claude-sonnet-4-5                2             2         100.0%        500.0 fuck* 1, бля* 1
+claude-sonnet-4-5-20250929       1             1         100.0%       1000.0 бля* 1
+gpt-5.5                          1             1         100.0%        500.0 shit* 1
+gpt-5.4                          3             2          66.7%        250.0 fuck* 1, wtf 1
+gpt-6-astra                      3             2          66.7%        400.0 shit* 1, wtf 1
+claude-opus-4-6                  2             1          50.0%        142.9 wtf 1
+gpt-5                            2             1          50.0%        200.0 fuck* 1
+total                           14            10          71.4%        312.5 fuck* 3, wtf 3, shit* 2
+
+";
+  assert_eq!(out, format!("{expected}{legend}"));
+
+  // JSON lists every model.
   let value = run.json(&["swears", "--json"]);
   assert_eq!((&value["command"], &value["query"]["by"]), (&json!("swears"), &json!("model")));
-  let groups: Vec<(&str, u64, u64)> = value["groups"]
-    .as_array()
-    .unwrap()
-    .iter()
-    .map(|x| {
-      (
-        x["model"].as_str().unwrap(),
-        x["prompts"].as_u64().unwrap(),
-        x["swearing"].as_u64().unwrap(),
-      )
-    })
-    .collect();
-  assert_eq!(groups[3], ("gpt-5.4", 3, 2));
+  let groups = value["groups"].as_array().unwrap();
   assert_eq!(groups.len(), 7);
+  let row = json!({
+    "model": "gpt-5.4",
+    "prompts": 3,
+    "with_swearing": 2,
+    "share": 2.0 / 3.0,
+    "words": 8,
+    "per_1k_words": 250.0,
+    "swear_words": [{"word": "fuck*", "count": 1}, {"word": "wtf", "count": 1}],
+  });
+  assert_eq!(groups[3], row);
   let words = json!([
     {"word": "fuck*", "count": 3},
     {"word": "wtf", "count": 3},
     {"word": "shit*", "count": 2},
     {"word": "бля*", "count": 2},
   ]);
-  let total = json!({"prompts": 14, "swearing": 10, "share": 10.0 / 14.0, "words": words});
+  let total = json!({
+    "prompts": 14,
+    "with_swearing": 10,
+    "share": 10.0 / 14.0,
+    "words": 32,
+    "per_1k_words": 312.5,
+    "swear_words": words,
+  });
   assert_eq!(value["total"], total);
 
   // By project, for one harness and a range.
   let value = run.json(&["swears", "--by", "project", "--provider", "codex", "--json"]);
   assert_eq!(value["groups"][0]["project"], "/repo");
-  assert_eq!((&value["total"]["prompts"], &value["total"]["swearing"]), (&json!(4), &json!(3)));
+  assert_eq!(
+    (&value["total"]["prompts"], &value["total"]["with_swearing"]),
+    (&json!(4), &json!(3))
+  );
   let value = run.json(&["swears", "--until", "2026-01-31", "--json"]);
   assert_eq!((&value["groups"], &value["total"]["prompts"]), (&json!([]), &json!(0)));
 }
@@ -621,8 +645,8 @@ fn counts_the_users_swear_words() {
   let out = run.exec(&["swears"]);
   std::fs::remove_dir_all(&dir).unwrap();
 
-  assert_eq!(value["total"]["swearing"], 4);
-  assert_eq!(value["total"]["words"][0], json!({"word": "fuck*", "count": 1}));
+  assert_eq!(value["total"]["with_swearing"], 4);
+  assert_eq!(value["total"]["swear_words"][0], json!({"word": "fuck*", "count": 1}));
   let err = String::from_utf8_lossy(&out.stderr);
   assert!(
     out.status.code() == Some(2) && err.contains("bad.txt") && err.contains("line 1"),

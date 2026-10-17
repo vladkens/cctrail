@@ -147,7 +147,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
     Cmd::Days | Cmd::Weeks | Cmd::Months => {
       &["--since", "--until", "--provider", "--json", "--models"]
     }
-    Cmd::Swears => &["--since", "--until", "--provider", "--json", "--by"],
+    Cmd::Swears => &["--since", "--until", "--provider", "--json", "--by", "--all"],
     Cmd::Here => &["--provider", "--json"],
     Cmd::UpdatePricing => &[],
   };
@@ -381,7 +381,7 @@ fn swears(args: &Args) -> Result<()> {
       "total": output::tally_json(&total, None),
     }));
   }
-  output::emit(&output::swears_text(by, &groups, &total, &Term::detect()))
+  output::emit(&output::swears_text(by, &groups, &total, args.all, &Term::detect()))
 }
 
 fn update_pricing() -> Result<()> {
@@ -415,7 +415,7 @@ Usage:
                                               statistics per project
   cctrail here                                the current directory's project
   cctrail days|weeks|months [period] [--models]
-  cctrail swears [period] [--by model|project]
+  cctrail swears [period] [--by model|project] [--all]
                                               how often your prompts swear, per model
   cctrail update-pricing                      download the latest model prices
 
@@ -492,7 +492,7 @@ mod tests {
     assert!(err(&["--provider", "gemini"]).contains("claude, codex, pi or fx"));
     assert!(err(&["swears", "--by", "dir"]).contains("--by must be model or project"));
     assert!(err(&["--by", "model"]).contains("--by must be project, group or dir"));
-    assert!(err(&["swears", "--all"]).contains("--all is not an option"));
+    assert!(err(&["swears", "--models"]).contains("--models is not an option"));
   }
 
   #[test]

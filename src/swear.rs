@@ -96,18 +96,28 @@ impl Dict {
     found
   }
 
-  /// The entries the words of a text match, one per word: words split at anything but letters.
-  pub fn matches(&self, text: &str) -> Vec<String> {
-    normalize(text).split(|c: char| !c.is_alphabetic()).filter_map(|x| self.find(x)).collect()
+  /// The number of words in a text and the entries they match, one per word: words split at
+  /// anything but letters.
+  fn scan(&self, text: &str) -> (u64, Vec<String>) {
+    let text = normalize(text);
+    let words: Vec<&str> =
+      text.split(|c: char| !c.is_alphabetic()).filter(|x| !x.is_empty()).collect();
+    (words.len() as u64, words.into_iter().filter_map(|x| self.find(x)).collect())
   }
 }
+
+/// Rows with fewer prompts fold into `other` in the table: their shares say little.
+pub const MIN_PROMPTS: u64 = 100;
 
 /// The prompts counted under one name (a model or a project) and those with swearing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Tally {
   pub name: String,
   pub prompts: u64,
+  /// Prompts with a swear word.
   pub swearing: u64,
+  /// The words typed in the prompts.
+  pub typed: u64,
   /// The entries matched, by count, most first.
   pub words: Vec<(String, u64)>,
 }
@@ -117,15 +127,37 @@ impl Tally {
     self.swearing as f64 / self.prompts.max(1) as f64
   }
 
-  fn add(&mut self, words: &[String]) {
+  /// Swear words in all.
+  pub fn swear_words(&self) -> u64 {
+    self.words.iter().map(|x| x.1).sum()
+  }
+
+  /// Swear words per 1,000 words typed.
+  pub fn per_1k_words(&self) -> f64 {
+    self.swear_words() as f64 * 1000.0 / self.typed.max(1) as f64
+  }
+
+  fn count(&mut self, word: &str, n: u64) {
+    match self.words.iter_mut().find(|x| x.0 == word) {
+      Some(x) => x.1 += n,
+      None => self.words.push((word.to_string(), n)),
+    }
+  }
+
+  fn add(&mut self, typed: u64, words: &[String]) {
     self.prompts += 1;
     self.swearing += u64::from(!words.is_empty());
-    for w in words {
-      match self.words.iter_mut().find(|x| x.0 == *w) {
-        Some(x) => x.1 += 1,
-        None => self.words.push((w.clone(), 1)),
-      }
-    }
+    self.typed += typed;
+    words.iter().for_each(|x| self.count(x, 1));
+  }
+
+  /// Adds another row's counts, the words sorted again.
+  pub fn merge(&mut self, x: &Tally) {
+    self.prompts += x.prompts;
+    self.swearing += x.swearing;
+    self.typed += x.typed;
+    x.words.iter().for_each(|(w, n)| self.count(w, *n));
+    self.words.sort_by(|a, b| (b.1, &a.0).cmp(&(a.1, &b.0)));
   }
 }
 
@@ -149,9 +181,9 @@ pub fn tally(
       if !range.contains(ts) || *seen.entry((s.provider, ts, text)).or_insert(i) != i {
         continue;
       }
-      let words = dict.matches(text);
-      groups.entry(name(s, e)).or_default().add(&words);
-      total.add(&words);
+      let (typed, words) = dict.scan(text);
+      groups.entry(name(s, e)).or_default().add(typed, &words);
+      total.add(typed, &words);
     }
   }
   let mut groups: Vec<Tally> = groups.into_iter().map(|(name, x)| Tally { name, ..x }).collect();
@@ -200,7 +232,7 @@ mod tests {
       ("ffs", "ffs"),
     ];
     for (word, entry) in hits {
-      assert_eq!(dict.matches(word), [entry], "{word}");
+      assert_eq!(dict.scan(word).1, [entry], "{word}");
     }
     let misses = [
       "class",
@@ -230,10 +262,10 @@ mod tests {
       "ck",
     ];
     for word in misses {
-      assert_eq!(dict.matches(word), Vec::<String>::new(), "{word}");
+      assert_eq!(dict.scan(word).1, Vec::<String>::new(), "{word}");
     }
     // Words split at anything but letters: `f*ck` and `sh1t` aren't words of the list.
-    assert_eq!(dict.matches("f*ck, sh1t. WTF?! fuck_this"), ["wtf", "fuck*"]);
+    assert_eq!(dict.scan("f*ck, sh1t. WTF?! fuck_this").1, ["wtf", "fuck*"]);
   }
 
   #[test]
@@ -285,7 +317,7 @@ mod tests {
       ("blyat", "blyat*"),
     ];
     for (word, entry) in hits {
-      assert_eq!(dict.matches(word), [entry], "{word}");
+      assert_eq!(dict.scan(word).1, [entry], "{word}");
     }
     // Words that contain a root or start like one.
     let misses = [
@@ -331,9 +363,9 @@ mod tests {
       "бляхой",
     ];
     for word in misses {
-      assert_eq!(dict.matches(word), Vec::<String>::new(), "{word}");
+      assert_eq!(dict.scan(word).1, Vec::<String>::new(), "{word}");
     }
-    assert_eq!(dict.matches("ну пиздец... а-а-а, сука!"), ["пизд*", "сук*"]);
+    assert_eq!(dict.scan("ну пиздец... а-а-а, сука!").1, ["пизд*", "сук*"]);
   }
 
   #[test]
@@ -370,7 +402,7 @@ mod tests {
     std::fs::write(dir.join("de.txt"), "scheiße*\n# Mist\n").unwrap();
     std::fs::write(dir.join("notes.md"), "not a list\n").unwrap();
     let dict = Dict::load(Some(&dir)).unwrap();
-    assert_eq!(dict.matches("Scheißegal fuck"), ["scheiße*", "fuck*"]);
+    assert_eq!(dict.scan("Scheißegal fuck").1, ["scheiße*", "fuck*"]);
     std::fs::write(dir.join("xx.txt"), "o k\n").unwrap();
     let err = format!("{:#}", Dict::load(Some(&dir)).unwrap_err());
     assert!(err.contains("xx.txt") && err.contains("line 1:"), "{err}");
@@ -417,6 +449,14 @@ mod tests {
     assert_eq!((total.prompts, total.swearing, total.share()), (6, 3, 0.5));
     let words: Vec<_> = total.words.iter().map(|x| (x.0.as_str(), x.1)).collect();
     assert_eq!(words, [("бля*", 2), ("fuck*", 1), ("shit*", 1)]);
+    // Four swear words in eight words typed.
+    assert_eq!((total.typed, total.swear_words(), total.per_1k_words()), (8, 4, 500.0));
+
+    // Merged as `other`: counts added, the words sorted again.
+    let mut other = groups[2].clone();
+    other.merge(&groups[1]);
+    assert_eq!((other.prompts, other.swearing, other.typed), (4, 1, 6));
+    assert_eq!(other.words[0], ("fuck*".to_string(), 1));
     assert_eq!(groups[2].share(), 0.0);
   }
 }

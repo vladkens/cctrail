@@ -65,7 +65,7 @@ cctrail here                 # the current directory's project: today, this week
 cctrail days                 # per day; also weeks, months, and --models for a breakdown by model
 cctrail --provider codex     # one harness only: claude, codex, pi or fx
 cctrail --json               # everything with full paths and exact counts
-cctrail swears               # how often your prompts swear, per model; --by project per project
+cctrail swears               # share of your prompts with swearing and swear words per 1k words, per model
 cctrail update-pricing       # download the latest prices now
 ```
 
@@ -140,8 +140,9 @@ to keep a long history.
 
 ### Swearing
 
-`cctrail swears` counts your prompts per model: how many swear, their share and the words matched
-most. A prompt is only what you typed in a main session: no tool output, nothing the harness adds
+`cctrail swears` counts your prompts per model: those with a swear word, their share of the
+prompts, swear words per 1,000 words you typed and the words matched most. Models with fewer than
+100 prompts fold into `other` (`--all` lists them, `--by project` counts per project). A prompt is only what you typed in a main session: no tool output, nothing the harness adds
 (slash commands and their output, reminders, environment context, skills, notifications, summaries
 of compacted history), no prompts that agents get from a model, and none of `codex exec` or the
 Claude Agent SDK, which scripts and other agents send. A prompt counts toward the model that
