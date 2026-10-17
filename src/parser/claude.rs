@@ -127,6 +127,8 @@ impl RawUsage {
 struct Fallback {
   id: String,
   ts: Option<Ts>,
+  /// Where in its session's events the result came.
+  at: usize,
   usage: Usage,
   speed: Option<Speed>,
 }
@@ -202,10 +204,17 @@ pub fn parse(roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
   let mut seen: HashSet<(usize, String)> = HashSet::new();
   for parent in 0..parsed.len() {
     let fallbacks = std::mem::take(&mut parsed[parent].fallbacks);
+    let mut stamps = vec![];
     for x in fallbacks {
       let logged =
         parsed[parent].calls.iter().any(|c| c.resolved && c.agent_id.as_ref() == Some(&x.id));
       if logged || !seen.insert((parent, x.id.clone())) {
+        continue;
+      }
+      // A result without usage (a background agent's `async_launched`, a skill's `forked`) is no
+      // agent's work: its time stays the spawning session's, under the model answering there.
+      if x.usage.total() == 0 {
+        stamps.extend(x.ts.map(|ts| (x.at, ts)));
         continue;
       }
       parents.insert(parsed.len(), parent);
@@ -213,6 +222,10 @@ pub fn parse(roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
       let usage = Some(x.usage);
       session.events.push(Event { ts: x.ts, usage, speed: x.speed, ..Default::default() });
       parsed.push(Parsed { path: PathBuf::new(), session, calls: vec![], fallbacks: vec![] });
+    }
+    let events = &mut parsed[parent].session.events;
+    for (at, ts) in stamps.into_iter().rev() {
+      events.insert(at.min(events.len()), Event::activity(ts));
     }
   }
 
@@ -346,6 +359,7 @@ fn record_user(
     fallbacks.push(Fallback {
       id: id.to_string(),
       ts: parse_ts(&line.timestamp),
+      at: session.events.len(),
       usage: raw.map(|x| x.usage()).unwrap_or_default(),
       speed: raw.and_then(|x| x.speed()),
     });
@@ -509,6 +523,51 @@ mod tests {
     assert_eq!(agent.root_id, main.id);
     assert_eq!(agent.workdir, "/repo");
     assert_eq!(total(std::slice::from_ref(agent)), 5);
+  }
+
+  #[test]
+  fn keeps_a_launch_without_usage_in_its_session() {
+    let dir = std::env::temp_dir().join(format!("cctrail-claude-async-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let call = |n: u8, name: &str| {
+      format!(
+        r#"{{"type": "assistant", "timestamp": "2026-01-01T00:00:0{n}Z", "message": {{"id": "m{n}", "model": "claude-opus-4-6", "content": [{{"type": "tool_use", "id": "t{n}", "name": "{name}"}}], "usage": {{"input_tokens": 1}}}}}}"#
+      )
+    };
+    let result = |n: u8, result: &str| {
+      format!(
+        r#"{{"type": "user", "timestamp": "2026-01-01T00:00:0{n}Z", "message": {{"content": [{{"type": "tool_result", "tool_use_id": "t{}"}}]}}, "toolUseResult": {result}}}"#,
+        n - 1
+      )
+    };
+    // A background agent and a forked skill, whose logs aren't linked, report no usage; an agent
+    // without a log does.
+    let lines = [
+      r#"{"type": "user", "timestamp": "2026-01-01T00:00:00Z", "cwd": "/repo", "message": {"content": "go"}}"#.to_string(),
+      call(1, "Agent"),
+      result(2, r#"{"status": "async_launched", "isAsync": true, "agentId": "a1", "usage": null}"#),
+      call(3, "Skill"),
+      result(4, r#"{"status": "forked", "agentId": "a2", "usage": {"input_tokens": 0}}"#),
+      call(5, "Agent"),
+      result(6, r#"{"agentId": "a3", "usage": {"input_tokens": 2, "output_tokens": 3}}"#),
+    ];
+    std::fs::write(dir.join("main.jsonl"), lines.join("\n")).unwrap();
+
+    let sessions = parse(std::slice::from_ref(&dir), None);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(total(&sessions), 8);
+    let main = sessions.iter().find(|x| x.is_main).unwrap();
+    // The launches' times follow the response that made them, so its model takes them.
+    let start = main.events[0].ts.unwrap();
+    let events: Vec<_> = main
+      .events
+      .iter()
+      .map(|x| ((x.ts.unwrap() - start) / 1_000_000, x.model.is_some()))
+      .collect();
+    assert_eq!(events, [(0, false), (1, true), (2, false), (3, true), (4, false), (5, true)]);
+    let agent = sessions.iter().find(|x| !x.is_main).unwrap();
+    assert_eq!((agent.id.as_str(), total(std::slice::from_ref(agent))), ("a3", 5));
   }
 
   #[test]
