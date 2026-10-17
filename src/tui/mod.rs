@@ -760,15 +760,17 @@ mod tests {
       assert_eq!(l.chars().count() - l.trim_end().chars().count(), 2, "gutter on {l:?}");
     }
     assert!(line(&buf, sel - 1).trim_end().ends_with("Share"));
-    // Selected row: one subtle bar inside the box, nothing reversed, colors kept.
+    // Selected row, as macmon's: one reversed band in the text color across the box, no cell's
+    // own color or background on it; the other rows keep theirs: time yellow, cost green.
     for x in 1..buf.area.width - 1 {
-      assert_eq!(buf[(x, sel)].bg, Color::Indexed(236), "column {x}");
-      assert!(!buf[(x, sel)].modifier.contains(Modifier::REVERSED), "column {x}");
+      let cell = &buf[(x, sel)];
+      assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "column {x}");
+      assert!(cell.modifier.contains(Modifier::REVERSED), "column {x}");
     }
     let row = &app.list[0];
-    assert_eq!(fg(&buf, sel, &row.label), Color::Reset);
-    assert_eq!(fg(&buf, sel, &crate::output::duration(row.active.unwrap())), Color::Yellow);
-    assert_eq!(fg(&buf, sel, "$"), Color::Green);
+    assert_eq!(fg(&buf, total, &crate::output::duration(row.active.unwrap())), Color::Yellow);
+    assert_eq!(fg(&buf, total, "$"), Color::Green);
+    assert!(!buf[(4, total)].modifier.contains(Modifier::REVERSED));
     // Headers bold, the sorted one in the text color, the others gray, as macmon's.
     assert_eq!(fg(&buf, sel - 1, "Time ↓"), Color::Reset);
     assert_eq!(fg(&buf, sel - 1, "Tokens"), Color::DarkGray);
@@ -1187,14 +1189,19 @@ mod tests {
     let axis_line = line(&buf, axis);
     assert!(axis_line.ends_with("━  ") && fg(&buf, axis, "━") == Color::Cyan, "{out}");
     assert!(line(&buf, axis + 1).trim_end().ends_with("01-10"), "{out}");
-    // ↓ selects the day before: its bar marked with the selection's background.
+    // ↓ selects the day before: its bar keeps its models' colors, a cyan `▼` right over its top.
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Down);
     assert_eq!(app.list[app.sel()].day.unwrap(), jiff::civil::date(2026, 1, 8));
     let buf = frame(&app);
     let (rect, _) = *app.hits.borrow().bars.iter().find(|x| x.1 == app.sel()).unwrap();
-    let low = rect.bottom() - 3;
-    assert_eq!((buf[(rect.x, low)].fg, buf[(rect.x, low)].bg), (Color::Reset, Color::Reset));
+    let (mid, low) = (rect.x + rect.width / 2, rect.bottom() - 3);
+    let blocks = (rect.y..=low).rev().take_while(|y| "▁▂▃▄▅▆▇█".contains(buf[(mid, *y)].symbol()));
+    let blocks: Vec<u16> = blocks.collect();
+    assert!(!blocks.is_empty(), "{}", screen_of(&buf));
+    assert!(blocks.iter().all(|y| matches!(buf[(mid, *y)].fg, Color::Indexed(_))));
+    let mark = blocks.last().unwrap() - 1;
+    assert_eq!((buf[(mid, mark)].symbol(), buf[(mid, mark)].fg), ("▼", Color::Cyan));
     // `s` or a click on the choice picks what the bars show.
     press(&mut app, KeyCode::Char('s'));
     press(&mut app, KeyCode::Char('s'));
@@ -1314,7 +1321,9 @@ mod tests {
         .filter(|p| "▁▂▃▄▅▆▇█".contains(buf[*p].symbol()) && buf[*p].fg != Color::Reset)
         .map(|p| buf[p].fg)
         .collect();
-      assert!(drawn.is_subset(&named), "{width}: {}", screen_of(&buf));
+      // With no legend, plain bars: all in the `other` gray.
+      let plain = named.is_empty() && drawn.iter().all(|c| *c == Color::Indexed(245));
+      assert!(plain || drawn.is_subset(&named), "{width}: {}", screen_of(&buf));
       let legend = raw(&buf, 3);
       let squares = legend.matches('■').count();
       assert!(squares != 1 || !legend.contains("■ other"), "{width}: {legend}");
