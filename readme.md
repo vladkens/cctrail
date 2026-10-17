@@ -15,20 +15,9 @@
 used and what that would cost at API prices. It needs no setup: repositories are found from the
 sessions themselves, with agent worktrees and clones counted as one project.
 
-```text
-╭─ Projects 1  Models 2  Timeline 3 ────────────────────────────────── cctrail v0.3.0 ─╮
-│ Today  Week  Month  30d  All                                      claude+codex+pi+fx │
-╰──────────────────────────────────────────────────────────────────────────────────────╯
-╭─ projects 5 ─ / filter ─ sort ────────────────────────────────────────────── → open ─╮
-│   Project                        Time ↓    Tokens         Cost    Sessions    Share  │
-│ ▶ work/web-app                2d 7h 22m    100.4M       $86.85          42      42%  │
-│   work/api                   1d 11h 02m     58.7M       $49.32          21      27%  │
-│   oss/cli-tool                  23h 14m     38.4M       $33.89          21      18%  │
-│   oss/blog                      11h 10m     17.2M       $14.69          20       8%  │
-│   /home/me/Code/dotfiles         6h 08m      8.4M        $7.15          21       5%  │
-│   total                      5d 10h 55m    223.1M      $191.90         125     100%  │
-╰──────────────────────────────────────────────── ? help | quit | t period | provider ─╯
-```
+<div align="center">
+  <img src="docs/images/timeline.svg" alt="The timeline of cctrail's interactive view: a bar per day for the last 30 days, stacked by model, over the list of days with their time, tokens, cost and sessions" />
+</div>
 
 ## 🌟 Features
 
@@ -38,13 +27,13 @@ sessions themselves, with agent worktrees and clones counted as one project.
   price of its day
 - 🌳 Agent worktrees and clones of a repository fold into one project, with no config
 - 🗂️ An optional config to name projects, merge repositories and put them in groups
-- 🧩 Claude Code, Codex, pi and fx, including every Claude Code and Codex profile
+- 🧩 Claude Code, Codex, pi and fx, every Claude Code and Codex profile included
   (`~/.claude-work`)
 - 🖥️ An interactive view of projects, models and a timeline, with drill-downs, keys and mouse
 - 📊 Text reports by period, day, week or month, per project, group, directory or model, and JSON
 - ⚡ Fast: about 4.5 s for ~11 GB of history on an M-series Mac (2026-10-14)
 - 🔒 Local: reads the history only, and goes online only for prices
-- 📦 One binary for macOS, Linux and Windows
+- 🦀 One Rust binary for macOS, Linux and Windows
 
 ## 🤖 How it's made
 
@@ -88,7 +77,7 @@ cctrail                      # on a terminal: the interactive view (projects, mo
 cctrail all                  # time, tokens and cost per project as text, all time
 cctrail this-month           # for a period: today, yesterday, this-week, last-week, this-month, last-month
 cctrail --since 2026-03-01   # from a date; --until sets the last day, both inclusive YYYY-MM-DD
-cctrail --all                # every row; by default rows past 95% of the time are summed up as `other`
+cctrail --all                # every row; by default unconfigured dirs past 95% of the time fold into `other`
 cctrail --by group           # per group from the config, or --by dir per working directory
 cctrail here                 # the current directory's project: today, this week, this month, all time
 cctrail days                 # per day; also weeks, months, and --models for a breakdown by model
@@ -97,17 +86,34 @@ cctrail --json               # everything with full paths and exact counts
 cctrail update-pricing       # download the latest prices now
 ```
 
-Weeks start on Monday. `cctrail --help` lists it all.
+Any argument, `--json` or a pipe prints a text report; `NO_COLOR=1` turns its colors off. Weeks
+start on Monday. `cctrail --help` lists it all.
+
+### Interactive view
 
 `cctrail` without arguments on a terminal opens the interactive view: projects, models and a
 timeline (a chart of the days stacked by model over their list) for today, this week, this month,
-the last 30 days or all time; `1`, `2` and `3` switch the view, `t` and `T` the period. `→` or
-`enter` opens a row (a project's models, a model's speeds and efforts, a day's projects) and `←`,
-`esc` or `q` goes back, `s` sorts by the next column and `S` reverses (on the timeline `s` switches
-the bars between time, tokens and cost), `p` switches the provider, `/` filters, `?` lists the
-keys. The mouse works too: a click selects a row or a bar and a second one opens it, a column
-header sorts, a click on a view, period or provider switches it, the wheel scrolls. Any argument,
-`--json` or a pipe prints the text report instead.
+the last 30 days or all time. Press `?` in it to see the keys.
+
+<div align="center">
+  <img src="docs/images/projects.svg" alt="The projects of cctrail's interactive view for the last 30 days: time, tokens, cost, sessions and share per project, with the total" />
+</div>
+
+| Key | Action |
+| --- | --- |
+| `1` `2` `3` | Projects, Models, Timeline |
+| `t` `T` | The next or the previous period |
+| `↑` `↓` `PgUp` `PgDn` `Home` `End` | Move the selection |
+| `→` `Enter` | Open the row: a project's models, a model's speeds and efforts, a day's projects |
+| `←` `Esc` `q` | Back; `q` quits from a list |
+| `s` `S` | Sort by the next column, reverse the sort; on the timeline `s` switches the bars between time, tokens and cost |
+| `p` | The provider: all, claude, codex, pi or fx |
+| `/` | Filter by name: `Enter` keeps the filter, `Esc` clears it |
+| `?` | The keys |
+
+The mouse works too: a click selects a row or a bar and a second one opens it, a click on a column
+header sorts and a second one reverses, a click on a view, period or provider switches it, and the
+wheel moves the selection.
 
 <a name="projects"></a>
 
@@ -134,30 +140,39 @@ Repositories outside the config keep their own rows and form the `@unmapped` gro
 
 ## 🧮 How it counts
 
-- **History:** Claude Code from `~/.claude/projects`, Codex from `~/.codex/sessions` and
-  `~/.codex/archived_sessions`, plus the same in every profile beside them (`~/.claude-work`,
-  `~/.codex-personal`). `CLAUDE_CONFIG_DIR` and `CODEX_HOME` replace all of them with one root.
-  pi from `~/.pi/agent/sessions` (`PI_CODING_AGENT_DIR` moves the agent directory) and an absolute
-  `sessionDir` from its `settings.json`; `PI_CODING_AGENT_SESSION_DIR` replaces both. A forked pi
-  session counts only what it added to the copy of its source. fx from `~/.fx/sessions`
-  (`FX_HOME`, which only cctrail reads, moves `~/.fx`); fx logs a session's tokens only as totals,
-  so they are spread over its agents' activity, a share on every active day: exact per project,
-  approximate per day.
-  Claude Code deletes sessions older than 30 days by default: raise
-  [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically)
-  to keep a long history.
-- **Time:** every message opens a five-minute window; overlapping windows merge, and time spent in
-  several projects at once is split between them. Tables show `8h 14m`, or `45d 8h 14m` from a day
-  on.
-- **Cost:** an estimate at [models.dev](https://models.dev) prices, each request at the price of
-  its day, so a later price cut doesn't reprice old usage. Prices come from the models.dev git
-  history and are refreshed in the background once a day (`cctrail update-pricing` does it now,
-  `CCTRAIL_NO_UPDATE=1` turns it off). `codex-auto-review`, which has no price, counts as
-  `gpt-6-luna`. pi's and fx's models read and are priced alike whatever the provider (Bedrock's
-  `us.anthropic.claude-opus-4-6-v1` as `claude-opus-4-6`, a router's `openai/gpt-5.4` as
-  `gpt-5.4`, fx's `codex/gpt-6-astra` as `gpt-6-astra`), at the harness's own estimate for a model
-  models.dev lacks; an fx session in Fast mode counts at the fast rate throughout. Tokens on other
-  unpriced models are listed below the report.
+### History
+
+| Harness | Reads | Override |
+| --- | --- | --- |
+| Claude Code | `~/.claude/projects` and the same in every profile beside it (`~/.claude-work`) | `CLAUDE_CONFIG_DIR` replaces all of them with one root |
+| Codex | `~/.codex/sessions` and `~/.codex/archived_sessions`, and the same in every profile beside them (`~/.codex-personal`) | `CODEX_HOME` replaces all of them with one root |
+| pi | `~/.pi/agent/sessions` and an absolute `sessionDir` from its `settings.json` | `PI_CODING_AGENT_DIR` moves the agent directory, `PI_CODING_AGENT_SESSION_DIR` replaces both |
+| fx | `~/.fx/sessions` | `FX_HOME`, which only cctrail reads, moves `~/.fx` |
+
+A forked pi session counts only what it added to the copy of its source. fx logs a session's tokens
+only as totals, so they are spread over its agents' activity, a share on every active day: exact
+per project, approximate per day. Claude Code deletes sessions older than 30 days by default: raise
+[`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically)
+to keep a long history.
+
+### Time
+
+Every message opens a five-minute window; overlapping windows merge, and time spent in several
+projects at once is split between them. Tables show `8h 14m`, or `45d 8h 14m` from a day on.
+
+### Cost
+
+An estimate at [models.dev](https://models.dev) prices, each request at the price of its day, so a
+later price cut doesn't reprice old usage. Prices come from the models.dev git history and are
+refreshed in the background once a day (`cctrail update-pricing` does it now,
+`CCTRAIL_NO_UPDATE=1` turns it off). `codex-auto-review`, which has no price, counts as
+`gpt-6-luna`.
+
+pi's and fx's models read and are priced alike whatever the provider (Bedrock's
+`us.anthropic.claude-opus-4-6-v1` as `claude-opus-4-6`, a router's `openai/gpt-5.4` as `gpt-5.4`,
+fx's `codex/gpt-6-astra` as `gpt-6-astra`), at the harness's own estimate for a model models.dev
+lacks; an fx session in Fast mode counts at the fast rate throughout. Tokens on other unpriced
+models are listed below the report.
 
 ## 🤝 Contributing
 
