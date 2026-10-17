@@ -217,8 +217,8 @@ impl Dict {
 
 /// Takes the prompts out of the sessions, which are then as if read without them: the events only
 /// for a prompt go, and the sessions they leave empty. Returns the main sessions' prompts, one that
-/// another session repeats (a fork, a copied file) once; alike prompts in one session count each,
-/// as fx logs a batch of events at one time.
+/// another session repeats (a fork, a copied file) once, with a model if any copy has one; alike
+/// prompts in one session count each, as fx logs a batch of events at one time.
 pub fn take_prompts(sessions: &mut Vec<Session>) -> Vec<(Provider, Prompt)> {
   let mut seen = HashMap::new();
   let mut out = vec![];
@@ -227,8 +227,14 @@ pub fn take_prompts(sessions: &mut Vec<Session>) -> Vec<(Provider, Prompt)> {
     let (provider, main, had) = (s.provider, s.is_main, s.events.len());
     s.events.retain_mut(|e| {
       let Some(x) = e.prompt.take() else { return true };
-      if main && *seen.entry((provider, x.ts, x.hash)).or_insert(i) == i {
-        out.push((provider, *x));
+      if main {
+        let first = *seen.entry((provider, x.ts, x.hash)).or_insert((i, out.len()));
+        match out.get_mut(first.1) {
+          _ if first.0 == i => out.push((provider, *x)),
+          // A copy names the model the first one seen lacked: a partial copy read first.
+          Some((_, p)) if p.model.is_none() => p.model = x.model,
+          _ => {}
+        }
       }
       // Codex's `UserMessage` items: events of no time and no usage, there for their prompts.
       e.ts.is_some() || e.usage.is_some()
@@ -601,6 +607,26 @@ mod tests {
     let ids: Vec<_> = sessions.iter().map(|x| (x.id.as_str(), x.events.len())).collect();
     assert_eq!(ids, [("a", 3), ("b", 2), ("c", 1), ("e", 0)]);
     assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
+  }
+
+  #[test]
+  fn a_copy_names_the_model_a_prompt_lacked() {
+    let dict = bundled();
+    let prompt = |model: Option<&str>| {
+      let p = Prompt { model: model.map(String::from), ..dict.prompt(1, "fuck") };
+      Event { ts: Some(1), prompt: Some(Box::new(p)), ..Default::default() }
+    };
+    for (a, b) in [(None, Some("m")), (Some("m"), None)] {
+      let mut x = Session::new("a", true, "/r", Provider::Claude);
+      let mut y = Session::new("b", true, "/r", Provider::Claude);
+      // Repeated in one session: two prompts, each with its own model.
+      x.events = vec![prompt(a), prompt(a)];
+      y.events = vec![prompt(b)];
+      let prompts = take_prompts(&mut vec![x, y]);
+      let models: Vec<_> = prompts.iter().map(|x| x.1.model.as_deref()).collect();
+      assert_eq!(models[0], Some("m"), "{a:?} {b:?}");
+      assert_eq!(models.len(), 2);
+    }
   }
 
   #[test]
