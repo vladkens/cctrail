@@ -75,7 +75,8 @@ start on Monday. `cctrail --help` lists it all.
 
 `cctrail` without arguments on a terminal opens the interactive view: projects, models, a
 timeline (a chart of the days stacked by model over their list) and swears for today, this week,
-this month, the last 30 days or all time. Press `?` in it to see the keys.
+this month, the last 30 days or all time. A model is one row whichever harness ran it, its dated
+id (`-20250929`) included; opening it splits it by harness. Press `?` in it to see the keys.
 
 Swears shows how often you scold each model: `% dir`, the share of your messages scolding it, and
 a Score that pulls it toward your average, so a model you barely used doesn't top the list.
@@ -90,7 +91,7 @@ a Score that pulls it toward your average, so a model you barely used doesn't to
 | `1` `2` `3` `4` | Projects, Models, Timeline, Swears |
 | `t` `T` | The next or the previous period |
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Move the selection |
-| `→` `Enter` | Open the row: a project's models, a model's speeds and efforts, a day's projects |
+| `→` `Enter` | Open the row: a project's models, a model's harnesses, speeds and efforts, a day's projects |
 | `←` `Esc` `q` | Back; `q` quits from a list |
 | `s` `S` | Sort by the next column, reverse the sort; on the timeline `s` switches the bars between time, tokens and cost |
 | `p` | The provider: all, claude, codex, pi or fx |

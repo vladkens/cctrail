@@ -303,8 +303,8 @@ impl App {
     let parts = match self.tab {
       Tab::Projects => vec![("Model", self.data.models(span, prov, Some(&row.key)))],
       Tab::Models => {
-        let [speed, effort] = self.data.model_usage(span, prov, &row.key);
-        vec![("Speed", speed), ("Effort", effort)]
+        let [harness, speed, effort] = self.data.model_usage(span, prov, &row.key);
+        vec![("Harness", harness), ("Speed", speed), ("Effort", effort)]
       }
       Tab::Timeline => vec![("Project", self.data.bucket_projects(span, prov, day))],
       Tab::Swears => vec![],
@@ -838,15 +838,15 @@ mod tests {
     let d = app.open.as_ref().unwrap();
     let times: i64 = d.rows().into_iter().map(|x| x.active.unwrap()).sum();
     assert_eq!(times, d.row.active.unwrap(), "{out}");
-    let y = find(&buf, "claude/claude-sonnet-5");
-    assert_eq!(fg(&buf, y, "claude/claude-sonnet-5"), Color::Reset);
+    let y = find(&buf, "claude-sonnet-5");
+    assert_eq!(fg(&buf, y, "claude-sonnet-5"), Color::Reset);
     // Backspace goes back; the same model looks the same in the models tab.
     press(&mut app, KeyCode::Backspace);
     assert!(app.open.is_none());
     press(&mut app, KeyCode::Char('2'));
     let buf = frame(&app);
-    let y = find(&buf, "claude/claude-sonnet-5");
-    assert_eq!(fg(&buf, y, "claude/claude-sonnet-5"), Color::Reset);
+    let y = find(&buf, "claude-sonnet-5");
+    assert_eq!(fg(&buf, y, "claude-sonnet-5"), Color::Reset);
     // The help is a box over the screen, without hints under it.
     press(&mut app, KeyCode::Char('?'));
     let buf = frame(&app);
@@ -1027,7 +1027,7 @@ mod tests {
     let mut app = app();
     press(&mut app, KeyCode::Enter);
     let out = screen(&app);
-    assert!(out.contains("claude/claude-sonnet-5") && out.contains(data::tests::REPO), "{out}");
+    assert!(out.contains("claude-sonnet-5") && out.contains(data::tests::REPO), "{out}");
     let models = app.open.as_ref().unwrap().rows().len();
     press(&mut app, KeyCode::Down);
     assert_eq!(app.osel, 1.min(models - 1));
@@ -1041,7 +1041,7 @@ mod tests {
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Char('p'));
     let open = app.open.as_ref().unwrap();
-    assert!(open.rows().into_iter().all(|x| x.key.starts_with("codex/")));
+    assert!(open.rows().into_iter().all(|x| x.key.starts_with("gpt-")));
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Char('p'));
@@ -1049,30 +1049,33 @@ mod tests {
     assert!(app.open.is_none());
 
     press(&mut app, KeyCode::Char('2'));
-    assert!(screen(&app).contains("codex/gpt-5.4"));
+    assert!(screen(&app).contains("gpt-5.4"));
     press(&mut app, KeyCode::Enter);
     let out = screen(&app);
-    assert!(out.contains("Speed") && out.contains("Effort") && out.contains("standard"), "{out}");
+    assert!(out.contains("Harness") && out.contains("Speed") && out.contains("Effort"), "{out}");
+    assert!(out.contains("standard"), "{out}");
     press(&mut app, KeyCode::Char('3'));
     assert!(app.list.iter().all(|x| x.day.is_some()));
   }
 
   #[test]
-  fn a_model_shows_its_speeds_and_efforts() {
+  fn a_model_shows_its_harnesses_speeds_and_efforts() {
     let mut app = many();
     press(&mut app, KeyCode::Char('2'));
     // One row per model: fast and standard together.
     assert_eq!(app.list.iter().filter(|x| x.key.contains("gpt-5.4")).count(), 1);
-    app.sel[1] = app.list.iter().position(|x| x.key == "codex/gpt-5.4").unwrap();
+    app.sel[1] = app.list.iter().position(|x| x.key == "gpt-5.4").unwrap();
     press(&mut app, KeyCode::Enter);
     let buf = frame(&app);
     let out = screen_of(&buf);
-    // A speed table and an effort table, each totalling the model.
-    let (speed, effort) = (find(&buf, "Speed"), find(&buf, "Effort"));
-    assert!(speed < effort && !out.contains("w/api"), "{out}");
+    // A harness, a speed and an effort table, each totalling the model.
+    let (harness, speed, effort) =
+      (find(&buf, "Harness"), find(&buf, "Speed"), find(&buf, "Effort"));
+    assert!(harness < speed && speed < effort && !out.contains("w/api"), "{out}");
     let names = |from: u16, to: u16| {
       (from + 1..to).map(|y| cells(&line(&buf, y))[0].clone()).collect::<Vec<_>>()
     };
+    assert_eq!(names(harness, speed - 2), ["codex"], "{out}");
     let mut speeds = names(speed, effort - 2);
     speeds.sort();
     assert_eq!(speeds, ["fast", "standard"], "{out}");
@@ -1082,13 +1085,13 @@ mod tests {
     assert_eq!(efforts, ["high", "low"], "{out}");
     let model = crate::output::duration(app.open.as_ref().unwrap().row.active.unwrap());
     assert_eq!(cells(&line(&buf, total))[1], model);
-    // The selection goes through both tables.
+    // The selection goes through all the tables.
     press(&mut app, KeyCode::End);
-    assert_eq!(app.osel, 3);
+    assert_eq!(app.osel, 4);
     assert!(line(&frame(&app), total - 1).trim_start().starts_with('▶'));
     // An effort that isn't logged reads `–`.
     press(&mut app, KeyCode::Esc);
-    app.sel[1] = app.list.iter().position(|x| x.key == "claude/claude-unknown-1").unwrap();
+    app.sel[1] = app.list.iter().position(|x| x.key == "claude-unknown-1").unwrap();
     press(&mut app, KeyCode::Enter);
     let buf = frame(&app);
     assert_eq!(cells(&line(&buf, find(&buf, "Effort") + 1))[0], "–");
@@ -1560,16 +1563,16 @@ mod tests {
   fn a_drill_down_scrolls_to_the_selected_table() {
     let mut app = many();
     press(&mut app, KeyCode::Char('2'));
-    app.sel[1] = app.list.iter().position(|x| x.key == "codex/gpt-5.4").unwrap();
+    app.sel[1] = app.list.iter().position(|x| x.key == "gpt-5.4").unwrap();
     press(&mut app, KeyCode::Enter);
-    // Too low for both tables: the selection in the effort table brings it into view.
+    // Too low for all the tables: the selection in the effort table brings it into view.
     press(&mut app, KeyCode::End);
     let buf = frame_of(&app, 100, 12);
     let out = screen_of(&buf);
     assert!(out.contains("Effort") && out.contains(" ▶ "), "{out}");
     press(&mut app, KeyCode::Home);
     let out = screen_of(&frame_of(&app, 100, 12));
-    assert!(out.contains("Speed") && out.contains(" ▶ "), "{out}");
+    assert!(out.contains("Harness") && out.contains(" ▶ "), "{out}");
   }
 
   #[test]

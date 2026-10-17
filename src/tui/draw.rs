@@ -611,10 +611,9 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   table(f, app, rows, &app.total, true, inner, Some(app.sel()), hits);
 }
 
-/// The model's name without its provider, for the legend.
+/// The model's name without `claude-`, for the legend.
 fn short(key: &str) -> &str {
-  let name = key.split_once('/').map_or(key, |x| x.1);
-  name.strip_prefix("claude-").unwrap_or(name)
+  key.strip_prefix("claude-").unwrap_or(key)
 }
 
 /// The chart box: bars of what `app.bars` picks, a bar per day stacked by model, the dates under
@@ -843,7 +842,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
     ("1 2 3 4", "projects / models / timeline / swears"),
     ("t T", "period: today, week, month, 30 days, all; wraps around"),
     ("↑ ↓", "select a row or a day; wraps around"),
-    ("→ enter", "open: project → models, model → speed and effort, day → projects"),
+    ("→ enter", "open: project → models, model → harness, speed and effort, day → projects"),
     ("← esc ⌫", "back"),
     ("PgUp PgDn", "a page up / down"),
     ("Home End", "the first / last row"),
