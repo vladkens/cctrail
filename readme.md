@@ -65,6 +65,7 @@ cctrail here                 # the current directory's project: today, this week
 cctrail days                 # per day; also weeks, months, and --models for a breakdown by model
 cctrail --provider codex     # one harness only: claude, codex, pi or fx
 cctrail --json               # everything with full paths and exact counts
+cctrail swears               # how often your prompts swear, per model; --by project per project
 cctrail update-pricing       # download the latest prices now
 ```
 
@@ -136,6 +137,23 @@ only as totals, so they are spread over its agents' activity, a share on every a
 per project, approximate per day. Claude Code deletes sessions older than 30 days by default: raise
 [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically)
 to keep a long history.
+
+### Swearing
+
+`cctrail swears` counts your prompts per model: how many swear, their share and the words matched
+most. A prompt is only what you typed in a main session: no tool output, nothing the harness adds
+(slash commands and their output, reminders, environment context, skills, notifications, summaries
+of compacted history), no prompts that agents get from a model, and none of `codex exec` or the
+Claude Agent SDK, which scripts and other agents send. A prompt counts toward the model that
+answered last before it, the first ones of a session toward the first to answer; one that a fork
+or a copied file repeats counts once. Prompts are read only for this command, and it shows only
+counts and the matched words.
+
+The words come from [`src/swear/en.txt`](src/swear/en.txt) and
+[`src/swear/ru.txt`](src/swear/ru.txt), one per line: `word` matches the word, `stem*` every word
+it starts, `!word` and `!stem*` never match (a stem's false positives). Your own lists in that
+format go in `~/.config/cctrail/swear/*.txt`. Lists for other languages are welcome as pull
+requests.
 
 ### Time
 

@@ -1,0 +1,2 @@
+{"type": "user", "isSidechain": true, "message": {"role": "user", "content": "Find that fucking bug"}, "timestamp": "2026-02-01T10:01:00.000Z", "cwd": "/repo", "sessionId": "s-swear-1"}
+{"type": "assistant", "isSidechain": true, "requestId": "ra", "message": {"id": "ma", "model": "claude-haiku-4-5", "content": [{"type": "text", "text": "Found"}], "usage": {"input_tokens": 3, "output_tokens": 1}}, "timestamp": "2026-02-01T10:01:30.000Z", "cwd": "/repo", "sessionId": "s-swear-1"}

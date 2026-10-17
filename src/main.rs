@@ -7,6 +7,7 @@ mod model;
 mod output;
 mod parser;
 mod pricing;
+mod swear;
 mod tui;
 mod workdir;
 

@@ -12,6 +12,7 @@ use crate::metrics::{
   DateRange, Granularity, ModelSummary, Stat, UsageSummary, combine_stats, local_date,
 };
 use crate::model::{Ts, Usage};
+use crate::swear::Tally;
 
 pub const CONFIG_GUIDE: &str = "https://github.com/vladkens/cctrail#projects";
 
@@ -109,7 +110,7 @@ impl Table {
       widths[0] = widths[0].min(width.saturating_sub(rest).max(self.headers[0].len()));
     }
 
-    let left = |i: usize| i == 0 || self.headers[i] == "Last active";
+    let left = |i: usize| i == 0 || matches!(self.headers[i], "Last active" | "Top words");
     let mut out = String::new();
     let mut line = |cells: Vec<String>, styles: &dyn Fn(usize, &str) -> Vec<&'static str>| {
       let mut parts = vec![];
@@ -357,6 +358,23 @@ pub fn here_text(title: &str, workdir: &str, rows: &[(&str, UsageSummary)], term
   title + &Table::new(vec!["Period", "Total tokens", "Cost", "Time"], rows).render(term)
 }
 
+pub fn swears_text(by: &str, groups: &[Tally], total: &Tally, term: &Term) -> String {
+  let row = |x: &Tally| {
+    let words: Vec<String> = x.words.iter().take(3).map(|(w, n)| format!("{w} {n}")).collect();
+    let share = format!("{:.1}%", x.share() * 100.0);
+    vec![
+      workdir_label(&x.name),
+      x.prompts.to_string(),
+      x.swearing.to_string(),
+      share,
+      words.join(", "),
+    ]
+  };
+  let rows = groups.iter().chain([total]).map(row).collect();
+  let label = if by == "model" { "Model" } else { "Project" };
+  Table::new(vec![label, "Prompts", "Swearing", "Share", "Top words"], rows).render(term)
+}
+
 /// The tokens left out of the cost; suggests `update-pricing` only when it may help.
 pub fn unpriced_text(models: &[(String, u64)], stale: bool, term: &Term) -> String {
   if models.is_empty() {
@@ -404,6 +422,20 @@ pub fn total_json(x: &Stat, count: usize, by: By) -> Value {
     By::Dir => "workdirs",
   };
   value.insert(key.into(), json!(count));
+  Value::Object(value)
+}
+
+/// A group's prompts under its name as `key`, or the total's without.
+pub fn tally_json(x: &Tally, key: Option<&str>) -> Value {
+  let words: Vec<Value> = x.words.iter().map(|(w, n)| json!({"word": w, "count": n})).collect();
+  let mut value = serde_json::Map::new();
+  if let Some(key) = key {
+    value.insert(key.into(), json!(x.name));
+  }
+  value.insert("prompts".into(), json!(x.prompts));
+  value.insert("swearing".into(), json!(x.swearing));
+  value.insert("share".into(), json!(x.share()));
+  value.insert("words".into(), json!(words));
   Value::Object(value)
 }
 

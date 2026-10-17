@@ -184,15 +184,20 @@ pub fn home_dir() -> Option<PathBuf> {
   ["HOME", "USERPROFILE"].iter().filter_map(env::var_os).find(|x| !x.is_empty()).map(PathBuf::from)
 }
 
-pub fn config_path() -> Option<PathBuf> {
-  if let Some(x) = env::var_os("CCTRAIL_CONFIG") {
-    return Some(PathBuf::from(x));
-  }
+/// `~/.config/cctrail`, or `cctrail` in `XDG_CONFIG_HOME`.
+pub fn config_dir() -> Option<PathBuf> {
   let root = match env::var_os("XDG_CONFIG_HOME") {
     Some(x) => PathBuf::from(x),
     None => home_dir()?.join(".config"),
   };
-  Some(root.join("cctrail/config.toml"))
+  Some(root.join("cctrail"))
+}
+
+pub fn config_path() -> Option<PathBuf> {
+  match env::var_os("CCTRAIL_CONFIG") {
+    Some(x) => Some(PathBuf::from(x)),
+    None => Some(config_dir()?.join("config.toml")),
+  }
 }
 
 #[cfg(test)]

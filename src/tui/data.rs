@@ -648,8 +648,8 @@ pub mod tests {
   }
 
   fn sessions() -> Vec<Session> {
-    let mut sessions = crate::parser::claude::parse(&[fixtures("claude/projects")]);
-    sessions.extend(crate::parser::codex::parse(&[fixtures("codex")]));
+    let mut sessions = crate::parser::claude::parse(&[fixtures("claude/projects")], false);
+    sessions.extend(crate::parser::codex::parse(&[fixtures("codex")], false));
     for x in &mut sessions {
       if let Some(rest) = x.workdir.strip_prefix("/repo") {
         x.workdir = format!("{REPO}{rest}");

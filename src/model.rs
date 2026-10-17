@@ -124,6 +124,8 @@ pub struct Event {
   pub background: bool,
   pub sidechain: bool,
   pub failed: bool,
+  /// A prompt's own words, only for `swears`: its `model` is the one it counts toward.
+  pub prompt: Option<Box<str>>,
 }
 
 impl Event {

@@ -151,7 +151,7 @@ pub fn root() -> PathBuf {
 /// each model's totals are split into its requests over the agent activity of the main session
 /// and its agents (`spread`), each request at one of those moments: totals per session and project
 /// are exact, their split by day approximate.
-pub fn parse(root: &Path) -> Vec<Session> {
+pub fn parse(root: &Path, _prompts: bool) -> Vec<Session> {
   let dirs = std::fs::read_dir(root.join("sessions")).into_iter().flatten().flatten();
   let mut dirs: Vec<PathBuf> = dirs.map(|x| x.path()).filter(|x| x.is_dir()).collect();
   dirs.sort();
@@ -340,7 +340,7 @@ mod tests {
 
   #[test]
   fn links_agents_and_counts_their_usage_once() {
-    let sessions = parse(&fixtures());
+    let sessions = parse(&fixtures(), false);
     let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
     let (main, agent, other) = (find("fx-main-1"), find("fx-agent-1"), find("fx-other-1"));
     // A session.json that doesn't parse skips its directory, as does a directory without one.
@@ -367,7 +367,7 @@ mod tests {
         std::fs::copy(src.join(id).join(x), dir.join("sessions").join(id).join(x)).unwrap();
       }
     }
-    let sessions = parse(&dir);
+    let sessions = parse(&dir, false);
     let main = sessions.iter().find(|x| x.id == "fx-main-1").unwrap();
     assert!(main.is_main && main.events.is_empty());
     let agent = sessions.iter().find(|x| x.id == "fx-agent-1").unwrap();
@@ -377,7 +377,7 @@ mod tests {
 
   #[test]
   fn spreads_totals_over_the_agents_activity() {
-    let sessions = parse(&fixtures());
+    let sessions = parse(&fixtures(), false);
     let tree: Vec<&Event> =
       sessions.iter().filter(|x| x.root_id == "fx-main-1").flat_map(|x| &x.events).collect();
     let day = |d: i8| {

@@ -8,7 +8,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-  AgentCall, Content, Obj, Present, Text, Val, inherit_roots, jsonl, jsonl_files, parse_ts,
+  AgentCall, Content, Obj, Present, Replies, Text, Val, inherit_roots, jsonl, jsonl_files,
+  own_words, parse_ts,
 };
 use crate::model::{Event, Provider, Session, Speed, Usage};
 use crate::workdir::normalize_remote;
@@ -155,6 +156,8 @@ struct Rollout {
   remote: Option<String>,
   /// Lines with a smaller `ordinal` are the parent's history, copied into an agent's rollout.
   own_start: Option<i64>,
+  /// Started by `codex exec`: a script's or another agent's prompt, not one typed.
+  exec: bool,
 }
 
 #[derive(Default)]
@@ -174,7 +177,7 @@ struct Parsed {
 /// agents carry their main session's root and working directory. A rollout id seen twice counts
 /// once: within a root the later file wins (`sessions` over `archived_sessions`), across roots (a
 /// copied profile) the longest file, whole.
-pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
+pub fn parse(roots: &[PathBuf], prompts: bool) -> Vec<Session> {
   let files: Vec<(usize, PathBuf)> = roots
     .iter()
     .enumerate()
@@ -208,7 +211,7 @@ pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
     }
   }
 
-  let mut parsed: Vec<Parsed> = rollouts.par_iter().map(parse_file).collect();
+  let mut parsed: Vec<Parsed> = rollouts.par_iter().map(|x| parse_file(x, prompts)).collect();
   let signatures: HashMap<&str, Vec<Signature>> =
     rollouts.iter().zip(&parsed).map(|(r, p)| (r.id.as_str(), p.signatures.clone())).collect();
   for (rollout, item) in rollouts.iter().zip(&mut parsed) {
@@ -289,6 +292,7 @@ fn read_meta(path: &Path) -> Option<Rollout> {
     workdir: meta.cwd.str().unwrap_or("unknown").to_string(),
     remote: meta.git.0.as_ref().and_then(|x| normalize_remote(x.repository_url.str()?)),
     own_start: meta.subagent_history_start_ordinal.ordinal(),
+    exec: matches!(&meta.source, Some(Value::String(x)) if x == "exec"),
   })
 }
 
@@ -303,7 +307,8 @@ fn nested_parent_id(value: &Value) -> Option<String> {
   }
 }
 
-fn parse_file(rollout: &Rollout) -> Parsed {
+fn parse_file(rollout: &Rollout, prompts: bool) -> Parsed {
+  let prompts = prompts && rollout.parent_id.is_none() && !rollout.exec;
   let mut session =
     Session::new(&rollout.id, rollout.parent_id.is_none(), &rollout.workdir, Provider::Codex);
   session.remote = rollout.remote.clone();
@@ -317,6 +322,7 @@ fn parse_file(rollout: &Rollout) -> Parsed {
   let mut calls: Vec<AgentCall> = vec![];
   let mut records: Vec<Record> = vec![];
   let mut signatures: Vec<Signature> = vec![];
+  let mut replies = Replies::default();
 
   jsonl(&rollout.path, |line: Line, raw| {
     let inherited =
@@ -345,9 +351,23 @@ fn parse_file(rollout: &Rollout) -> Parsed {
       }
       (_, Some("user_message")) if event_msg && !inherited => {
         if let Some(ts) = parse_ts(&line.timestamp).filter(|_| p.message.has_text()) {
-          records.push(Record { event: Some(Event::activity(ts)), signature: None });
+          let mut event = Event::activity(ts);
+          if prompts && let Some(words) = prompt(raw) {
+            replies.prompt(&mut event, words);
+          }
+          records.push(Record { event: Some(event), signature: None });
         }
         assistant = None;
+      }
+      // Codex logs a prompt as a `UserMessage` item instead since 2026-08.
+      (_, Some("item_completed")) if event_msg && prompts => {
+        if let Some(ts) = parse_ts(&line.timestamp)
+          && let Some(words) = prompt(raw)
+        {
+          let mut event = Event::activity(ts);
+          replies.prompt(&mut event, words);
+          records.push(Record { event: Some(event), signature: None });
+        }
       }
       (_, Some("task_complete")) if event_msg && !inherited => assistant = None,
       (_, Some("token_count")) if event_msg => {
@@ -355,6 +375,9 @@ fn parse_file(rollout: &Rollout) -> Parsed {
         let total = info.total_token_usage.0.as_ref().map(RawUsage::values);
         if total.is_some() && total == prev_total {
           return true;
+        }
+        if prompts && let Some(x) = info.model.str().or(model.as_deref()) {
+          replies.answer(x);
         }
         let last = info.last_token_usage.0.as_ref().map(RawUsage::values);
         if let Some(x) = last {
@@ -397,7 +420,19 @@ fn parse_file(rollout: &Rollout) -> Parsed {
     true
   });
 
+  replies.finish(records.iter_mut().filter_map(|x| x.event.as_mut()));
   Parsed { session, calls, records, signatures }
+}
+
+/// A prompt's own words: a `user_message`'s, or a `UserMessage` item's.
+fn prompt(raw: &[u8]) -> Option<Box<str>> {
+  let x: Value = serde_json::from_slice(raw).ok()?;
+  let (p, item) = (&x["payload"], &x["payload"]["item"]);
+  match item["type"].as_str() {
+    Some("UserMessage") => own_words(&item["content"]),
+    Some(_) => None,
+    None => own_words(&p["message"]),
+  }
 }
 
 /// Drops the leading events a fork replays from its parent: records whose signatures match the
@@ -511,9 +546,27 @@ mod tests {
   }
 
   #[test]
+  fn reads_typed_prompts_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/swears/codex");
+    // Injected context, an agent's and `codex exec`'s prompts and the fork's replay are no prompts;
+    // a `UserMessage` item is one, without the answer to Codex's question. The fork's own prompt
+    // counts toward the last answer it replayed.
+    let expected = [
+      ("gpt-5.4", "wtf now"),
+      ("gpt-5.4", "what the fuck"),
+      ("gpt-5.4", "please rename it"),
+      ("gpt-5.5", "shit, again"),
+    ];
+    let sessions = parse(std::slice::from_ref(&root), true);
+    assert_eq!(super::super::tests::prompts(&sessions), expected);
+    let sessions = parse(&[root], false);
+    assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
+  }
+
+  #[test]
   fn links_only_spawned_agent_and_removes_fork_replay() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex");
-    let sessions = parse(std::slice::from_ref(&root));
+    let sessions = parse(std::slice::from_ref(&root), false);
     let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
     let (main, agent, fork) = (find("codex-main-1"), find("codex-agent-1"), find("codex-fork-1"));
 
@@ -524,7 +577,7 @@ mod tests {
     assert_eq!(total(&sessions.iter().collect::<Vec<_>>()), 455);
 
     // The same rollouts under a second root (a copied profile) count once.
-    let twice = parse(&[root.clone(), root]);
+    let twice = parse(&[root.clone(), root], false);
     assert_eq!(twice.len(), sessions.len());
     assert_eq!(total(&twice.iter().collect::<Vec<_>>()), 455);
   }
@@ -546,7 +599,7 @@ mod tests {
     };
     let all = |roots: &[&str]| {
       let roots: Vec<PathBuf> = roots.iter().map(|x| base.join(x)).collect();
-      total(&parse(&roots).iter().collect::<Vec<_>>())
+      total(&parse(&roots, false).iter().collect::<Vec<_>>())
     };
 
     // Across roots the longest file wins whole, in either order.
@@ -637,7 +690,7 @@ mod tests {
     ];
     std::fs::create_dir_all(base.join("sessions")).unwrap();
     std::fs::write(base.join("sessions/rollout.jsonl"), lines.join("\n")).unwrap();
-    let sessions = parse(std::slice::from_ref(&base));
+    let sessions = parse(std::slice::from_ref(&base), false);
     let effort: Vec<_> = sessions[0].events.iter().map(|x| x.effort.as_deref()).collect();
     assert_eq!(effort, [None, Some("high"), Some("high"), Some("low"), None]);
     std::fs::remove_dir_all(&base).unwrap();
