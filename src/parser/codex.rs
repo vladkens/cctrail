@@ -294,7 +294,12 @@ fn read_meta(path: &Path) -> Option<Rollout> {
     workdir: meta.cwd.str().unwrap_or("unknown").to_string(),
     remote: meta.git.0.as_ref().and_then(|x| normalize_remote(x.repository_url.str()?)),
     own_start: meta.subagent_history_start_ordinal.ordinal(),
-    typed: meta.source.as_ref().is_none_or(|x| x.as_str().is_some_and(|x| x != "exec")),
+    // `thread_source` says the same where `source` is missing, as for the parent: `user` typed.
+    typed: match (&meta.source, &meta.thread_source) {
+      (Some(x), _) => x.as_str().is_some_and(|x| x != "exec"),
+      (None, Some(x)) => x.as_str() == Some("user"),
+      (None, None) => true,
+    },
   })
 }
 
@@ -383,11 +388,6 @@ fn parse_file(rollout: &Rollout, swears: Option<&Dict>) -> Parsed {
         if total.is_some() && total == prev_total {
           return true;
         }
-        if swears.is_some()
-          && let Some(x) = info.model.str().or(model.as_deref())
-        {
-          replies.answer(x);
-        }
         let last = info.last_token_usage.0.as_ref().map(RawUsage::values);
         if let Some(x) = last {
           signatures.push(x);
@@ -395,6 +395,13 @@ fn parse_file(rollout: &Rollout, swears: Option<&Dict>) -> Parsed {
         let usage = last.or_else(|| total.map(|x| delta(x, prev_total)));
         if total.is_some() {
           prev_total = total;
+        }
+        // A model answered only with tokens: not an empty `info` or a count of none.
+        if swears.is_some()
+          && usage.map(normalize).is_some_and(|x| x.total() > 0)
+          && let Some(x) = info.model.str().or(model.as_deref())
+        {
+          replies.answer(x);
         }
         if inherited {
           return true;
@@ -576,15 +583,48 @@ mod tests {
   #[test]
   fn reads_typed_prompts_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/swears/codex");
-    // Injected context, an agent's, a review's and `codex exec`'s prompts and the fork's replay are
-    // no prompts; a `UserMessage` item is one, without the answer to Codex's question. The
-    // fork's own prompt counts toward the last answer it replayed.
+    // Injected context, an agent's, a review's and `codex exec`'s prompts (by `source` or by
+    // `thread_source`) and the fork's replay are no prompts; a `UserMessage` item is one, without
+    // the answer to Codex's question. The fork's own prompt counts toward the last answer it
+    // replayed.
     // `wtf now`, `what the fuck`, `please rename it`, `shit, again`.
     let expected = [("gpt-5.4", 2, 1), ("gpt-5.4", 3, 1), ("gpt-5.4", 3, 0), ("gpt-5.5", 2, 1)];
     let sessions = parse(std::slice::from_ref(&root), Some(&super::super::tests::dict()));
     assert_eq!(super::super::tests::prompts(&sessions), expected);
     let sessions = parse(&[root], None);
     assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
+  }
+
+  #[test]
+  fn a_prompt_counts_toward_a_model_that_answered_with_tokens() {
+    let base = std::env::temp_dir().join(format!("cctrail-answers-{}", std::process::id()));
+    let line = |t: u8, kind: &str, payload: &str| {
+      format!(r#"{{"timestamp":"2026-01-01T00:0{t}:00Z","type":"{kind}","payload":{payload}}}"#)
+    };
+    let count = |t, last: &str, total: u64| {
+      let info = format!(r#"{{"total_token_usage":{{"input_tokens":{total}}}{last}}}"#);
+      line(t, "event_msg", &format!(r#"{{"type":"token_count","info":{info}}}"#))
+    };
+    let prompt = |t| line(t, "event_msg", r#"{"type":"user_message","message":"fuck"}"#);
+    let lines = [
+      line(0, "session_meta", r#"{"id":"s","cwd":"/r","source":"cli"}"#),
+      line(1, "turn_context", r#"{"model":"a"}"#),
+      count(1, r#","last_token_usage":{"input_tokens":10}"#, 10),
+      prompt(2),
+      // Another model picked, an empty count and one of no tokens: `a` answered last still.
+      line(3, "turn_context", r#"{"model":"b"}"#),
+      line(3, "event_msg", r#"{"type":"token_count","info":{}}"#),
+      count(4, r#","last_token_usage":{"input_tokens":0}"#, 10),
+      prompt(5),
+      count(6, r#","last_token_usage":{"input_tokens":5}"#, 15),
+      prompt(7),
+    ];
+    std::fs::create_dir_all(base.join("sessions")).unwrap();
+    std::fs::write(base.join("sessions/rollout.jsonl"), lines.join("\n")).unwrap();
+    let sessions = parse(std::slice::from_ref(&base), Some(&super::super::tests::dict()));
+    std::fs::remove_dir_all(&base).unwrap();
+    let models: Vec<_> = super::super::tests::prompts(&sessions).into_iter().map(|x| x.0).collect();
+    assert_eq!(models, ["a", "a", "b"]);
   }
 
   #[test]
