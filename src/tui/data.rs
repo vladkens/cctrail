@@ -87,11 +87,6 @@ impl Row {
   pub fn msgs(&self) -> Option<f64> {
     self.rate(self.swearing, self.prompts, 100.0)
   }
-
-  /// Swear words in a prompt with swearing: how hard, once they swear.
-  pub fn per_msg(&self) -> Option<f64> {
-    self.rate(self.swears, self.swearing, 1.0)
-  }
 }
 
 /// Time per project, model, speed and effort, for one span and provider.
@@ -840,19 +835,16 @@ pub mod tests {
       (100, 50, 2000, 100)
     );
     assert_eq!((total.prompts, total.swearing, total.words, total.swears), (164, 64, 3617, 141));
-    // The raw shares: `small` swears in more of its prompts than `sonnet`, and harder.
+    // The raw shares: `small` swears in more of its prompts than `sonnet`, and more per word.
     assert_eq!((small.msgs(), sonnet.msgs()), (Some(60.0), Some(50.0)));
-    assert_eq!(
-      (small.per_msg(), sonnet.per_msg(), small.per_1k()),
-      (Some(5.0), Some(2.0), Some(300.0))
-    );
+    assert_eq!((small.per_1k(), sonnet.per_1k()), (Some(300.0), Some(50.0)));
     // Shrunk toward the overall 64 / 164, `small`'s 10 prompts score below `sonnet`'s 100.
     let score = |x: &Row| x.score.unwrap();
     let overall = 64.0 / 164.0;
     assert!((score(small) - (6.0 + 30.0 * overall) / 40.0 * 100.0).abs() < 1e-9);
     assert!(score(sonnet) > score(small) && score(small) > score(gpt), "{rows:?}");
     // Under 10 prompts no rates; the total's score is the overall share.
-    assert_eq!((tiny.per_1k(), tiny.msgs(), tiny.per_msg(), tiny.score), (None, None, None, None));
+    assert_eq!((tiny.per_1k(), tiny.msgs(), tiny.score), (None, None, None));
     // The prompt to no known model, under its own name.
     assert_eq!((get(UNKNOWN).label.as_str(), get(UNKNOWN).prompts), ("<unknown>", 1));
     assert!((total.score.unwrap() - overall * 100.0).abs() < 1e-9);

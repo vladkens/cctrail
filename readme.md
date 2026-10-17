@@ -77,10 +77,10 @@ start on Monday. `cctrail --help` lists it all.
 timeline (a chart of the days stacked by model over their list) and swears for today, this week,
 this month, the last 30 days or all time. Press `?` in it to see the keys.
 
-Swears lists per model your prompts to it, the share of them with swearing, the swear words in
-such a prompt, their words and swear words per 1,000 words. Score, from 0 to 100, is that share
-pulled toward your overall one by 30 prompts, so a model you barely used sits near your average
-instead of at the top; prompts to no known model are `<unknown>`.
+Swears lists per model your prompts to it, the share of them with swearing, their words and swear
+words per 1,000 words. Score, from 0 to 100, is that share pulled toward your overall one by 30
+prompts, so a model you barely used sits near your average instead of at the top; prompts to no
+known model are `<unknown>`.
 
 <div align="center">
   <img src="docs/images/projects.svg" alt="The projects of cctrail's interactive view for the last 30 days: time, tokens, cost, sessions and share per project, with the total" />
