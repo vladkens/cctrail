@@ -12,9 +12,10 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 ## Scope
 
 - Read history only: never write into `~/.claude`, `~/.codex`, `~/.pi` or `~/.fx`. cctrail writes
-  only under `~/.cache/cctrail`, and uses the network only to fetch the price catalog from the
-  `pricing` release: on `cctrail update-pricing`, and in the background when the cached one is a
-  day old (`CCTRAIL_NO_UPDATE=1` turns that off; tests set it).
+  only under `~/.cache/cctrail`, to the file `cctrail export` names, and under the data directory
+  (`~/.local/share/cctrail`) on `cctrail import`. It uses the network only to fetch the price
+  catalog from the `pricing` release: on `cctrail update-pricing`, and in the background when the
+  cached one is a day old (`CCTRAIL_NO_UPDATE=1` turns that off; tests set it).
 - Prices are dated: `scripts/pricing-history.py` builds them from the models.dev git history, the
   daily `pricing.yml` workflow publishes them. Price an event at its day's rate, never at today's.
 - Support Claude Code (`~/.claude/projects`, `CLAUDE_CONFIG_DIR`), Codex (`~/.codex/sessions`
@@ -24,10 +25,10 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 - Keep the build fast: prefer a small own routine to a generic dependency that compiles far more
   code than cctrail uses (`cargo build --timings`). The dependencies are serde/serde_json (history
   and JSON output), toml (config), jiff (local time zones), rayon (parallel parsing), anyhow, ureq
-  (`update-pricing`), libc (terminal width) and ratatui with only its crossterm backend (the
-  interactive view). No clap, table or color crates for the text report: its arguments, tables and
-  ANSI colors are hand-rolled. Change dependencies only with `cargo add` / `cargo remove` /
-  `cargo upgrade`, never by hand.
+  (`update-pricing`), libc (terminal width), ratatui with only its crossterm backend (the
+  interactive view) and rusqlite with its bundled SQLite (`export`, `import`). No clap, table or
+  color crates for the text report: its arguments, tables and ANSI colors are hand-rolled. Change
+  dependencies only with `cargo add` / `cargo remove` / `cargo upgrade`, never by hand.
 - The CLI is what `cctrail --help` shows and the JSON output carries `schema_version`: change
   either only with the person's approval.
 - Run on macOS, Linux and Windows.
@@ -35,10 +36,11 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 ## Code
 
 - One binary crate, flat modules: `cli` (arguments, commands), `config`, `model`,
-  `parser/{claude,codex,pi,fx}`, `workdir` (worktrees and same-named clones folded into their
-  repository), `metrics`, `output` (tables, JSON), `pricing`, `swear` (swear words in prompts),
-  `tui` (the interactive view, on the same accounting). Keep it within ~8000 lines of Rust, tests
-  excluded, and each feature small (a few hundred lines); simplify before growing past either.
+  `parser/{claude,codex,pi,fx}`, `db` (export and import of the parsed sessions in SQLite),
+  `workdir` (worktrees and same-named clones folded into their repository), `metrics`, `output`
+  (tables, JSON), `pricing`, `swear` (swear words in prompts), `tui` (the interactive view, on the
+  same accounting). Keep it within ~8000 lines of Rust, tests excluded, and each feature small (a
+  few hundred lines); simplify before growing past either.
 - Treat history as untrusted input: harnesses change formats and leave truncated lines. Skip what
   doesn't parse, never panic or fail the run on it.
 - Errors go through `anyhow` with the path or value that failed. Comment only format quirks of a

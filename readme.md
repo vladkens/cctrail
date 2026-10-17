@@ -6,8 +6,8 @@
 
 [<img src="https://badges.ws/crates/v/cctrail" alt="version" />](https://crates.io/crates/cctrail)
 [<img src="https://badges.ws/github/license/vladkens/cctrail" alt="license" />](https://github.com/vladkens/cctrail/blob/main/LICENSE)
+[<img src="https://badges.ws/badge/built_with_ratatui-black?icon=ratatui" alt="built with ratatui" />](https://ratatui.rs/)
 [<img src="https://badges.ws/badge/follow-@uid127-black" alt="follow @uid127" />](https://x.com/uid127)
-[![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
 
 </div>
 
@@ -67,6 +67,8 @@ cctrail days                 # per day; also weeks, months, and --models for a b
 cctrail --provider codex     # one harness only: claude, codex, pi or fx
 cctrail --json               # everything with full paths and exact counts
 cctrail update-pricing       # download the latest prices now
+cctrail export FILE          # save the history into an SQLite file
+cctrail import FILE          # add an exported history to the reports
 ```
 
 Any argument, `--json` or a pipe prints a text report; `NO_COLOR=1` turns its colors off. Weeks
@@ -144,6 +146,14 @@ per project, approximate per day. Claude Code deletes sessions older than 30 day
 [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically)
 to keep a long history.
 
+To move to another machine or keep a backup before the logs are deleted, `cctrail export FILE`
+saves the sessions cctrail reads into one SQLite file, and `cctrail import FILE` on the other
+machine adds them to every report, the interactive view included. The file holds what the numbers
+need (times, models, tokens, directories) and the swear counts, never a prompt's or answer's text;
+paths under your home are kept as `~/…` and read back in the new one. An import is copied into
+`~/.local/share/cctrail` (`XDG_DATA_HOME`; `%LOCALAPPDATA%` on Windows), once per file; a session
+still in the local logs is read from them, an imported one fills in what the logs no longer have.
+
 ### Swearing
 
 The Swears view: how often you scold each model, adjusted for how much you used it.
@@ -169,7 +179,8 @@ The Swears view: how often you scold each model, adjusted for how much you used 
   any swearing · Score: `% dir` adjusted for few messages, `(dir + 30 × overall) / (msgs + 30) ×
   100`, overall being your `% dir` in the period, so a few messages can't move a model far from
   your average. Shares need 10 messages; messages to no known model are `<unknown>`.
-- **Privacy:** each prompt keeps only counts and a hash, never its text, and only for this view.
+- **Privacy:** each prompt keeps only counts and a hash, never its text, for this view and
+  `cctrail export` and `import`.
 - **Your lists:** `~/.config/cctrail/swear/*.txt`, insults in `insult-*.txt`. Lists for other
   languages are welcome as pull requests.
 
@@ -213,6 +224,8 @@ cargo uninstall cctrail                                                         
 - [models.dev](https://github.com/anomalyco/models.dev) (MIT): the model prices, read from its git
   history for the price of each day.
 - [ratatui](https://github.com/ratatui/ratatui) (MIT): the interactive view.
+- [SQLite](https://sqlite.org) (public domain) through
+  [rusqlite](https://github.com/rusqlite/rusqlite) (MIT): `cctrail export` and `import`.
 
 ## 📝 License
 

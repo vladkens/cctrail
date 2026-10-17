@@ -2,6 +2,7 @@
 
 mod cli;
 mod config;
+mod db;
 mod metrics;
 mod model;
 mod output;
