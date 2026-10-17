@@ -39,12 +39,12 @@ pub enum Col {
   Sessions,
   /// The sorted column's share, Time's when sorted by name.
   Share,
-  /// The swears tab's: prompts, words typed, swear words per 1,000 words, % of prompts with
+  /// The swears tab's: prompts, % of them swearing at the listener, words typed, % with any
   /// swearing, score.
   Prompts,
+  Directed,
   Words,
-  Rate,
-  Msgs,
+  Any,
   Score,
 }
 
@@ -59,7 +59,9 @@ impl Col {
   /// The `s` cycle of a table's columns.
   fn cycle(tab: Tab, sessions: bool) -> &'static [Col] {
     match (tab, sessions) {
-      (Tab::Swears, _) => &[Col::Prompts, Col::Msgs, Col::Words, Col::Rate, Col::Score, Col::Name],
+      (Tab::Swears, _) => {
+        &[Col::Prompts, Col::Directed, Col::Words, Col::Any, Col::Score, Col::Name]
+      }
       (_, true) => &[Col::Time, Col::Tokens, Col::Cost, Col::Sessions, Col::Name],
       (_, false) => &[Col::Time, Col::Tokens, Col::Cost, Col::Name],
     }
@@ -79,9 +81,9 @@ impl Col {
       Self::Name | Self::Time | Self::Share => x.active.unwrap_or(0) as f64,
       Self::Prompts => x.prompts as f64,
       Self::Words => x.words as f64,
-      // A rate from too few prompts sorts below every other.
-      Self::Rate => x.per_1k().unwrap_or(-1.0),
-      Self::Msgs => x.msgs().unwrap_or(-1.0),
+      // A share of too few prompts sorts below every other.
+      Self::Directed => x.directed_share().unwrap_or(-1.0),
+      Self::Any => x.any_share().unwrap_or(-1.0),
       Self::Score => x.score.unwrap_or(-1.0),
     }
   }
@@ -266,7 +268,7 @@ impl App {
     if !needle.is_empty() || self.tab == Tab::Timeline {
       self.total = sum(&list);
       // The rows' own share: the overall one of what is shown.
-      self.total.score = self.total.msgs();
+      self.total.score = self.total.directed_share();
     }
     if self.tab == Tab::Timeline {
       let days: Vec<_> = list.iter().filter_map(|x| x.day).collect();
@@ -589,7 +591,7 @@ fn sum(rows: &[Row]) -> Row {
     cost: rows.iter().map(|x| x.cost).sum(),
     sessions: opt(|x| x.sessions.map(|x| x as i64)).map(|x| x as usize),
     words: add(|x| x.words),
-    swears: add(|x| x.swears),
+    directed: add(|x| x.directed),
     prompts: add(|x| x.prompts),
     swearing: add(|x| x.swearing),
     ..Default::default()
@@ -1379,18 +1381,18 @@ mod tests {
       let buf = frame_of(&app, width, 20);
       assert!(raw(&buf, 0).contains(" Swears 4 "), "{}", raw(&buf, 0));
       let head = cells(&line(&buf, find(&buf, "Model")));
-      assert_eq!(head, ["Model", "Msgs", "% msgs", "Words", "per 1k", "Score ↓"], "{width}");
-      // By score: `small`'s 10 prompts below `sonnet`'s 100 though more of them swear; the
+      assert_eq!(head, ["Model", "Msgs", "% directed", "Words", "% any", "Score ↓"], "{width}");
+      // By score: `small`'s 10 prompts below `sonnet`'s 100 though more swear at it; the
       // unknown model and `tiny` without enough prompts last, with dashes.
       let names = ["sonnet", "small", "gpt", "<unknown>", "tiny", "total"];
       let rows: Vec<Vec<String>> =
         names.iter().map(|x| cells(&line(&buf, find(&buf, x)))).collect();
-      assert_eq!(rows[0], ["sonnet", "100", "50.0%", "2.0K", "50.0", "47.5"], "{width}");
-      assert_eq!(rows[1], ["small", "10", "60.0%", "100", "300.0", "44.3"], "{width}");
-      assert_eq!(rows[2], ["gpt", "50", "10.0%", "1.5K", "3.3", "20.9"], "{width}");
+      assert_eq!(rows[0], ["sonnet", "100", "50.0%", "2.0K", "60.0%", "47.5"], "{width}");
+      assert_eq!(rows[1], ["small", "10", "60.0%", "100", "60.0%", "44.3"], "{width}");
+      assert_eq!(rows[2], ["gpt", "50", "10.0%", "1.5K", "40.0%", "20.9"], "{width}");
       assert_eq!(rows[3], ["<unknown>", "1", "–", "2", "–", "–"], "{width}");
       assert_eq!(rows[4], ["tiny", "3", "–", "15", "–", "–"], "{width}");
-      assert_eq!(rows[5], ["total", "164", "39.0%", "3.6K", "39.0", "39.0"], "{width}");
+      assert_eq!(rows[5], ["total", "164", "39.0%", "3.6K", "54.3%", "39.0"], "{width}");
       let ys: Vec<u16> = names.iter().map(|x| find(&buf, x)).collect();
       assert!(ys.windows(2).all(|x| x[0] + 1 == x[1]), "{}", screen_of(&buf));
       // A row of swears opens nothing.
@@ -1412,7 +1414,7 @@ mod tests {
     for c in "s".chars() {
       press(&mut app, KeyCode::Char(c));
     }
-    assert_eq!((app.total.prompts, app.total.swearing), (110, 56));
+    assert_eq!((app.total.prompts, app.total.directed), (110, 56));
     assert!((app.total.score.unwrap() - 5600.0 / 110.0).abs() < 1e-9);
   }
 

@@ -1,0 +1,57 @@
+# Russian insults for the interactive view's Swears: words aimed at the listener wherever they are
+# in a prompt. The format of en.txt; `>word` counts only next to an addressee (`ты`, a model's
+# name), as a verb that says what the listener does. A stem only from the start of a word: тупик, тупо (just) and
+# даунгрейд never match.
+
+дебил*
+идиот*
+кретин*
+имбецил*
+дегенерат*
+придур*
+бестолоч*
+недоумок*
+олух*
+тупой
+тупая
+тупое
+тупые
+тупого
+тупому
+тупым
+тупица
+тупицы
+дура
+дуру
+дурой
+дурак
+дурака
+дураку
+дураком
+дураки
+тварь
+твари
+тварью
+мразь
+мрази
+мразью
+тупорыл*
+даун
+дауна
+дауны
+дауну
+дауном
+долбоеб*
+долбаеб*
+мудак*
+мудил*
+уебок*
+уебан*
+уебищ*
+
+# Only next to `ты` or a name: `ты тупишь` scolds, `комп тупит` doesn't.
+>тупишь
+>тупил
+>тупила
+>тупите
+>тупанул*

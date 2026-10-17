@@ -63,29 +63,29 @@ pub struct Row {
   pub day: Option<Date>,
   /// A model without a price: its cost is unknown, not 0.
   pub unpriced: bool,
-  /// The swears tab's: words typed to a model, the swear words among them, the prompts and those
-  /// with swearing, and the score.
-  pub words: u64,
-  pub swears: u64,
+  /// The swears tab's: the prompts to a model and the words in them, those swearing at the
+  /// listener and those with any swearing, and the score.
   pub prompts: u64,
+  pub words: u64,
+  pub directed: u64,
   pub swearing: u64,
   pub score: Option<f64>,
 }
 
-/// The swears tab's rates, from enough prompts.
+/// The swears tab's shares of prompts, in percent, from enough prompts.
 impl Row {
-  fn rate(&self, x: u64, of: u64, by: f64) -> Option<f64> {
-    (self.prompts >= MIN_PROMPTS && of > 0).then(|| x as f64 * by / of as f64)
+  fn share(&self, x: u64) -> Option<f64> {
+    (self.prompts >= MIN_PROMPTS).then(|| x as f64 * 100.0 / self.prompts as f64)
   }
 
-  /// Swear words per 1,000 words typed.
-  pub fn per_1k(&self) -> Option<f64> {
-    self.rate(self.swears, self.words, 1000.0)
+  /// Of the prompts swearing at the listener.
+  pub fn directed_share(&self) -> Option<f64> {
+    self.share(self.directed)
   }
 
-  /// The percent of the prompts with swearing.
-  pub fn msgs(&self) -> Option<f64> {
-    self.rate(self.swearing, self.prompts, 100.0)
+  /// Of the prompts with any swearing.
+  pub fn any_share(&self) -> Option<f64> {
+    self.share(self.swearing)
   }
 }
 
@@ -181,8 +181,8 @@ impl Data {
     (rows, row(&total, false))
   }
 
-  /// The prompts and words typed to each model in the span, the swearing in them, its rates and
-  /// score, and the total, scored at the overall share of prompts with swearing.
+  /// The prompts and words typed to each model in the span, the swearing in them, its shares and
+  /// score, and the total, scored at the overall share of prompts swearing at the listener.
   pub fn swears(&self, span: Span, prov: Option<Provider>) -> (Vec<Row>, Row) {
     let range = span.range(self.today);
     let mut rows: HashMap<String, Row> = HashMap::new();
@@ -198,18 +198,18 @@ impl Data {
         ..row_of(k)
       };
       for row in [rows.entry(key.to_string()).or_insert_with_key(new), &mut total] {
-        row.words += u64::from(x.words);
-        row.swears += u64::from(x.swears);
         row.prompts += 1;
+        row.words += u64::from(x.words);
+        row.directed += u64::from(x.directed);
         row.swearing += u64::from(x.swears > 0);
       }
     }
-    let overall = total.swearing as f64 / total.prompts.max(1) as f64;
+    let overall = total.directed as f64 / total.prompts.max(1) as f64;
     let mut rows: Vec<Row> = rows.into_values().collect();
     for x in &mut rows {
-      x.score = x.msgs().map(|_| crate::swear::score(x.swearing, x.prompts, overall));
+      x.score = x.directed_share().map(|_| crate::swear::score(x.directed, x.prompts, overall));
     }
-    total.score = total.msgs();
+    total.score = total.directed_share();
     (rows, total)
   }
 
@@ -795,28 +795,29 @@ pub mod tests {
     Data::new(sessions, Config::parse(&config, None).unwrap(), jiff::civil::date(2026, 1, 10))
   }
 
-  /// Prompts to four models on 2026-01-09: `sonnet` 100, half with swearing; `small` 10, 60%;
+  /// Prompts to four models on 2026-01-09: `sonnet` 100, half swearing at it; `small` 10, 60%;
   /// `gpt` (Codex) 50, 10%; `tiny` 3, all; one to no known model.
   pub fn swearing() -> Data {
     let tz = jiff::tz::TimeZone::system();
     let at = jiff::civil::date(2026, 1, 9).at(10, 0, 0, 0).to_zoned(tz).unwrap();
     let at = at.timestamp().as_microsecond();
-    // Each model's prompts and words in each, its swear words over the first `swearing` of them.
+    // Each model's prompts and words in each; the first `any` of them swear, the first `directed`
+    // at the model.
     let models = [
-      ("sonnet", Provider::Claude, 100, 20, 100, 50),
-      ("small", Provider::Claude, 10, 10, 30, 6),
-      ("gpt", Provider::Codex, 50, 30, 5, 5),
-      ("tiny", Provider::Claude, 3, 5, 6, 3),
+      ("sonnet", Provider::Claude, 100, 20, 60, 50),
+      ("small", Provider::Claude, 10, 10, 6, 6),
+      ("gpt", Provider::Codex, 50, 30, 20, 5),
+      ("tiny", Provider::Claude, 3, 5, 3, 3),
       ("none", Provider::Claude, 1, 2, 0, 0),
     ];
     let mut sessions = vec![];
-    for (i, (model, prov, prompts, words, swears, swearing)) in models.into_iter().enumerate() {
+    for (i, (model, prov, prompts, words, any, directed)) in models.into_iter().enumerate() {
       let mut s = Session::new(model, true, &format!("{ROOT}/w/api"), prov);
       for k in 0..prompts {
         let ts = at + (i as i64 * 100 + k as i64) * 1_000_000;
-        let swears = if k < swearing { swears / swearing } else { 0 };
+        let (swears, directed) = (u32::from(k < any), k < directed);
         let model = (model != "none").then(|| model.into());
-        let prompt = Prompt { ts, model, words, swears, hash: k as u64 };
+        let prompt = Prompt { ts, model, words, swears, directed, hash: k as u64 };
         s.events.push(Event { ts: Some(ts), prompt: Some(Box::new(prompt)), ..Default::default() });
       }
       sessions.push(s);
@@ -830,21 +831,18 @@ pub mod tests {
     let (rows, total) = data.swears(Span::Week, None);
     let get = |key: &str| rows.iter().find(|x| x.key == key).unwrap();
     let (sonnet, small, gpt, tiny) = (get("sonnet"), get("small"), get("gpt"), get("tiny"));
-    assert_eq!(
-      (sonnet.prompts, sonnet.swearing, sonnet.words, sonnet.swears),
-      (100, 50, 2000, 100)
-    );
-    assert_eq!((total.prompts, total.swearing, total.words, total.swears), (164, 64, 3617, 141));
-    // The raw shares: `small` swears in more of its prompts than `sonnet`, and more per word.
-    assert_eq!((small.msgs(), sonnet.msgs()), (Some(60.0), Some(50.0)));
-    assert_eq!((small.per_1k(), sonnet.per_1k()), (Some(300.0), Some(50.0)));
+    let counts = |x: &Row| (x.prompts, x.directed, x.swearing, x.words);
+    assert_eq!((counts(sonnet), counts(&total)), ((100, 50, 60, 2000), (164, 64, 89, 3617)));
+    // The raw shares: `small` swears at it in more of its prompts than `sonnet`.
+    assert_eq!((small.directed_share(), sonnet.directed_share()), (Some(60.0), Some(50.0)));
+    assert_eq!((gpt.any_share(), sonnet.any_share()), (Some(40.0), Some(60.0)));
     // Shrunk toward the overall 64 / 164, `small`'s 10 prompts score below `sonnet`'s 100.
     let score = |x: &Row| x.score.unwrap();
     let overall = 64.0 / 164.0;
     assert!((score(small) - (6.0 + 30.0 * overall) / 40.0 * 100.0).abs() < 1e-9);
     assert!(score(sonnet) > score(small) && score(small) > score(gpt), "{rows:?}");
-    // Under 10 prompts no rates; the total's score is the overall share.
-    assert_eq!((tiny.per_1k(), tiny.msgs(), tiny.score), (None, None, None));
+    // Under 10 prompts no shares; the total's score is the overall share.
+    assert_eq!((tiny.directed_share(), tiny.any_share(), tiny.score), (None, None, None));
     // The prompt to no known model, under its own name.
     assert_eq!((get(UNKNOWN).label.as_str(), get(UNKNOWN).prompts), ("<unknown>", 1));
     assert!((total.score.unwrap() - overall * 100.0).abs() < 1e-9);

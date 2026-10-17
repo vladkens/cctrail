@@ -506,8 +506,8 @@ fn table(
   grid(f, &columns, lines, total, area, sel, first, hits)
 }
 
-/// The swears tab: per model the prompts to it, the percent with swearing, the words typed, swear
-/// words per 1,000 words and the score; rates from too few prompts dash.
+/// The swears tab: per model the prompts to it, the percent swearing at it, the words typed, the
+/// percent with any swearing and the score; shares of too few prompts dash.
 fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   if app.list.is_empty() {
     return empty(f, app, area, hits);
@@ -525,9 +525,9 @@ fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
       width: Constraint::Fill(1),
     },
     column(Col::Prompts, "Msgs", 6),
-    column(Col::Msgs, "% msgs", 6),
+    column(Col::Directed, "% directed", 10),
     column(Col::Words, "Words", 7),
-    column(Col::Rate, "per 1k", 6),
+    column(Col::Any, "% any", 6),
     column(Col::Score, "Score", 6),
   ];
   // Columns go when the names would get too few cells, never the sorted one.
@@ -536,7 +536,7 @@ fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     widths.push(Constraint::Length(GUTTER - 1));
     layout(&widths, area)[0].width as usize
   };
-  for col in [Col::Rate, Col::Words, Col::Prompts, Col::Msgs] {
+  for col in [Col::Any, Col::Words, Col::Prompts, Col::Directed] {
     if name_width(&columns) >= NAME_MIN {
       break;
     }
@@ -553,8 +553,8 @@ fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     let cell = |col: Col| match col {
       Col::Prompts => num(toks(x.prompts), TEXT),
       Col::Words => num(toks(x.words), TEXT),
-      Col::Rate => rate(x.per_1k(), ""),
-      Col::Msgs => rate(x.msgs(), "%"),
+      Col::Directed => rate(x.directed_share(), "%"),
+      Col::Any => rate(x.any_share(), "%"),
       Col::Score => rate(x.score, ""),
       _ => Cell::from(cut(&x.label, name_width)).style(TEXT),
     };
@@ -848,7 +848,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
     ),
     (
       "swears",
-      "per model: your prompts, % of them with swearing, their words, swear words per 1,000 words; Score (0 to 100) is that % pulled toward your overall one by 30 prompts, so barely used models sit near the average",
+      "per model: your prompts, % swearing at the model (an insult, or a swear word near `you` / `ты`), their words, % with any swearing; Score (0 to 100) is the directed % pulled toward your overall one by 30 prompts, so barely used models sit near the average; past 300 words a prompt counts as pasted",
     ),
     ("?", "this help"),
     ("q", "back; quits from a list"),

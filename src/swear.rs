@@ -8,8 +8,37 @@ use anyhow::{Context, Result, bail};
 
 use crate::model::{Prompt, Provider, Session, Ts};
 
-const BUNDLED: [(&str, &str); 2] =
-  [("en.txt", include_str!("swear/en.txt")), ("ru.txt", include_str!("swear/ru.txt"))];
+/// The dictionaries by file name: `insult-*` ones hold insults.
+const BUNDLED: [(&str, &str); 4] = [
+  ("en.txt", include_str!("swear/en.txt")),
+  ("ru.txt", include_str!("swear/ru.txt")),
+  ("insult-en.txt", include_str!("swear/insult-en.txt")),
+  ("insult-ru.txt", include_str!("swear/insult-ru.txt")),
+];
+
+/// Consecutive lines that don't read as prose, as a pasted log, stack trace or table has.
+const PASTED_LINES: usize = 3;
+/// How near a swear word an addressee makes it aimed at the listener, in words.
+const NEAR: usize = 3;
+/// Addressees, a swear word near one aimed at the listener: second-person pronouns, and the names
+/// of models and agents, Russian ones in their cases (the stems would catch `соль`, `астроном`).
+const ADDRESSEES: &str = "ты тебе тебя тобой тебой твой твоя твое твои твою твоего твоей твоим \
+  твоих you your yours yourself u \
+  астра астры астре астру астрой сол сола солу солом соле луна луны луне луну луной терра терры \
+  терре терру террой опус опуса опусу опусом опусе соннет соннета соннету соннетом фейбл фейбла \
+  фейблу фейблом клод клода клоду клодом клоде кодекс кодекса кодексу кодексом кодексе гпт агент \
+  агента агенту агентом агенте агенты агентов модель модели моделью моделей бот бота боту ботом \
+  боте боты ботов astra sol luna terra opus sonnet fable claude codex gpt agent agents model \
+  models bot bots";
+
+/// What a word is: swearing, swearing only next to an addressee (`>` in an insult file, as
+/// `тупишь`), or an insult, aimed at the listener wherever it is. Of entries alike, the later wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Class {
+  Swear,
+  Near,
+  Insult,
+}
 
 /// In this order an exact word wins over a stem of its length, and an exception over both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -25,19 +54,63 @@ enum Kind {
 #[derive(Debug, Default)]
 pub struct Dict {
   /// Sorted: the entries starting with a prefix follow one another.
-  entries: Vec<(String, Kind)>,
+  entries: Vec<(String, Kind, Class)>,
 }
 
 fn normalize(text: &str) -> String {
   text.to_lowercase().replace('ё', "е")
 }
 
+/// What the user typed in a prompt, without what looks pasted: no harness marks a paste in the
+/// history (Claude Code only in its own `history.jsonl`, and not for every prompt), so code in
+/// backticks, quoted lines (`> `) and runs of `PASTED_LINES` lines that aren't prose go. Typed or
+/// dictated words are prose, usually one long line.
+fn typed(text: &str) -> String {
+  let mut lines: Vec<&str> = vec![];
+  let mut fenced = false;
+  for line in text.lines() {
+    if line.trim_start().starts_with("```") {
+      fenced = !fenced;
+    } else if !fenced && !line.trim_start().starts_with('>') {
+      lines.push(line);
+    }
+  }
+  // Not prose: few letters, a time or date, a path, `key: value`, a table row, a line of code.
+  let pasted = |line: &str| {
+    let text: Vec<char> = line.chars().filter(|x| !x.is_whitespace()).collect();
+    let letters = text.iter().filter(|x| x.is_alphabetic()).count();
+    let digits = |x: &[char]| x.iter().all(|x| x.is_ascii_digit());
+    let time = text.windows(5).any(|x| digits(&x[..2]) && x[2] == ':' && digits(&x[3..]));
+    let date = text.windows(10).any(|x| digits(&x[..4]) && x[4] == '-' && x[7] == '-');
+    let path = line.split_whitespace().any(|x| x.matches('/').count() > 1 || x.contains('\\'));
+    let key = line.trim_start().split_once(": ").is_some_and(|x| !x.0.contains(' '));
+    let code = line.trim_end().ends_with([';', '{', '}']) || line.matches('|').count() > 1;
+    letters * 10 < text.len() * 6 || time || date || path || key || code
+  };
+  let mut keep = vec![true; lines.len()];
+  let mut from = 0;
+  for i in 0..=lines.len() {
+    if i < lines.len() && pasted(lines[i]) {
+      continue;
+    }
+    if i - from >= PASTED_LINES {
+      keep[from..i].fill(false);
+    }
+    from = i + 1;
+  }
+  let kept = lines.iter().zip(keep).filter(|x| x.1).map(|x| *x.0);
+  // Inline code: every other piece between backticks.
+  let text = kept.collect::<Vec<_>>().join("\n");
+  text.split('`').step_by(2).collect::<Vec<_>>().join(" ")
+}
+
 impl Dict {
-  /// The bundled dictionaries and every `*.txt` in `dir`.
+  /// The bundled dictionaries and every `*.txt` in `dir`, `insult-*.txt` the insults.
   pub fn load(dir: Option<&Path>) -> Result<Self> {
     let mut dict = Self::default();
     for (name, text) in BUNDLED {
-      dict.add(text).with_context(|| format!("failed to parse src/swear/{name}"))?;
+      let insults = name.starts_with("insult-");
+      dict.add(text, insults).with_context(|| format!("failed to parse src/swear/{name}"))?;
     }
     let entries = dir.and_then(|x| std::fs::read_dir(x).ok()).into_iter().flatten().flatten();
     let mut files: Vec<PathBuf> = entries.map(|x| x.path()).collect();
@@ -46,7 +119,8 @@ impl Dict {
     for path in files {
       let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-      dict.add(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+      let insults = path.file_name().is_some_and(|x| x.to_string_lossy().starts_with("insult-"));
+      dict.add(&text, insults).with_context(|| format!("failed to parse {}", path.display()))?;
     }
     dict.entries.sort();
     dict.entries.dedup();
@@ -54,10 +128,16 @@ impl Dict {
   }
 
   /// Adds the entries of a dictionary file: one per line, `#` starts a comment.
-  fn add(&mut self, text: &str) -> Result<()> {
+  fn add(&mut self, text: &str, insults: bool) -> Result<()> {
     for (i, line) in text.lines().enumerate() {
       let entry = normalize(line.split('#').next().unwrap_or_default().trim());
-      let (not, x) = entry.strip_prefix('!').map_or((false, entry.as_str()), |x| (true, x));
+      let (near, x) = match entry.strip_prefix('>').filter(|_| insults) {
+        Some(x) => (true, x),
+        None => (false, entry.as_str()),
+      };
+      let class =
+        [Class::Swear, Class::Insult, Class::Near][usize::from(insults) + usize::from(near)];
+      let (not, x) = x.strip_prefix('!').map_or((false, x), |x| (true, x));
       let (stem, x) = x.strip_suffix('*').map_or((false, x), |x| (true, x));
       if entry.is_empty() {
         continue;
@@ -66,24 +146,24 @@ impl Dict {
         bail!("line {}: `{}` is not a word or a stem", i + 1, line.trim());
       }
       let kinds = [Kind::Word, Kind::Stem, Kind::NotWord, Kind::NotStem];
-      self.entries.push((x.to_string(), kinds[usize::from(stem) + 2 * usize::from(not)]));
+      self.entries.push((x.to_string(), kinds[usize::from(stem) + 2 * usize::from(not)], class));
     }
     Ok(())
   }
 
   /// The entry a normalized word matches: an exact word, else the longest stem it starts with.
   /// Each longer prefix of the word narrows the entries to those starting with it.
-  fn find(&self, word: &str) -> Option<String> {
+  fn find(&self, word: &str) -> Option<(String, Class)> {
     let (mut run, mut found) = (self.entries.as_slice(), None);
     for (i, c) in word.char_indices() {
       let end = i + c.len_utf8();
       let prefix = &word[..end];
       run = &run[run.partition_point(|x| x.0.as_str() < prefix)..];
       run = &run[..run.partition_point(|x| x.0.starts_with(prefix))];
-      for (_, kind) in run.iter().take_while(|x| x.0 == prefix) {
+      for (_, kind, class) in run.iter().take_while(|x| x.0 == prefix) {
         match kind {
-          Kind::Stem => found = Some(format!("{prefix}*")),
-          Kind::Word if end == word.len() => found = Some(prefix.to_string()),
+          Kind::Stem => found = Some((format!("{prefix}*"), *class)),
+          Kind::Word if end == word.len() => found = Some((prefix.to_string(), *class)),
           Kind::NotWord if end == word.len() => return None,
           Kind::NotStem => return None,
           _ => {}
@@ -96,11 +176,13 @@ impl Dict {
     found
   }
 
-  /// A prompt's counts: its words (split at anything but letters), the swear words among them
-  /// and a hash of them all. Its text isn't kept. A word right before a `*` is a dictionary entry
-  /// written out (`бля*` in a pasted report), no swearing.
+  /// A prompt's counts, of what the user typed (`typed`), in words split at anything but letters:
+  /// the words, the swear words and insults among them, whether it swears at the listener (an
+  /// insult, or a swear word near a `ты` or a model's name), and a hash of them all. Its text
+  /// isn't kept. A word right before a `*` is a dictionary entry written out (`бля*` in a pasted
+  /// report), no swearing.
   pub fn prompt(&self, ts: Ts, text: &str) -> Prompt {
-    let text = normalize(text);
+    let text = normalize(&typed(text));
     // Each word and whether a `*` follows it.
     let (mut words, mut start): (Vec<(&str, bool)>, Option<usize>) = (vec![], None);
     for (i, c) in text.char_indices().chain([(text.len(), ' ')]) {
@@ -112,13 +194,22 @@ impl Dict {
     }
     let mut hash = DefaultHasher::new();
     words.iter().for_each(|x| x.0.hash(&mut hash));
-    let swears = words.iter().filter(|x| !x.1 && self.find(x.0).is_some()).count();
+    let class = |x: &(&str, bool)| self.find(x.0).filter(|_| !x.1).map(|x| x.1);
+    let classes: Vec<Option<Class>> = words.iter().map(class).collect();
+    let swears = classes.iter().filter(|x| matches!(x, Some(Class::Swear | Class::Insult))).count();
+    let addressee = |i: usize| ADDRESSEES.split_whitespace().any(|x| x == words[i].0);
+    let directed = classes.iter().enumerate().any(|(i, x)| match x {
+      Some(Class::Insult) => true,
+      Some(_) => (i.saturating_sub(NEAR)..(i + NEAR + 1).min(words.len())).any(addressee),
+      None => false,
+    });
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     Prompt {
       ts,
       model: None,
       words: count(words.len()),
       swears: count(swears),
+      directed,
       hash: hash.finish(),
     }
   }
@@ -149,14 +240,14 @@ pub fn take_prompts(sessions: &mut Vec<Session>) -> Vec<(Provider, Prompt)> {
   out
 }
 
-/// Prompts at the user's overall share of prompts with swearing that a model's own prompts are
-/// weighed with: a model with few prompts scores near the overall share, one with many near its
-/// own. By prompts, so one angry prompt full of swearing counts once.
+/// Prompts at the user's overall share of prompts swearing at the listener that a model's own
+/// prompts are weighed with: a model with few prompts scores near the overall share, one with many
+/// near its own. By prompts, so one angry prompt full of swearing counts once.
 pub const PRIOR_PROMPTS: f64 = 30.0;
 /// Fewest prompts to a model for its rates to show.
 pub const MIN_PROMPTS: u64 = 10;
 
-/// The percent of prompts with swearing, shrunk toward the overall share (a fraction) by
+/// The percent of prompts swearing at the listener, shrunk toward the overall share (a fraction) by
 /// `PRIOR_PROMPTS`: empirical-Bayes shrinkage, so a barely used model sorts near the average.
 pub fn score(swearing: u64, prompts: u64, overall: f64) -> f64 {
   (swearing as f64 + PRIOR_PROMPTS * overall) / (prompts as f64 + PRIOR_PROMPTS) * 100.0
@@ -174,7 +265,7 @@ mod tests {
   /// The entries the words of a text match, one per word.
   fn matches(dict: &Dict, text: &str) -> Vec<String> {
     let text = normalize(text);
-    text.split(|c: char| !c.is_alphabetic()).filter_map(|x| dict.find(x)).collect()
+    text.split(|c: char| !c.is_alphabetic()).filter_map(|x| dict.find(x).map(|x| x.0)).collect()
   }
 
   #[test]
@@ -261,7 +352,7 @@ mod tests {
       ("заебал", "заеб*"),
       ("выёбывается", "выеб*"),
       ("отъебись", "отъеб*"),
-      ("уёбок", "уеб*"),
+      ("уёбок", "уебок*"),
       ("съебался", "съеб*"),
       ("проебал", "проеб*"),
       ("наебалово", "наеб*"),
@@ -342,9 +433,17 @@ mod tests {
   fn reads_entries_and_exceptions() {
     let mut dict = Dict::default();
     let text = "# a comment\n\nfoo  # trailing\nba*\nbar*\n!bark*\n!bas\nЁЖ*\nbaz\nbaz*\n";
-    dict.add(text).unwrap();
+    dict.add(text, false).unwrap();
+    dict.add("insult*\n>near\nfoo\n", true).unwrap();
     dict.entries.sort();
-    let find = |x: &str| dict.find(x);
+    let find = |x: &str| dict.find(x).map(|x| x.0);
+    let class = |x: &str| dict.find(x).map(|x| x.1);
+    // Insults and words that count only near an addressee; an insult over a swear word alike.
+    assert_eq!(
+      (class("insults"), class("near"), class("foo")),
+      (Some(Class::Insult), Some(Class::Near), Some(Class::Insult))
+    );
+    assert_eq!(class("baz"), Some(Class::Swear));
     // An exact word over a stem, the longest stem, an exception over both.
     assert_eq!(find("foo"), Some("foo".into()));
     assert_eq!(find("food"), None);
@@ -360,7 +459,7 @@ mod tests {
     assert_eq!(find("ежик"), Some("еж*".into()));
 
     for bad in ["two words", "*", "!", "f*ck", "sh1t"] {
-      let err = Dict::default().add(&format!("ok\n{bad}\n")).unwrap_err().to_string();
+      let err = Dict::default().add(&format!("ok\n{bad}\n"), false).unwrap_err().to_string();
       assert!(err.contains("line 2:"), "{err}");
     }
   }
@@ -393,6 +492,82 @@ mod tests {
     // Entries written out, as in a pasted report, are words but no swearing.
     let x = dict.prompt(1, "блядь, top words: бля* 9230, еб* 31, fuck *");
     assert_eq!((x.words, x.swears), (6, 2));
+  }
+
+  #[test]
+  fn tells_swearing_at_the_listener() {
+    let dict = bundled();
+    let directed = [
+      "ты тупой",
+      "что за херню ты сделал",
+      "you idiot",
+      "fuck you",
+      "Ты опять тупишь",
+      "агент, блядь, ну сколько можно",
+      "claude, wtf",
+      "Астра, ну ты и дура",
+      "астра тупая",
+      "сука, астра, опять сломала",
+      "ебаная астра",
+      "кодексу пиздец",
+      "this model is fucking slow",
+      "мразь",
+      "ну ты и дебил",
+      "this is stupid",
+      "what the fuck are you doing",
+      "твою мать, блядь",
+      "ебаный ты кретин",
+      "you're fucking useless",
+      "долбоеб, переделай",
+    ];
+    for x in directed {
+      assert!(dict.prompt(0, x).directed, "{x}");
+    }
+    let passing = [
+      "хер пойми как отсортировано",
+      "бля, опять дождь",
+      "this is fucking great",
+      "комп тупит, блядь",
+      "тупик в логике, сука",
+      "тупо скопируй файл",
+      "сделай даунгрейд пакета",
+      "shit, the build broke again",
+      "блядь, ну и где здесь ошибка, в этом коде",
+      "you wrote `бля*` in the list",
+      "пересоли, соль блядь не та",
+      "астроном, блядь, ошибся",
+      "дурацкий баг",
+    ];
+    for x in passing {
+      assert!(!dict.prompt(0, x).directed, "{x}");
+    }
+    // Three words apart at most; any swearing counts the insults too.
+    assert!(dict.prompt(0, "ты сделал это, бля").directed);
+    assert!(!dict.prompt(0, "ты сделал это опять вчера, бля").directed);
+    assert_eq!(dict.prompt(0, "ты тупишь").swears, 0);
+    assert_eq!(dict.prompt(0, "ты идиот, блядь").swears, 2);
+  }
+
+  #[test]
+  fn counts_only_what_was_typed() {
+    let dict = bundled();
+    // A pasted log, a quote and code, then the user's own sentence: only the sentence counts.
+    let text = "2026-10-17 12:00:01 ERROR db: fuck, connection refused\n\
+      2026-10-17 12:00:02 WARN retry: shit\n    at src/db/pool.rs:42\n\
+      > fuck you, said the docs\n```\nlet fuck = you;\n```\nрасскажи про `fuck you`\n\
+      ну и что за херню ты сделал";
+    let x = dict.prompt(0, text);
+    assert_eq!((x.words, x.swears, x.directed), (9, 1, true));
+    // A typed paragraph, however long, and up to two odd lines count whole.
+    let text = "Слушай, ты всё сломал, блядь, давай нормально: прочитай файл, найди ошибку \
+      и исправь её, а потом запусти тесты и покажи, что всё работает, без этой херни.";
+    let x = dict.prompt(0, text);
+    assert_eq!((x.words, x.swears, x.directed), (26, 2, true));
+    let x = dict.prompt(0, "fuck you\n/usr/lib/x\nkey: value");
+    assert_eq!((x.words, x.swears, x.directed), (7, 1, true));
+    // A table: its rows go.
+    let x = dict.prompt(0, "| a | b |\n| fuck | you |\n| x | y |\nok");
+    assert_eq!((x.words, x.swears), (1, 0));
   }
 
   #[test]
