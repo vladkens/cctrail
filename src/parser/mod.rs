@@ -2,6 +2,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod pi;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -15,18 +16,24 @@ use serde::{Deserialize, Deserializer};
 
 use crate::model::{Provider, Session, Ts};
 
-/// All sessions of both harnesses, or of one.
+/// All sessions of every harness, or of one.
 pub fn parse_history(provider: Option<Provider>) -> Vec<Session> {
-  let claude = || match provider {
-    Some(Provider::Codex) => vec![],
-    _ => claude::parse(&history_roots("CLAUDE_CONFIG_DIR", ".claude")),
+  let want = |x: Provider| provider.is_none_or(|p| p == x);
+  let claude = || match want(Provider::Claude) {
+    true => claude::parse(&history_roots("CLAUDE_CONFIG_DIR", ".claude")),
+    false => vec![],
   };
-  let codex = || match provider {
-    Some(Provider::Claude) => vec![],
-    _ => codex::parse(&history_roots("CODEX_HOME", ".codex")),
+  let codex = || match want(Provider::Codex) {
+    true => codex::parse(&history_roots("CODEX_HOME", ".codex")),
+    false => vec![],
   };
-  let (mut sessions, other) = rayon::join(claude, codex);
-  sessions.extend(other);
+  let pi = || match want(Provider::Pi) {
+    true => pi::parse(&pi::roots()),
+    false => vec![],
+  };
+  let (mut sessions, (codex, pi)) = rayon::join(claude, || rayon::join(codex, pi));
+  sessions.extend(codex);
+  sessions.extend(pi);
   sessions
 }
 
@@ -218,6 +225,14 @@ impl Val {
     match self {
       Self::Int(x) if *x >= 0 => u64::try_from(*x).unwrap_or(u64::MAX),
       _ => 0,
+    }
+  }
+
+  pub fn float(&self) -> Option<f64> {
+    match self {
+      Self::Int(x) => Some(*x as f64),
+      Self::Float(x) => Some(*x),
+      _ => None,
     }
   }
 

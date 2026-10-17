@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"pi-artifact-1","timestamp":"2026-01-05T12:00:00.000Z","cwd":"/repo"}
+{"type":"message","id":"d0000001","parentId":null,"timestamp":"2026-01-05T12:00:01.000Z","message":{"role":"assistant","model":"gpt-5","usage":{"input":999,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":1000},"stopReason":"stop","timestamp":1767614401000}}

@@ -4,7 +4,8 @@
 //! Colors from the terminal's own palette, the same for an entity on every screen: names and counts
 //! in the default foreground, time yellow, cost green; the picked period, tab and choice cyan; dark
 //! gray only for borders, headers, separators, hints and the other choices. The selected row is one
-//! even subtle bar across its width. Tables keep an equal gutter left (the `▶` column) and right.
+//! reversed band in the text color, as macmon's. Tables keep an equal gutter left (the `▶` column)
+//! and right.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -28,8 +29,9 @@ const TIME: Style = Style::new().fg(Color::Yellow);
 const COST: Style = Style::new().fg(Color::Green);
 /// A value that isn't there (`–`): faint in the default color, so it shows on the selected row.
 const NONE: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::DIM);
-/// The selected row: a background only, so every cell keeps its own text color.
-const SELECTED: Style = Style::new().bg(Color::Indexed(236));
+/// The selected row, as macmon's: one reversed band in the text color, no cell's own colors on
+/// it, readable on light and dark themes.
+const SELECTED: Style = Style::new().fg(Color::Reset).add_modifier(Modifier::REVERSED);
 const VERSION: &str = concat!("cctrail v", env!("CARGO_PKG_VERSION"));
 /// The room on the right of a table and around the chart.
 const GUTTER: u16 = 2;
@@ -222,7 +224,7 @@ fn header(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     spans.push(span);
   }
   f.render_widget(Line::from(spans), line);
-  let provider = app.prov.map_or("claude+codex", |x| x.name());
+  let provider = app.prov.map_or("claude+codex+pi", |x| x.name());
   let w = provider.len() as u16;
   if x + 2 + w <= line.right() {
     let at = Rect::new(line.right() - w, line.y, w, 1);
@@ -651,10 +653,18 @@ fn chart(f: &mut Frame, app: &App, outer: Rect, hits: &mut Hits) {
     }
     for line in 0..height as usize {
       let y = bars.bottom() - 1 - line as u16;
-      let c = if i == sel { Color::Reset } else { colors.get(line).copied().unwrap_or(OTHER) };
+      let c = colors.get(line).copied().unwrap_or(OTHER);
       for w in 0..width as u16 {
         buf[(x + w, y)].set_symbol(bar_cell(eighths, line)).set_style(Style::new().fg(c));
       }
+    }
+    // The selected bar keeps its models' colors, marked by a `▼` over its top: in the row above
+    // it, on the top row over its top cell when it reaches there.
+    if i == sel {
+      let top = (eighths.div_ceil(8) as u16).min(height.saturating_sub(1));
+      let y = bars.bottom() - 1 - top;
+      let mark = Style::new().fg(Color::Cyan);
+      buf[(x + width as u16 / 2, y)].set_symbol("▼").set_style(mark);
     }
     hits.bars.push((Rect::new(x, bars.y, width as u16, height + 2), *index));
   }
@@ -765,7 +775,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
     ("Home End", "the first / last row"),
     ("s", "sort by the next column; on the timeline: bars of time / tokens / cost"),
     ("S", "reverse the sort"),
-    ("p", "provider: both / claude / codex"),
+    ("p", "provider: all / claude / codex / pi"),
     ("/", "filter by name"),
     (
       "mouse",

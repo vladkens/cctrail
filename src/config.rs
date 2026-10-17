@@ -158,7 +158,7 @@ fn split_project(value: &str) -> Option<(&str, &str)> {
   }
 }
 
-fn expand_path(value: &str, home: Option<&Path>) -> Result<PathBuf> {
+pub fn expand_path(value: &str, home: Option<&Path>) -> Result<PathBuf> {
   let path = match value.strip_prefix('~') {
     Some(rest) if rest.is_empty() || rest.starts_with('/') => {
       let Some(home) = home else { bail!("cannot expand ~ without HOME") };

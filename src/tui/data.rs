@@ -195,8 +195,8 @@ impl Data {
       let row = rows.entry(key(s, e)).or_insert_with_key(|key| row_of(key));
       let usage = e.usage.unwrap_or_default();
       row.tokens = row.tokens.saturating_add(usage.total());
-      row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
-      row.unpriced |= pricing::price(s.provider, e.model.as_deref(), e.ts).is_none();
+      row.cost += pricing::cost(s.provider, e);
+      row.unpriced |= !pricing::priced(s.provider, e);
     }
     rows.into_values().collect()
   }
@@ -232,10 +232,11 @@ impl Data {
       }
       let part = |e: &Event| {
         let effort = e.effort.as_deref().unwrap_or(UNKNOWN);
-        // A failed response answered nothing: the time stays with the model before it.
+        // A failed response answered nothing, cache warming ran unattended: the time stays with
+        // the model before it.
         e.model
           .as_ref()
-          .filter(|_| !e.failed)
+          .filter(|_| e.active())
           .map(|_| format!("{}\0{}\0{effort}", model_key(s.provider, model(e)), is_fast(e)))
       };
       // A session that names no model is the unknown one, as its usage is.
@@ -244,7 +245,7 @@ impl Data {
       let project = &self.names[si].0;
       for e in &s.events {
         last = part(e).unwrap_or(last);
-        if let Some(ts) = e.ts.filter(|x| !e.failed && (!range.bounded() || range.contains(*x))) {
+        if let Some(ts) = e.ts.filter(|x| e.active() && (!range.bounded() || range.contains(*x))) {
           stamps.entry(format!("{project}\0{last}")).or_default().push(ts);
         }
       }
@@ -361,7 +362,7 @@ impl Data {
       let row = out.entry(bucket(ts)).or_default().entry(key).or_insert_with_key(|k| row_of(k));
       let usage = e.usage.unwrap_or_default();
       row.tokens = row.tokens.saturating_add(usage.total());
-      row.cost += pricing::cost(s.provider, e.model.as_deref(), e.ts, &usage, e.speed);
+      row.cost += pricing::cost(s.provider, e);
     }
     // Activity stamps, as the timeline counts them, to the model of the session's last response,
     // as in `model_times`; the windows cut at midnight, so a day gets the part of a window from
@@ -369,12 +370,13 @@ impl Data {
     let counted = self.counted(span, prov);
     let mut stamps: HashMap<String, Vec<Ts>> = HashMap::new();
     for s in self.sessions.iter().filter(|s| prov.is_none_or(|p| s.provider == p)) {
-      let key =
-        |e: &Event| e.model.as_ref().filter(|_| !e.failed).map(|_| model_key(s.provider, model(e)));
+      let key = |e: &Event| {
+        e.model.as_ref().filter(|_| e.active()).map(|_| model_key(s.provider, model(e)))
+      };
       let mut last = s.events.iter().find_map(key).unwrap_or(model_key(s.provider, "unknown"));
       for e in &s.events {
         last = key(e).unwrap_or(last);
-        if let Some(ts) = e.ts.filter(|x| !e.failed && counted(s, *x)) {
+        if let Some(ts) = e.ts.filter(|x| e.active() && counted(s, *x)) {
           stamps.entry(last.clone()).or_default().push(ts);
         }
       }
@@ -416,7 +418,7 @@ impl Data {
     let mut stamps: HashMap<&str, Vec<Ts>> = HashMap::new();
     for (si, s) in self.sessions.iter().enumerate() {
       if prov.is_none_or(|p| s.provider == p) {
-        let mine = s.events.iter().filter(|e| !e.failed).filter_map(|e| e.ts);
+        let mine = s.events.iter().filter(|e| e.active()).filter_map(|e| e.ts);
         stamps
           .entry(self.names[si].0.as_str())
           .or_default()
@@ -906,6 +908,36 @@ pub mod tests {
     let day = data.timeline(Span::Month, None, None).into_iter().find(|x| x.tokens > 0).unwrap();
     assert_eq!((total.sessions, day.sessions), (Some(0), Some(0)));
     assert_eq!(data.bucket_sessions(Span::Month, None, &[day.day.unwrap()]), 0);
+  }
+
+  #[test]
+  fn cache_warming_owns_no_time() {
+    // Model A at high effort, cache warming on B, then a prompt: its time stays with A, high.
+    let mut s = session("s", &[(600, Some("a"), 10), (602, Some("b"), 10), (604, None, 0)]);
+    s.events[0].effort = Some("high".into());
+    s.events[1].background = true;
+    let data = data_with(vec![s], jiff::civil::date(2026, 1, 10));
+    let times = |rows: Vec<Row>| -> Vec<(String, i64)> {
+      rows.into_iter().map(|x| (x.key, x.active.unwrap_or(0) / 60_000_000)).collect()
+    };
+    let models = times(data.models(Span::All, None, None));
+    assert!(
+      models.contains(&("claude/a".into(), 9))
+        && !models.iter().any(|x| x.0 == "claude/b" && x.1 > 0),
+      "{models:?}"
+    );
+    let [_, effort] = data.model_usage(Span::All, None, "claude/a");
+    assert_eq!(times(effort).iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["high"]);
+    let days = data.bucket_models(Span::Month, None);
+    let keys: Vec<(&str, i64)> = days
+      .values()
+      .flatten()
+      .map(|x| (x.key.as_str(), x.active.unwrap_or(0) / 60_000_000))
+      .collect();
+    assert!(
+      keys.contains(&("claude/a", 9)) && !keys.iter().any(|x| x.0 == "claude/b" && x.1 > 0),
+      "{keys:?}"
+    );
   }
 
   #[test]

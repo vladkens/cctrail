@@ -12,7 +12,7 @@ use jiff::civil::Date;
 
 use crate::config::home_dir;
 use crate::metrics::local_date;
-use crate::model::{Provider, Speed, Ts, Usage};
+use crate::model::{Event, Provider, Speed, Usage};
 
 const BUNDLED: &str = include_str!("pricing.tsv");
 
@@ -153,18 +153,36 @@ fn is_stale(mtime: Option<SystemTime>, now: SystemTime) -> bool {
   mtime.is_none_or(|x| now.duration_since(x).is_ok_and(|x| x > STALE))
 }
 
-/// The price of a model at a moment: the latest set by its local day (the day the reports show
-/// it under), the first one before that, the latest for an event without a time.
 /// Models without a price of their own, billed as another model at its price on the same day.
 const ALIASES: &[(&str, &str)] = &[
   // Codex's approval reviewer: not on models.dev, it runs on the small model.
   ("codex-auto-review", "gpt-6-luna"),
 ];
 
-pub fn price(provider: Provider, model: Option<&str>, ts: Option<Ts>) -> Option<&'static Price> {
-  lookup(&catalog().0, provider, model.unwrap_or(""), ts.map(local_date))
+/// Estimated dollars of an event at the price of its day; for a model the catalog lacks, the
+/// harness's own estimate, else 0.
+pub fn cost(provider: Provider, event: &Event) -> f64 {
+  estimate(&catalog().0, provider, event).unwrap_or(0.0)
 }
 
+/// Whether an event has a cost: its model is in the catalog or the harness estimated it.
+pub fn priced(provider: Provider, event: &Event) -> bool {
+  estimate(&catalog().0, provider, event).is_some()
+}
+
+fn estimate(catalog: &Catalog, provider: Provider, e: &Event) -> Option<f64> {
+  if e.summed && e.cost.is_some() {
+    return e.cost;
+  }
+  let day = e.ts.map(local_date);
+  match lookup(catalog, provider, e.model.as_deref().unwrap_or(""), day) {
+    Some(x) => Some(x.cost(&e.usage.unwrap_or_default(), e.speed)),
+    None => e.cost,
+  }
+}
+
+/// The price of a model at a moment: the latest set by its local day (the day the reports show
+/// it under), the first one before that, the latest for an event without a time.
 fn lookup<'a>(
   catalog: &'a Catalog,
   p: Provider,
@@ -172,23 +190,21 @@ fn lookup<'a>(
   day: Option<Date>,
 ) -> Option<&'a Price> {
   let model = ALIASES.iter().find(|x| x.0 == model).map_or(model, |x| x.1);
-  pick(catalog.get(p.pricing_key())?.get(model)?, day)
+  let find =
+    |model: &str| p.catalogs().iter().find_map(|x| pick(catalog.get(*x)?.get(model)?, day));
+  // pi names a model by its date (`claude-opus-4-1-20250805`) where the catalog may know only
+  // its undated id.
+  let undated = || {
+    let (id, date) = model.rsplit_once('-')?;
+    (p == Provider::Pi && date.len() == 8 && date.bytes().all(|c| c.is_ascii_digit()))
+      .then(|| find(id))?
+  };
+  find(model).or_else(undated)
 }
 
 fn pick(prices: &[Price], day: Option<Date>) -> Option<&Price> {
   let i = day.map_or(prices.len(), |day| prices.partition_point(|x| x.since <= day));
   prices.get(i.saturating_sub(1))
-}
-
-/// Estimated dollars at the price of the event's day; 0 for a model the catalog lacks.
-pub fn cost(
-  provider: Provider,
-  model: Option<&str>,
-  ts: Option<Ts>,
-  usage: &Usage,
-  speed: Option<Speed>,
-) -> f64 {
-  price(provider, model, ts).map_or(0.0, |x| x.cost(usage, speed))
 }
 
 impl Price {
@@ -325,6 +341,47 @@ mod tests {
     let luna = lookup(&catalog, Provider::Codex, "gpt-6-luna", day).unwrap();
     assert_eq!(lookup(&catalog, Provider::Codex, "codex-auto-review", day), Some(luna));
     assert_eq!(lookup(&catalog, Provider::Claude, "codex-auto-review", day), None);
+  }
+
+  #[test]
+  fn finds_the_models_pi_calls() {
+    let catalog = parse(BUNDLED).unwrap();
+    let day = Some(jiff::civil::date(2026, 10, 1));
+    // pi's in either catalog, Claude Code's and Codex's only in their own.
+    let opus = lookup(&catalog, Provider::Claude, "claude-opus-4-6", day).unwrap();
+    assert_eq!(lookup(&catalog, Provider::Pi, "claude-opus-4-6", day), Some(opus));
+    assert_eq!(lookup(&catalog, Provider::Codex, "claude-opus-4-6", day), None);
+    let gpt = lookup(&catalog, Provider::Codex, "gpt-5.4", day).unwrap();
+    assert_eq!(lookup(&catalog, Provider::Pi, "gpt-5.4", day), Some(gpt));
+    assert_eq!(lookup(&catalog, Provider::Claude, "gpt-5.4", day), None);
+
+    // Vertex's dated ids from the catalog, by their date or else without it.
+    for id in ["claude-3-7-sonnet-20250219", "claude-sonnet-4-20250514"] {
+      assert!(lookup(&catalog, Provider::Pi, id, day).is_some(), "{id}");
+    }
+    let opus = lookup(&catalog, Provider::Pi, "claude-opus-4-6", day);
+    assert_eq!(lookup(&catalog, Provider::Pi, "claude-opus-4-6-20990101", day), opus);
+    assert_eq!(lookup(&catalog, Provider::Claude, "claude-opus-4-6-20990101", day), None);
+  }
+
+  #[test]
+  fn falls_back_to_the_harness_estimate() {
+    let catalog = parse(&tsv(&["anthropic claude-m 2026-01-01 1 2", "openai n 2026-01-01 1 2"]));
+    let catalog = catalog.unwrap();
+    let event = |model: &str, cost| Event {
+      model: Some(model.into()),
+      usage: Some(Usage { input: 1_000_000, ..Default::default() }),
+      cost,
+      ..Default::default()
+    };
+    // The catalog's price wins over pi's; without either the event has no price.
+    assert_eq!(estimate(&catalog, Provider::Pi, &event("claude-m", Some(9.0))), Some(1.0));
+    assert_eq!(estimate(&catalog, Provider::Pi, &event("glm-5", Some(0.25))), Some(0.25));
+    assert_eq!(estimate(&catalog, Provider::Pi, &event("glm-5", None)), None);
+    // Usage summed over several requests at the harness's estimate, else the catalog's.
+    let summed = |cost| Event { summed: true, ..event("claude-m", cost) };
+    assert_eq!(estimate(&catalog, Provider::Pi, &summed(Some(0.5))), Some(0.5));
+    assert_eq!(estimate(&catalog, Provider::Pi, &summed(None)), Some(1.0));
   }
 
   #[test]

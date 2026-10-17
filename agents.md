@@ -1,8 +1,8 @@
 # cctrail
 
-A small Rust CLI that reads local Claude Code and Codex history and reports, per project, active
-time, tokens and estimated cost. Its one user is the author: keep the CLI minimal and the numbers
-right. Agents carry out each change end to end by following this file; plan in
+A small Rust CLI that reads local Claude Code, Codex and pi history and reports, per project,
+active time, tokens and estimated cost. Its one user is the author: keep the CLI minimal and the
+numbers right. Agents carry out each change end to end by following this file; plan in
 [docs/roadmap.md](docs/roadmap.md).
 
 Each fact has one source, which this file points to: the CLI is `cctrail --help`, the config format
@@ -11,15 +11,16 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 
 ## Scope
 
-- Read history only: never write into `~/.claude` or `~/.codex`. cctrail writes only under
+- Read history only: never write into `~/.claude`, `~/.codex` or `~/.pi`. cctrail writes only under
   `~/.cache/cctrail`, and uses the network only to fetch the price catalog from the `pricing`
   release: on `cctrail update-pricing`, and in the background when the cached one is a day old
   (`CCTRAIL_NO_UPDATE=1` turns that off; tests set it).
 - Prices are dated: `scripts/pricing-history.py` builds them from the models.dev git history, the
   daily `pricing.yml` workflow publishes them. Price an event at its day's rate, never at today's.
-- Support Claude Code (`~/.claude/projects`, `CLAUDE_CONFIG_DIR`) and Codex (`~/.codex/sessions`
-  and `archived_sessions`, `CODEX_HOME`). Add another harness only on request, as its own
-  `src/parser/<harness>.rs`.
+- Support Claude Code (`~/.claude/projects`, `CLAUDE_CONFIG_DIR`), Codex (`~/.codex/sessions`
+  and `archived_sessions`, `CODEX_HOME`) and pi (`~/.pi/agent/sessions`, `PI_CODING_AGENT_DIR`,
+  `PI_CODING_AGENT_SESSION_DIR`, the `sessionDir` setting). Add another harness only on request,
+  as its own `src/parser/<harness>.rs`.
 - Keep the build fast: prefer a small own routine to a generic dependency that compiles far more
   code than cctrail uses (`cargo build --timings`). The dependencies are serde/serde_json (history
   and JSON output), toml (config), jiff (local time zones), rayon (parallel parsing), anyhow, ureq
@@ -34,9 +35,9 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 ## Code
 
 - One binary crate, flat modules: `cli` (arguments, commands), `config`, `model`,
-  `parser/{claude,codex}`, `workdir` (worktrees and same-named clones folded into their
+  `parser/{claude,codex,pi}`, `workdir` (worktrees and same-named clones folded into their
   repository), `metrics`, `output` (tables, JSON), `pricing`, `tui` (the interactive view, on the
-  same accounting). Keep it within ~3500 lines of Rust, tests excluded; simplify before growing
+  same accounting). Keep it within ~7000 lines of Rust, tests excluded; simplify before growing
   past it.
 - Treat history as untrusted input: harnesses change formats and leave truncated lines. Skip what
   doesn't parse, never panic or fail the run on it.
@@ -58,8 +59,7 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 - `make compare REF=<binary>` runs the branch and a reference build (usually `main`) on the local
   history: totals must match (tokens, sessions and first/last activity exact, costs within 1e-9,
   active time within a second per group), and it lists how groups and periods moved. When grouping
-  changes on purpose, describe in the PR body which rule moved what, without the numbers. The Rust
-  port matched the Python cctrail 0.2.1 exactly.
+  changes on purpose, describe in the PR body which rule moved what, without the numbers.
 - Unit-test logic that can break silently, inline in `#[cfg(test)] mod tests`: deduplication,
   subagent linking, fork replay, activity windows and their split by day and between projects, date
   ranges, config mapping, pricing. `tests/` holds end-to-end CLI tests on `tests/fixtures/`.

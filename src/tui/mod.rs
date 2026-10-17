@@ -436,7 +436,8 @@ impl App {
     self.prov = match self.prov {
       None => Some(Provider::Claude),
       Some(Provider::Claude) => Some(Provider::Codex),
-      Some(Provider::Codex) => None,
+      Some(Provider::Codex) => Some(Provider::Pi),
+      Some(Provider::Pi) => None,
     }
   }
 
@@ -759,15 +760,17 @@ mod tests {
       assert_eq!(l.chars().count() - l.trim_end().chars().count(), 2, "gutter on {l:?}");
     }
     assert!(line(&buf, sel - 1).trim_end().ends_with("Share"));
-    // Selected row: one subtle bar inside the box, nothing reversed, colors kept.
+    // Selected row, as macmon's: one reversed band in the text color across the box, no cell's
+    // own color or background on it; the other rows keep theirs: time yellow, cost green.
     for x in 1..buf.area.width - 1 {
-      assert_eq!(buf[(x, sel)].bg, Color::Indexed(236), "column {x}");
-      assert!(!buf[(x, sel)].modifier.contains(Modifier::REVERSED), "column {x}");
+      let cell = &buf[(x, sel)];
+      assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "column {x}");
+      assert!(cell.modifier.contains(Modifier::REVERSED), "column {x}");
     }
     let row = &app.list[0];
-    assert_eq!(fg(&buf, sel, &row.label), Color::Reset);
-    assert_eq!(fg(&buf, sel, &crate::output::duration(row.active.unwrap())), Color::Yellow);
-    assert_eq!(fg(&buf, sel, "$"), Color::Green);
+    assert_eq!(fg(&buf, total, &crate::output::duration(row.active.unwrap())), Color::Yellow);
+    assert_eq!(fg(&buf, total, "$"), Color::Green);
+    assert!(!buf[(4, total)].modifier.contains(Modifier::REVERSED));
     // Headers bold, the sorted one in the text color, the others gray, as macmon's.
     assert_eq!(fg(&buf, sel - 1, "Time ↓"), Color::Reset);
     assert_eq!(fg(&buf, sel - 1, "Tokens"), Color::DarkGray);
@@ -776,7 +779,7 @@ mod tests {
     assert!((0..buf.area.width).all(|x| !buf[(x, 0)].modifier.contains(Modifier::REVERSED)));
     assert_eq!(fg(&buf, 1, "All"), Color::Cyan);
     assert_eq!(fg(&buf, 1, "Week"), Color::DarkGray);
-    assert_eq!(fg(&buf, 1, "claude+codex"), Color::Reset);
+    assert_eq!(fg(&buf, 1, "claude+codex+pi"), Color::Reset);
     assert_eq!(fg(&buf, 0, "cctrail v"), Color::Reset);
     assert_eq!(fg(&buf, 0, "Projects"), Color::Cyan);
     assert_eq!(fg(&buf, 0, "Models"), Color::DarkGray);
@@ -945,11 +948,14 @@ mod tests {
     click(&mut app, col(&buf, 1, "Week"), 1);
     assert_eq!(app.span, Span::Week);
     click(&mut app, col(&buf, 1, "All"), 1);
-    click(&mut app, col(&buf, 1, "claude+codex"), 1);
+    click(&mut app, col(&buf, 1, "claude+codex+pi"), 1);
     assert_eq!(app.prov, Some(Provider::Claude));
     let buf = frame(&app);
     click(&mut app, col(&buf, 1, "claude") + 1, 1);
     click(&mut app, col(&buf, 1, "claude") + 1, 1);
+    assert_eq!(app.prov, Some(Provider::Pi));
+    let buf = frame(&app);
+    click(&mut app, col(&buf, 1, " pi") + 1, 1);
     assert_eq!(app.prov, None);
     click(&mut app, col(&buf, 0, "Models 2"), 0);
     assert_eq!(app.tab, Tab::Models);
@@ -997,6 +1003,7 @@ mod tests {
     press(&mut app, KeyCode::Char('p'));
     let open = app.open.as_ref().unwrap();
     assert!(open.rows().into_iter().all(|x| x.key.starts_with("codex/")));
+    press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Esc);
     assert!(app.open.is_none());
@@ -1076,7 +1083,7 @@ mod tests {
       // keys right and the unpriced note left, cut to fit; its title the filter.
       let (top, bottom) = (raw(&buf, 0), raw(&buf, height - 1));
       assert!(top.contains("Timeline 3") && top.contains("cctrail v"), "{top}");
-      assert!(raw(&buf, 1).contains("All") && raw(&buf, 1).contains("claude+codex"));
+      assert!(raw(&buf, 1).contains("All") && raw(&buf, 1).contains("claude+codex+pi"));
       assert!(bottom.contains("? help | quit") && raw(&buf, 3).contains("/ filter"), "{bottom}");
       assert!(bottom.contains(" unpriced 37.8"), "{bottom}");
       // A sort arrow fits its column and keeps the headers apart.
@@ -1182,14 +1189,19 @@ mod tests {
     let axis_line = line(&buf, axis);
     assert!(axis_line.ends_with("━  ") && fg(&buf, axis, "━") == Color::Cyan, "{out}");
     assert!(line(&buf, axis + 1).trim_end().ends_with("01-10"), "{out}");
-    // ↓ selects the day before: its bar marked with the selection's background.
+    // ↓ selects the day before: its bar keeps its models' colors, a cyan `▼` right over its top.
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Down);
     assert_eq!(app.list[app.sel()].day.unwrap(), jiff::civil::date(2026, 1, 8));
     let buf = frame(&app);
     let (rect, _) = *app.hits.borrow().bars.iter().find(|x| x.1 == app.sel()).unwrap();
-    let low = rect.bottom() - 3;
-    assert_eq!((buf[(rect.x, low)].fg, buf[(rect.x, low)].bg), (Color::Reset, Color::Reset));
+    let (mid, low) = (rect.x + rect.width / 2, rect.bottom() - 3);
+    let blocks = (rect.y..=low).rev().take_while(|y| "▁▂▃▄▅▆▇█".contains(buf[(mid, *y)].symbol()));
+    let blocks: Vec<u16> = blocks.collect();
+    assert!(!blocks.is_empty(), "{}", screen_of(&buf));
+    assert!(blocks.iter().all(|y| matches!(buf[(mid, *y)].fg, Color::Indexed(_))));
+    let mark = blocks.last().unwrap() - 1;
+    assert_eq!((buf[(mid, mark)].symbol(), buf[(mid, mark)].fg), ("▼", Color::Cyan));
     // `s` or a click on the choice picks what the bars show.
     press(&mut app, KeyCode::Char('s'));
     press(&mut app, KeyCode::Char('s'));
@@ -1285,7 +1297,7 @@ mod tests {
     let colors: Vec<Color> = models.map(|m| square(&buf, m)).to_vec();
     // The same colors whatever the bars show, the period and the provider (a model without a
     // price has no cost to show).
-    for key in ['s', 's', 'T', 't', 't', 'p', 'p'] {
+    for key in ['s', 's', 'T', 't', 't', 'p', 'p', 'p'] {
       press(&mut app, KeyCode::Char(key));
       let buf = frame(&app);
       for (model, color) in models.iter().zip(&colors) {
@@ -1309,7 +1321,9 @@ mod tests {
         .filter(|p| "▁▂▃▄▅▆▇█".contains(buf[*p].symbol()) && buf[*p].fg != Color::Reset)
         .map(|p| buf[p].fg)
         .collect();
-      assert!(drawn.is_subset(&named), "{width}: {}", screen_of(&buf));
+      // With no legend, plain bars: all in the `other` gray.
+      let plain = named.is_empty() && drawn.iter().all(|c| *c == Color::Indexed(245));
+      assert!(plain || drawn.is_subset(&named), "{width}: {}", screen_of(&buf));
       let legend = raw(&buf, 3);
       let squares = legend.matches('■').count();
       assert!(squares != 1 || !legend.contains("■ other"), "{width}: {legend}");
