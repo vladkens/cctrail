@@ -77,9 +77,9 @@ start on Monday. `cctrail --help` lists it all.
 timeline (a chart of the days stacked by model over their list) and swears for today, this week,
 this month, the last 30 days or all time. Press `?` in it to see the keys.
 
-Swears lists per model the words you typed to it, the swear words among them, their rate per 1,000
-words and the share of your prompts with swearing. Score is that rate pulled toward your overall
-one by 2,000 words, so a model you barely used sits near your average instead of at the top.
+Swears lists per model your prompts to it, their words, swear words per 1,000 words, the share of
+prompts with swearing and the swear words in such a prompt. Score is that share pulled toward your
+overall one by 30 prompts, so a model you barely used sits near your average instead of at the top.
 
 <div align="center">
   <img src="docs/images/projects.svg" alt="The projects of cctrail's interactive view for the last 30 days: time, tokens, cost, sessions and share per project, with the total" />
@@ -148,7 +148,7 @@ adds (slash commands and their output, reminders, environment context, skills, n
 summaries of compacted history), no prompts that agents get from a model, and none of `codex exec`
 or the Claude Agent SDK, which scripts and other agents send. A prompt counts toward the model that
 answered last before it, the first ones of a session toward the first to answer; one that a fork
-or a copied file repeats counts once. Rates show from 200 words up. Only each prompt's counts of
+or a copied file repeats counts once. Rates show from 10 prompts up. Only each prompt's counts of
 words and swear words are kept, never its text, and only for the interactive view.
 
 The words come from [`src/swear/en.txt`](src/swear/en.txt) and

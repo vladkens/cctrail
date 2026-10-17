@@ -506,8 +506,9 @@ fn table(
   grid(f, &columns, lines, total, area, sel, first, hits)
 }
 
-/// The swears tab: per model the words typed to it, the swear words among them, their rate per
-/// 1,000 words, the percent of prompts with swearing and the score; rates from too few words dash.
+/// The swears tab: per model the prompts and words typed to it, swear words per 1,000 words, the
+/// percent of prompts with swearing, swear words in such a prompt and the score; rates from too
+/// few prompts dash.
 fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   if app.list.is_empty() {
     return empty(f, app, area, hits);
@@ -524,10 +525,11 @@ fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
       col: Col::Name,
       width: Constraint::Fill(1),
     },
+    column(Col::Prompts, "Msgs", 6),
     column(Col::Words, "Words", 7),
-    column(Col::Swears, "Swears", 6),
     column(Col::Rate, "per 1k", 6),
     column(Col::Msgs, "% msgs", 6),
+    column(Col::PerMsg, "per msg", 7),
     column(Col::Score, "Score", 6),
   ];
   // Columns go when the names would get too few cells, never the sorted one.
@@ -536,7 +538,7 @@ fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     widths.push(Constraint::Length(GUTTER - 1));
     layout(&widths, area)[0].width as usize
   };
-  for col in [Col::Msgs, Col::Swears, Col::Rate, Col::Words] {
+  for col in [Col::PerMsg, Col::Words, Col::Rate, Col::Prompts, Col::Msgs] {
     if name_width(&columns) >= NAME_MIN {
       break;
     }
@@ -551,11 +553,12 @@ fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
       None => num("–".into(), NONE),
     };
     let cell = |col: Col| match col {
+      Col::Prompts => num(toks(x.prompts), TEXT),
       Col::Words => num(toks(x.words), TEXT),
-      Col::Swears => num(toks(x.swears), TEXT),
       Col::Rate => rate(x.per_1k(), ""),
       Col::Msgs => rate(x.msgs(), "%"),
-      Col::Score => rate(x.score, ""),
+      Col::PerMsg => rate(x.per_msg(), ""),
+      Col::Score => rate(x.score, "%"),
       _ => Cell::from(cut(&x.label, name_width)).style(TEXT),
     };
     TableRow::new(columns.iter().map(|c| cell(c.col)).collect::<Vec<_>>())
@@ -848,7 +851,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
     ),
     (
       "swears",
-      "per model: words you typed, swear words, per 1,000 words, % of prompts with swearing; Score is the rate per 1,000 pulled toward your overall one by 2,000 words, so barely used models sit near the average",
+      "per model: your prompts, their words, swear words per 1,000 words, % of prompts with swearing, swear words in such a prompt; Score is that % pulled toward your overall one by 30 prompts, so barely used models sit near the average",
     ),
     ("?", "this help"),
     ("q", "back; quits from a list"),

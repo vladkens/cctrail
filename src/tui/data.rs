@@ -10,7 +10,7 @@ use crate::metrics::{self, DateRange, Granularity, Period};
 use crate::model::{Event, Prompt, Provider, Session, Speed, Ts};
 use crate::output::{self, workdir_label};
 use crate::pricing;
-use crate::swear::MIN_WORDS;
+use crate::swear::MIN_PROMPTS;
 
 /// The periods the header switches between.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,15 +72,25 @@ pub struct Row {
   pub score: Option<f64>,
 }
 
+/// The swears tab's rates, from enough prompts.
 impl Row {
-  /// Swear words per 1,000 words typed, from enough words.
-  pub fn per_1k(&self) -> Option<f64> {
-    (self.words >= MIN_WORDS).then(|| self.swears as f64 * 1000.0 / self.words as f64)
+  fn rate(&self, x: u64, of: u64, by: f64) -> Option<f64> {
+    (self.prompts >= MIN_PROMPTS && of > 0).then(|| x as f64 * by / of as f64)
   }
 
-  /// The percent of the prompts with swearing, from enough words.
+  /// Swear words per 1,000 words typed.
+  pub fn per_1k(&self) -> Option<f64> {
+    self.rate(self.swears, self.words, 1000.0)
+  }
+
+  /// The percent of the prompts with swearing.
   pub fn msgs(&self) -> Option<f64> {
-    (self.words >= MIN_WORDS).then(|| self.swearing as f64 * 100.0 / self.prompts.max(1) as f64)
+    self.rate(self.swearing, self.prompts, 100.0)
+  }
+
+  /// Swear words in a prompt with swearing: how hard, once they swear.
+  pub fn per_msg(&self) -> Option<f64> {
+    self.rate(self.swears, self.swearing, 1.0)
   }
 }
 
@@ -176,8 +186,8 @@ impl Data {
     (rows, row(&total, false))
   }
 
-  /// The words typed to each model in the span and the swear words among them, their rates and
-  /// score, and the total, scored at the overall rate.
+  /// The prompts and words typed to each model in the span, the swearing in them, its rates and
+  /// score, and the total, scored at the overall share of prompts with swearing.
   pub fn swears(&self, span: Span, prov: Option<Provider>) -> (Vec<Row>, Row) {
     let range = span.range(self.today);
     let mut rows: HashMap<String, Row> = HashMap::new();
@@ -194,12 +204,12 @@ impl Data {
         row.swearing += u64::from(x.swears > 0);
       }
     }
-    let overall = total.swears as f64 / total.words.max(1) as f64;
+    let overall = total.swearing as f64 / total.prompts.max(1) as f64;
     let mut rows: Vec<Row> = rows.into_values().collect();
     for x in &mut rows {
-      x.score = x.per_1k().map(|_| crate::swear::score(x.swears, x.words, overall));
+      x.score = x.msgs().map(|_| crate::swear::score(x.swearing, x.prompts, overall));
     }
-    total.score = total.per_1k();
+    total.score = total.msgs();
     (rows, total)
   }
 
@@ -785,27 +795,27 @@ pub mod tests {
     Data::new(sessions, Config::parse(&config, None).unwrap(), jiff::civil::date(2026, 1, 10))
   }
 
-  /// Prompts to four models on 2026-01-09: `sonnet` swears at 50 per 1,000 words in 6,000,
-  /// `small` at 80 in 300, `gpt` (Codex) at 10 in 3,000, `tiny` at 500 in 20.
+  /// Prompts to four models on 2026-01-09: `sonnet` 100, half with swearing; `small` 10, 60%;
+  /// `gpt` (Codex) 50, 10%; `tiny` 3, all.
   pub fn swearing() -> Data {
     let tz = jiff::tz::TimeZone::system();
     let at = jiff::civil::date(2026, 1, 9).at(10, 0, 0, 0).to_zoned(tz).unwrap();
     let at = at.timestamp().as_microsecond();
-    // A model's words over its prompts, its swear words over the first `swearing` of them.
+    // Each model's prompts and words in each, its swear words over the first `swearing` of them.
     let models = [
-      ("sonnet", Provider::Claude, 6000, 300, 10, 6),
-      ("small", Provider::Claude, 300, 24, 3, 3),
-      ("gpt", Provider::Codex, 3000, 30, 10, 2),
-      ("tiny", Provider::Claude, 20, 10, 1, 1),
+      ("sonnet", Provider::Claude, 100, 20, 100, 50),
+      ("small", Provider::Claude, 10, 10, 30, 6),
+      ("gpt", Provider::Codex, 50, 30, 5, 5),
+      ("tiny", Provider::Claude, 3, 5, 6, 3),
     ];
     let mut sessions = vec![];
-    for (i, (model, prov, words, swears, prompts, swearing)) in models.into_iter().enumerate() {
+    for (i, (model, prov, prompts, words, swears, swearing)) in models.into_iter().enumerate() {
       let mut s = Session::new(model, true, &format!("{ROOT}/w/api"), prov);
       for k in 0..prompts {
         let ts = at + (i as i64 * 100 + k as i64) * 1_000_000;
         let swears = if k < swearing { swears / swearing } else { 0 };
         let model = Some(model.into());
-        let prompt = Prompt { ts, model, words: words / prompts, swears, hash: k as u64 };
+        let prompt = Prompt { ts, model, words, swears, hash: k as u64 };
         s.events.push(Event { ts: Some(ts), prompt: Some(Box::new(prompt)), ..Default::default() });
       }
       sessions.push(s);
@@ -819,25 +829,28 @@ pub mod tests {
     let (rows, total) = data.swears(Span::Week, None);
     let get = |key: &str| rows.iter().find(|x| x.key == key).unwrap();
     let (sonnet, small, gpt, tiny) = (get("sonnet"), get("small"), get("gpt"), get("tiny"));
-    assert_eq!((sonnet.words, sonnet.swears, sonnet.prompts, sonnet.swearing), (6000, 300, 10, 6));
-    assert_eq!((total.words, total.swears, total.prompts, total.swearing), (9320, 364, 24, 12));
-    // The raw rates: `small` swears more often than `sonnet`.
     assert_eq!(
-      (small.per_1k(), sonnet.per_1k(), small.msgs()),
-      (Some(80.0), Some(50.0), Some(100.0))
+      (sonnet.prompts, sonnet.swearing, sonnet.words, sonnet.swears),
+      (100, 50, 2000, 100)
     );
-    // Shrunk toward the overall 364 / 9,320, `small`'s 300 words score below `sonnet`'s 6,000.
+    assert_eq!((total.prompts, total.swearing, total.words, total.swears), (163, 64, 3615, 141));
+    // The raw shares: `small` swears in more of its prompts than `sonnet`, and harder.
+    assert_eq!((small.msgs(), sonnet.msgs()), (Some(60.0), Some(50.0)));
+    assert_eq!(
+      (small.per_msg(), sonnet.per_msg(), small.per_1k()),
+      (Some(5.0), Some(2.0), Some(300.0))
+    );
+    // Shrunk toward the overall 64 / 163, `small`'s 10 prompts score below `sonnet`'s 100.
     let score = |x: &Row| x.score.unwrap();
-    let overall = 364.0 / 9320.0;
-    assert!((score(small) - (24.0 + 2000.0 * overall) / 2300.0 * 1000.0).abs() < 1e-9);
+    let overall = 64.0 / 163.0;
+    assert!((score(small) - (6.0 + 30.0 * overall) / 40.0 * 100.0).abs() < 1e-9);
     assert!(score(sonnet) > score(small) && score(small) > score(gpt), "{rows:?}");
-    // Under 200 words no rate; the total's score is the overall rate.
-    assert_eq!((tiny.per_1k(), tiny.msgs(), tiny.score), (None, None, None));
-    assert!((total.score.unwrap() - overall * 1000.0).abs() < 1e-9);
-    // One provider, its own overall rate; nothing in the period, no rows.
+    // Under 10 prompts no rates; the total's score is the overall share.
+    assert_eq!((tiny.per_1k(), tiny.msgs(), tiny.per_msg(), tiny.score), (None, None, None, None));
+    assert!((total.score.unwrap() - overall * 100.0).abs() < 1e-9);
+    // One provider, its own overall share; nothing in the period, no rows.
     let (rows, total) = data.swears(Span::Week, Some(Provider::Codex));
-    assert_eq!((rows.len(), total.score), (1, Some(10.0)));
-    assert_eq!(rows[0].score, Some(10.0));
+    assert_eq!((rows.len(), total.score, rows[0].score), (1, Some(10.0), Some(10.0)));
     assert!(data.swears(Span::Today, None).0.is_empty());
   }
 

@@ -141,16 +141,17 @@ pub fn take_prompts(sessions: &mut Vec<Session>) -> Vec<(Provider, Prompt)> {
   out
 }
 
-/// Words at the user's overall rate a model's own words are weighed with: a model with few words
-/// typed to it scores near the overall rate, one with many near its own.
-pub const PRIOR_WORDS: f64 = 2000.0;
-/// Fewest words typed to a model for its rates to show.
-pub const MIN_WORDS: u64 = 200;
+/// Prompts at the user's overall share of prompts with swearing that a model's own prompts are
+/// weighed with: a model with few prompts scores near the overall share, one with many near its
+/// own. By prompts, so one angry prompt full of swearing counts once.
+pub const PRIOR_PROMPTS: f64 = 30.0;
+/// Fewest prompts to a model for its rates to show.
+pub const MIN_PROMPTS: u64 = 10;
 
-/// Swear words per 1,000 words typed, shrunk toward the overall rate (swear words per word) by
-/// `PRIOR_WORDS`: empirical-Bayes shrinkage, so a barely used model sorts near the average.
-pub fn score(swears: u64, words: u64, overall: f64) -> f64 {
-  (swears as f64 + PRIOR_WORDS * overall) / (words as f64 + PRIOR_WORDS) * 1000.0
+/// The percent of prompts with swearing, shrunk toward the overall share (a fraction) by
+/// `PRIOR_PROMPTS`: empirical-Bayes shrinkage, so a barely used model sorts near the average.
+pub fn score(swearing: u64, prompts: u64, overall: f64) -> f64 {
+  (swearing as f64 + PRIOR_PROMPTS * overall) / (prompts as f64 + PRIOR_PROMPTS) * 100.0
 }
 
 #[cfg(test)]
@@ -418,15 +419,15 @@ mod tests {
 
   #[test]
   fn scores_shrink_toward_the_overall_rate() {
-    // An overall 10 swear words per 1,000: a model with 20 words and 10 of them swear words
-    // scores barely over it, one with 20,000 words at 50 per 1,000 near its own rate.
-    let overall = 0.01;
-    let few = score(10, 20, overall);
-    assert!((few - 30.0 / 2020.0 * 1000.0).abs() < 1e-9 && few < 15.0, "{few}");
-    let many = score(1000, 20_000, overall);
-    assert!((many - 1020.0 / 22_000.0 * 1000.0).abs() < 1e-9 && many > 45.0, "{many}");
-    // The overall rate scores as itself; no words at all, the overall rate.
-    assert!((score(100, 10_000, overall) - 10.0).abs() < 1e-9);
-    assert!((score(0, 0, overall) - 10.0).abs() < 1e-9);
+    // Overall 20% of prompts swear: a model with 2 prompts, both swearing, scores barely over
+    // it, one with 300 prompts at 50% near its own share.
+    let overall = 0.2;
+    let few = score(2, 2, overall);
+    assert!((few - 8.0 / 32.0 * 100.0).abs() < 1e-9 && few < 26.0, "{few}");
+    let many = score(150, 300, overall);
+    assert!((many - 156.0 / 330.0 * 100.0).abs() < 1e-9 && many > 47.0, "{many}");
+    // The overall share scores as itself; no prompts at all, the overall share.
+    assert!((score(20, 100, overall) - 20.0).abs() < 1e-9);
+    assert!((score(0, 0, overall) - 20.0).abs() < 1e-9);
   }
 }

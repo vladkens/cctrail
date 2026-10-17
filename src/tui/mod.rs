@@ -39,11 +39,13 @@ pub enum Col {
   Sessions,
   /// The sorted column's share, Time's when sorted by name.
   Share,
-  /// The swears tab's: words typed, swear words, per 1,000 words, % of prompts, score.
+  /// The swears tab's: prompts, words typed, swear words per 1,000 words, % of prompts with
+  /// swearing, swear words in such a prompt, score.
+  Prompts,
   Words,
-  Swears,
   Rate,
   Msgs,
+  PerMsg,
   Score,
 }
 
@@ -58,7 +60,9 @@ impl Col {
   /// The `s` cycle of a table's columns.
   fn cycle(tab: Tab, sessions: bool) -> &'static [Col] {
     match (tab, sessions) {
-      (Tab::Swears, _) => &[Col::Words, Col::Swears, Col::Rate, Col::Msgs, Col::Score, Col::Name],
+      (Tab::Swears, _) => {
+        &[Col::Prompts, Col::Words, Col::Rate, Col::Msgs, Col::PerMsg, Col::Score, Col::Name]
+      }
       (_, true) => &[Col::Time, Col::Tokens, Col::Cost, Col::Sessions, Col::Name],
       (_, false) => &[Col::Time, Col::Tokens, Col::Cost, Col::Name],
     }
@@ -76,11 +80,12 @@ impl Col {
       Self::Cost => x.cost,
       Self::Sessions => x.sessions.unwrap_or(0) as f64,
       Self::Name | Self::Time | Self::Share => x.active.unwrap_or(0) as f64,
+      Self::Prompts => x.prompts as f64,
       Self::Words => x.words as f64,
-      Self::Swears => x.swears as f64,
-      // A rate from too few words sorts below every other.
+      // A rate from too few prompts sorts below every other.
       Self::Rate => x.per_1k().unwrap_or(-1.0),
       Self::Msgs => x.msgs().unwrap_or(-1.0),
+      Self::PerMsg => x.per_msg().unwrap_or(-1.0),
       Self::Score => x.score.unwrap_or(-1.0),
     }
   }
@@ -264,8 +269,8 @@ impl App {
     // report's, a session on two of them counted once.
     if !needle.is_empty() || self.tab == Tab::Timeline {
       self.total = sum(&list);
-      // The rows' own rate: the overall one of what is shown.
-      self.total.score = self.total.per_1k();
+      // The rows' own share: the overall one of what is shown.
+      self.total.score = self.total.msgs();
     }
     if self.tab == Tab::Timeline {
       let days: Vec<_> = list.iter().filter_map(|x| x.day).collect();
@@ -1378,17 +1383,22 @@ mod tests {
       let buf = frame_of(&app, width, 20);
       assert!(raw(&buf, 0).contains(" Swears 4 "), "{}", raw(&buf, 0));
       let head = cells(&line(&buf, find(&buf, "Model")));
-      assert_eq!(head, ["Model", "Words", "Swears", "per 1k", "% msgs", "Score ↓"], "{width}");
-      // By score: the barely used `small` below `sonnet` though it swears more per word, `tiny`
-      // without enough words last, with dashes.
+      assert_eq!(
+        head,
+        ["Model", "Msgs", "Words", "per 1k", "% msgs", "per msg", "Score ↓"],
+        "{width}"
+      );
+      // By score: `small`'s 10 prompts below `sonnet`'s 100 though more of them swear, `tiny`
+      // without enough prompts last, with dashes.
       let rows: Vec<Vec<String>> = ["sonnet", "small", "gpt", "tiny", "total"]
         .iter()
         .map(|x| cells(&line(&buf, find(&buf, x))))
         .collect();
-      assert_eq!(rows[0], ["sonnet", "6.0K", "300", "50.0", "60.0%", "47.3"], "{width}");
-      assert_eq!(rows[1], ["small", "300", "24", "80.0", "100.0%", "44.4"], "{width}");
-      assert_eq!(rows[3], ["tiny", "20", "10", "–", "–", "–"], "{width}");
-      assert_eq!(rows[4], ["total", "9.3K", "364", "39.1", "50.0%", "39.1"], "{width}");
+      assert_eq!(rows[0], ["sonnet", "100", "2.0K", "50.0", "50.0%", "2.0", "47.5%"], "{width}");
+      assert_eq!(rows[1], ["small", "10", "100", "300.0", "60.0%", "5.0", "44.4%"], "{width}");
+      assert_eq!(rows[2], ["gpt", "50", "1.5K", "3.3", "10.0%", "1.0", "21.0%"], "{width}");
+      assert_eq!(rows[3], ["tiny", "3", "15", "–", "–", "–", "–"], "{width}");
+      assert_eq!(rows[4], ["total", "163", "3.6K", "39.0", "39.3%", "2.2", "39.3%"], "{width}");
       let ys: Vec<u16> =
         ["sonnet", "small", "gpt", "tiny", "total"].iter().map(|x| find(&buf, x)).collect();
       assert!(ys.windows(2).all(|x| x[0] + 1 == x[1]), "{}", screen_of(&buf));
@@ -1397,22 +1407,22 @@ mod tests {
     }
     press(&mut app, KeyCode::Enter);
     assert!(app.open.is_none());
-    // `s` sorts by the next column: after the score the names, then the words; `S` reverses it.
+    // `s` sorts by the next column: after the score the names, then the prompts; `S` reverses it.
     let keys = |app: &App| app.list.iter().map(|x| x.key.clone()).collect::<Vec<_>>();
     press(&mut app, KeyCode::Char('s'));
     assert_eq!(keys(&app), ["gpt", "small", "sonnet", "tiny"]);
     press(&mut app, KeyCode::Char('s'));
-    assert_eq!(app.sort(), (Col::Words, true));
+    assert_eq!(app.sort(), (Col::Prompts, true));
     assert_eq!(keys(&app), ["sonnet", "gpt", "small", "tiny"]);
     press(&mut app, KeyCode::Char('S'));
     assert_eq!(keys(&app), ["tiny", "small", "gpt", "sonnet"]);
-    // The filter totals what it shows, at those rows' own rate.
+    // The filter totals what it shows, at those rows' own share.
     press(&mut app, KeyCode::Char('/'));
     for c in "s".chars() {
       press(&mut app, KeyCode::Char(c));
     }
-    assert_eq!((app.total.words, app.total.swears), (6300, 324));
-    assert!((app.total.score.unwrap() - 324_000.0 / 6300.0).abs() < 1e-9);
+    assert_eq!((app.total.prompts, app.total.swearing), (110, 56));
+    assert!((app.total.score.unwrap() - 5600.0 / 110.0).abs() < 1e-9);
   }
 
   #[test]
