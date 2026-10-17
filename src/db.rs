@@ -10,6 +10,7 @@ use rusqlite::{Connection, OpenFlags, Row, params};
 use crate::cli::VERSION;
 use crate::config::{config_dir, home_dir};
 use crate::model::{Event, Prompt, Provider, Session, Speed, Usage};
+use crate::parser::{fx, history_roots, pi};
 use crate::swear::Dict;
 
 /// The format of an export, in its `meta`: bumped when the tables change.
@@ -20,12 +21,29 @@ const FORMAT_VERSION: &str = "1";
 /// `cctrail export`: the sessions the reports read, imported ones and prompts' swear counts
 /// included. Returns the sessions written.
 pub fn export(file: &Path) -> Result<usize> {
+  outside_history(file)?;
   let dict = Dict::load(config_dir().map(|x| x.join("swear")).as_deref())?;
   let mut sessions = crate::parser::parse_history(None, Some(&dict));
   merge(&mut sessions, None);
   let home = home();
   replace(file, |tmp| write(tmp, &sessions, home.as_deref()))?;
   Ok(sessions.len())
+}
+
+/// Refuses a file in a harness's history directories, which cctrail only reads.
+fn outside_history(file: &Path) -> Result<()> {
+  let dir = file.parent().filter(|x| !x.as_os_str().is_empty()).unwrap_or(Path::new("."));
+  // A missing directory fails the write, with its path.
+  let Ok(dir) = dir.canonicalize() else { return Ok(()) };
+  let mut roots = history_roots("CLAUDE_CONFIG_DIR", ".claude");
+  roots.extend(history_roots("CODEX_HOME", ".codex").into_iter().chain(pi::roots()));
+  roots.push(fx::root());
+  match roots.iter().filter_map(|x| x.canonicalize().ok()).find(|x| dir.starts_with(x)) {
+    Some(x) => {
+      bail!("{} is in the history in {}, which cctrail only reads", file.display(), x.display())
+    }
+    None => Ok(()),
+  }
 }
 
 fn write(path: &Path, sessions: &[Session], home: Option<&str>) -> Result<()> {
@@ -102,7 +120,12 @@ pub fn import(file: &Path) -> Result<Option<usize>> {
   }
 
   std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-  replace(&dest, |tmp| Ok(std::fs::copy(file, tmp).map(|_| ())?))?;
+  replace(&dest, |tmp| {
+    // Into the owner-only file: `fs::copy` would give it the export's mode.
+    let mut out = std::fs::OpenOptions::new().write(true).open(tmp)?;
+    std::io::copy(&mut std::fs::File::open(file)?, &mut out)?;
+    Ok(())
+  })?;
   Ok(Some(sessions.len()))
 }
 
@@ -125,6 +148,9 @@ pub fn merge(sessions: &mut Vec<Session>, provider: Option<Provider>) {
       eprintln!("cctrail: skipped {}: {e:#}", path.display());
       vec![]
     });
+    // The logs win even where they lack what the import has: a Claude agent whose log alone is
+    // gone stays the parent's fallback, with its tokens but not its model, and an fx agent whose
+    // main session is gone gets no share of the tree's usage back.
     let want = |x: &Session| provider.is_none_or(|p| p == x.provider) && !seen.contains(&key(x));
     let mut items: Vec<Session> = items.into_iter().filter(want).collect();
     // fx spreads a tree's usage over its sessions: in a tree already read, a session adds only its
@@ -219,7 +245,13 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<(i64, Event)> {
 /// was.
 fn replace(path: &Path, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
   let tmp = path.with_added_extension(format!("{}.tmp", std::process::id()));
-  let res = write(&tmp).and_then(|_| Ok(std::fs::rename(&tmp, path)?));
+  // Owner-only, as the history is private: SQLite's journal takes the same mode.
+  let mut options = std::fs::OpenOptions::new();
+  options.write(true).create_new(true);
+  #[cfg(unix)]
+  std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+  let res = options.open(&tmp).map_err(Into::into).and_then(|_| write(&tmp));
+  let res = res.and_then(|_| Ok(std::fs::rename(&tmp, path)?));
   if res.is_err() {
     let _ = std::fs::remove_file(&tmp);
   }
@@ -248,7 +280,13 @@ fn home() -> Option<String> {
 /// another platform with this one's separators.
 fn rebase(path: &str, from: Option<&str>, to: Option<&str>) -> String {
   let foreign = if cfg!(windows) { '/' } else { '\\' };
-  match (from.and_then(|x| path.strip_prefix(x)), to) {
+  // Windows paths compare with either separator and in any case, as in `workdir`.
+  let same = |x: &str| x.replace('\\', "/").to_lowercase();
+  let strip = |x: &str| match cfg!(windows) {
+    true => path.get(..x.len()).filter(|p| same(p) == same(x)).map(|_| &path[x.len()..]),
+    false => path.strip_prefix(x),
+  };
+  match (from.and_then(strip), to) {
     (Some(x), Some(to)) if from == Some("~") && x.starts_with(foreign) => {
       format!("{to}{}", x.replace(foreign, std::path::MAIN_SEPARATOR_STR))
     }
@@ -260,7 +298,7 @@ fn rebase(path: &str, from: Option<&str>, to: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::parser::{claude, codex, fx, pi};
+  use crate::parser::{claude, codex};
 
   fn tmp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("cctrail-db-{}-{name}", std::process::id()));
@@ -333,6 +371,16 @@ mod tests {
     assert_eq!(std::fs::read_dir(file.parent().unwrap()).unwrap().count(), 1);
   }
 
+  #[cfg(unix)]
+  #[test]
+  fn writes_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let file = tmp("mode").join("export.db");
+    std::fs::write(&file, "old").unwrap();
+    replace(&file, |tmp| write(tmp, &parse("fixtures"), None)).unwrap();
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+  }
+
   #[test]
   fn folds_paths_under_the_home() {
     let native = |x: &str| x.replace('/', std::path::MAIN_SEPARATOR_STR);
@@ -352,6 +400,13 @@ mod tests {
     assert_eq!(expand("~/x", Some(&native("/h/you"))), native("/h/you/x"));
     assert_eq!(expand("~/x", None), native("~/x"));
     assert_eq!(expand("~x", Some("/h/me")), "~x");
+    // Windows paths compare with either separator and in any case; Unix ones exactly.
+    for path in ["C:/Users/me/repo", "c:\\users\\me\\repo"] {
+      let folded = if cfg!(windows) { format!("~{}", &path[11..]) } else { path.to_string() };
+      assert_eq!(rebase(path, Some("C:\\Users\\me"), Some("~")), folded);
+    }
+    let upper = if cfg!(windows) { "~/x" } else { "/H/me/x" };
+    assert_eq!(rebase("/H/me/x", Some("/h/me"), Some("~")), upper);
     // Folded on another platform.
     let foreign = if cfg!(windows) { "~/x/y" } else { "~\\x\\y" };
     assert_eq!(rebase(foreign, Some("~"), Some(&native("/h/me"))), native("/h/me/x/y"));

@@ -623,3 +623,24 @@ fn moves_the_history_to_another_machine() {
   assert!(err.contains("failed to import missing.db"), "{err}");
   std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn refuses_to_export_into_the_history() {
+  let dir = tmp("into-history");
+  let mut run = Run::new("missing", "missing");
+  run.claude = dir.join("claude");
+  copy_tree(&fixtures().join("claude"), &run.claude);
+  let log = run.claude.join("projects/testproj/s-main-1.jsonl");
+  let before = std::fs::read(&log).unwrap();
+  let out = run.exec(&["export", log.to_str().unwrap()]);
+  let err = String::from_utf8(out.stderr).unwrap();
+  assert!(!out.status.success() && err.contains("which cctrail only reads"), "{err}");
+  // The log as it was, and nothing beside it.
+  assert_eq!(std::fs::read(&log).unwrap(), before);
+  let files = std::fs::read_dir(log.parent().unwrap()).unwrap().count();
+  assert_eq!(
+    files,
+    std::fs::read_dir(fixtures().join("claude/projects/testproj")).unwrap().count()
+  );
+  std::fs::remove_dir_all(&dir).unwrap();
+}
