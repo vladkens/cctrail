@@ -331,7 +331,7 @@ pub fn usage_by_period(
   let mut stamps = vec![];
   for session in sessions {
     for e in &session.events {
-      let Some(ts) = e.ts.filter(|_| !e.failed) else { continue };
+      let Some(ts) = e.ts.filter(|_| e.active()) else { continue };
       let day = local_date(ts);
       if range.contains_day(day) && buckets.contains(&(session.root(), gran.bucket(day))) {
         stamps.push(ts);
@@ -401,7 +401,7 @@ pub fn stats_by(
       continue;
     }
     let own: Vec<Ts> =
-      session.events.iter().filter(|e| !e.failed && in_range(e)).filter_map(|e| e.ts).collect();
+      session.events.iter().filter(|e| e.active() && in_range(e)).filter_map(|e| e.ts).collect();
     let (Some(first), Some(last)) = (own.iter().min(), own.iter().max()) else { continue };
     let name = names[si];
     paths.entry(name).or_default().insert(&session.cwd);
@@ -740,6 +740,26 @@ mod tests {
       stats_by(&sessions, &billable_events(&sessions), &DateRange::default(), &config, By::Group);
     let mapped = |name: &str| stats.iter().find(|x| x.name == name).unwrap().mapped;
     assert!(!mapped("@unmapped") && mapped("oss"));
+  }
+
+  #[test]
+  fn background_usage_is_billed_but_no_activity() {
+    let at = ts("2026-01-01T10:00:00Z");
+    let mut x = session("/repo", at);
+    let usage = Some(Usage { input: 100, ..Default::default() });
+    let warm = |n: i64| Event {
+      ts: Some(at + n * 600 * MICROS),
+      usage,
+      background: true,
+      ..Default::default()
+    };
+    x.events.extend([warm(1), warm(2)]);
+    let events = billable_events(std::slice::from_ref(&x));
+    let range = DateRange::default();
+    let stat = &stats_by(std::slice::from_ref(&x), &events, &range, &Config::default(), By::Dir)[0];
+    assert_eq!((stat.usage.total(), stat.active, stat.last), (201, 300 * MICROS, Some(at)));
+    let day = usage_by_period(&[x], &events, Granularity::Day, &range);
+    assert_eq!(day.values().map(|x| x.active).sum::<i64>(), 300 * MICROS);
   }
 
   #[test]

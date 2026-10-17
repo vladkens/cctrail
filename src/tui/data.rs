@@ -244,7 +244,7 @@ impl Data {
       let project = &self.names[si].0;
       for e in &s.events {
         last = part(e).unwrap_or(last);
-        if let Some(ts) = e.ts.filter(|x| !e.failed && (!range.bounded() || range.contains(*x))) {
+        if let Some(ts) = e.ts.filter(|x| e.active() && (!range.bounded() || range.contains(*x))) {
           stamps.entry(format!("{project}\0{last}")).or_default().push(ts);
         }
       }
@@ -374,7 +374,7 @@ impl Data {
       let mut last = s.events.iter().find_map(key).unwrap_or(model_key(s.provider, "unknown"));
       for e in &s.events {
         last = key(e).unwrap_or(last);
-        if let Some(ts) = e.ts.filter(|x| !e.failed && counted(s, *x)) {
+        if let Some(ts) = e.ts.filter(|x| e.active() && counted(s, *x)) {
           stamps.entry(last.clone()).or_default().push(ts);
         }
       }
@@ -416,7 +416,7 @@ impl Data {
     let mut stamps: HashMap<&str, Vec<Ts>> = HashMap::new();
     for (si, s) in self.sessions.iter().enumerate() {
       if prov.is_none_or(|p| s.provider == p) {
-        let mine = s.events.iter().filter(|e| !e.failed).filter_map(|e| e.ts);
+        let mine = s.events.iter().filter(|e| e.active()).filter_map(|e| e.ts);
         stamps
           .entry(self.names[si].0.as_str())
           .or_default()

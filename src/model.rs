@@ -117,6 +117,8 @@ pub struct Event {
   /// Usage of several requests at once: priced at the harness's estimate when there is one, as the
   /// catalog would price it as one request, at its long-context rate past the threshold.
   pub summed: bool,
+  /// Billed without anyone at work (pi's cache warming): its time is no activity.
+  pub background: bool,
   pub sidechain: bool,
   pub failed: bool,
 }
@@ -124,6 +126,11 @@ pub struct Event {
 impl Event {
   pub fn activity(ts: Ts) -> Self {
     Self { ts: Some(ts), ..Default::default() }
+  }
+
+  /// Whether its time counts as activity.
+  pub fn active(&self) -> bool {
+    !self.failed && !self.background
   }
 }
 

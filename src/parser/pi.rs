@@ -137,10 +137,20 @@ type Key = (&'static str, Option<Ts>, Option<i64>, Option<Usage>);
 struct Parsed {
   /// When the session was created, from its header.
   created: Option<Ts>,
-  /// The file name of the session it was forked from.
+  /// The path of the session it was forked from.
   parent: Option<String>,
   session: Session,
   keys: Vec<Key>,
+}
+
+/// A path from pi's settings or environment with `~` for the home directory; pi on Windows takes
+/// `~\` too.
+fn expand_home(path: &str, home: Option<&Path>, windows: bool) -> Option<PathBuf> {
+  let path = match path.strip_prefix("~\\").filter(|_| windows) {
+    Some(x) => format!("~/{x}"),
+    None => path.to_string(),
+  };
+  expand_path(&path, home).ok()
 }
 
 /// pi's session directories: `PI_CODING_AGENT_SESSION_DIR` when set, else `sessions` in the agent
@@ -149,7 +159,7 @@ struct Parsed {
 pub fn roots() -> Vec<PathBuf> {
   let var = |x: &str| env::var(x).ok().filter(|x| !x.is_empty());
   let home = home_dir();
-  let expand = |x: &str| expand_path(x, home.as_deref()).ok();
+  let expand = |x: &str| expand_home(x, home.as_deref(), cfg!(windows));
   if let Some(x) = var("PI_CODING_AGENT_SESSION_DIR") {
     return vec![expand(&x).unwrap_or_else(|| x.into())];
   }
@@ -169,56 +179,79 @@ pub fn roots() -> Vec<PathBuf> {
   std::iter::once(default).chain(custom).collect()
 }
 
+/// The file name in a path as pi logs it, from any platform.
+fn base(path: &str) -> &str {
+  path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
 /// Sessions under the roots, each its own main session in the directory of its header. An entry
 /// copied between forks counts once in their lineage (the sessions forked from one another): in
-/// the session created first that holds it. A fork of a gone session can't name the rest of its
-/// lineage, so its copies are looked for in every session created before it.
+/// the session that holds it nearest its oldest ancestor. A fork of a gone session can't name the
+/// rest of its lineage, so its copies are looked for in every other session.
 pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
-  let name = |x: &Path| x.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
-  let size = |x: &Path| std::fs::metadata(x).map_or(0, |x| x.len());
-  // A session file found under two roots counts once, the longest copy. The pi-subagents
-  // extension keeps debug copies of its agents' sessions in `subagent-artifacts`.
-  let mut longest: HashMap<String, PathBuf> = HashMap::new();
-  for x in jsonl_files(roots) {
-    if x.components().any(|x| x.as_os_str() == "subagent-artifacts") {
-      continue;
-    }
-    let best = longest.entry(name(&x)).or_insert_with(|| x.clone());
-    if size(&x) > size(best) {
-      *best = x;
-    }
-  }
-  let mut files: Vec<PathBuf> = longest.into_values().collect();
-  files.sort();
+  // The pi-subagents extension keeps debug copies of its agents' sessions in `subagent-artifacts`.
+  let files: Vec<PathBuf> = jsonl_files(roots)
+    .into_iter()
+    .filter(|x| !x.components().any(|x| x.as_os_str() == "subagent-artifacts"))
+    .collect();
   let parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x)).collect();
 
-  // The source is found by its file name, unique by its id, wherever its directory is now.
-  let index: HashMap<String, usize> = files.iter().enumerate().map(|(i, x)| (name(x), i)).collect();
+  // A session file found under two roots, the same name and id, counts once: the longest copy.
+  // `--session` may give independent sessions the same name.
+  let name = |x: &Path| x.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+  let size = |x: &Path| std::fs::metadata(x).map_or(0, |x| x.len());
+  let mut longest: HashMap<(String, &str), usize> = HashMap::new();
+  for (i, x) in parsed.iter().enumerate() {
+    let best = longest.entry((name(&files[i]), x.session.id.as_str())).or_insert(i);
+    if size(&files[i]) > size(&files[*best]) {
+      *best = i;
+    }
+  }
+  let winners: HashSet<usize> = longest.into_values().collect();
+  let (files, parsed): (Vec<PathBuf>, Vec<Parsed>) = files
+    .into_iter()
+    .zip(parsed)
+    .enumerate()
+    .filter_map(|(i, x)| winners.contains(&i).then_some(x))
+    .unzip();
+
+  // A source by its path, else by its file name (unique by its id) wherever its directory is now.
+  let by_path: HashMap<String, usize> =
+    files.iter().enumerate().map(|(i, x)| (x.to_string_lossy().to_string(), i)).collect();
+  let mut by_name: HashMap<String, Option<usize>> = HashMap::new();
+  for (i, x) in files.iter().enumerate() {
+    by_name.entry(name(x)).and_modify(|x| *x = None).or_insert(Some(i));
+  }
+  let source =
+    |x: &str| by_path.get(x).copied().or_else(|| by_name.get(base(x)).copied().flatten());
   // A lineage is named by its oldest ancestor, a session file or a gone one; the depth counts the
   // forks down from it.
   let lineage = |i: usize| {
-    let (mut at, mut depth) = (name(&files[i]), 0);
+    let (mut at, mut depth) = (i, 0);
     while depth < files.len() {
-      match index.get(&at).and_then(|x| parsed[*x].parent.as_ref()) {
-        Some(x) if *x != at => (at, depth) = (x.clone(), depth + 1),
-        _ => break,
+      let Some(parent) = parsed[at].parent.as_deref() else { break };
+      match source(parent) {
+        Some(j) if j != at => (at, depth) = (j, depth + 1),
+        Some(_) => break,
+        None => return (format!("gone {}", base(parent)), depth + 1, true),
       }
     }
-    (at, depth)
+    (format!("file {at}"), depth, false)
   };
-  let lineages: Vec<(String, usize)> = (0..parsed.len()).map(lineage).collect();
-  // Sources before their forks, whatever their headers' times say.
+  let lineages: Vec<(String, usize, bool)> = (0..parsed.len()).map(lineage).collect();
+  // Sources before their forks whatever their headers' times say, forks of gone sessions last.
   let mut order: Vec<usize> = (0..parsed.len()).collect();
-  order.sort_by_key(|i| (lineages[*i].1, parsed[*i].created.is_none(), parsed[*i].created));
-  let mut held: HashMap<String, HashSet<&Key>> = HashMap::new();
+  order.sort_by_key(|i| {
+    let (_, depth, gone) = lineages[*i];
+    (gone, depth, parsed[*i].created.is_none(), parsed[*i].created)
+  });
+  let mut held: HashMap<&str, HashSet<&Key>> = HashMap::new();
   let mut all: HashSet<&Key> = HashSet::new();
   let mut keep: Vec<Vec<bool>> = vec![vec![]; parsed.len()];
   for i in order {
-    let keys = &parsed[i].keys;
-    let root = &lineages[i].0;
-    let gone = !index.contains_key(root);
-    let copied = held.entry(root.clone()).or_default();
-    keep[i] = keys.iter().map(|k| !copied.contains(k) && !(gone && all.contains(k))).collect();
+    let (keys, (root, _, gone)) = (&parsed[i].keys, &lineages[i]);
+    let copied = held.entry(root).or_default();
+    keep[i] = keys.iter().map(|k| !copied.contains(k) && !(*gone && all.contains(k))).collect();
     copied.extend(keys);
     all.extend(keys);
   }
@@ -269,7 +302,7 @@ fn parse_file(path: &Path) -> Parsed {
       (Some("session"), _) if !header => {
         header = true;
         created = ts;
-        parent = line.parent.str().and_then(|x| x.rsplit(['/', '\\']).next()).map(String::from);
+        parent = line.parent.str().filter(|x| !x.is_empty()).map(String::from);
         if let Some(x) = line.id.str().filter(|x| !x.is_empty()) {
           session.id = x.to_string();
           session.root_id = x.to_string();
@@ -315,10 +348,10 @@ fn parse_file(path: &Path) -> Parsed {
       (Some("message"), Some((m, Some("toolResult")))) => {
         m.usage.0.as_ref().map(|x| ("tool", summed(x, None)))
       }
-      // Requests outside the conversation, such as cache warming, name their model.
+      // Requests outside the conversation, such as cache warming while idle, name their model.
       (Some("usage"), _) => line.usage.0.as_ref().map(|x| {
         let name = line.model.str().map(model_id).or_else(|| model.clone());
-        ("usage", new(x, name))
+        ("usage", Event { background: true, ..new(x, name) })
       }),
       // A summary of compacted or abandoned history runs on the session's model, which pi
       // doesn't log with it. A split turn's compaction is two requests, a branch's summary one.
@@ -447,8 +480,30 @@ mod tests {
     // An unrelated session alike to a's reply, created before c, still counts.
     file("0_z.jsonl", &[&header("z", 0, ""), &reply(1, 100)]);
     let sessions = parse(std::slice::from_ref(&dir));
-    let total = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
-    assert_eq!((total("a"), total("c"), total("z")), (100, 500, 100));
+    let first = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
+    assert_eq!((first("a"), first("c"), first("z")), (100, 500, 100));
+
+    // a → b → c → d → e with d gone: e, near its gone source, still shares c's copies.
+    let put = |path: PathBuf, lines: Vec<String>| std::fs::write(path, lines.join("\n")).unwrap();
+    let replies = |n: u8| (1..=n).map(|t| reply(t, t as u64 * 100));
+    put(
+      dir.join("2_b.jsonl"),
+      [header("b", 2, "1_a.jsonl")].into_iter().chain(replies(2)).collect(),
+    );
+    put(
+      dir.join("3_c.jsonl"),
+      [header("c", 3, "2_b.jsonl")].into_iter().chain(replies(3)).collect(),
+    );
+    put(
+      dir.join("5_e.jsonl"),
+      [header("e", 5, "4_d.jsonl")].into_iter().chain(replies(5)).collect(),
+    );
+    // Another session that names its file alike, its own.
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    put(dir.join("other/0_z.jsonl"), vec![header("y", 1, ""), reply(9, 50)]);
+    let sessions = parse(std::slice::from_ref(&dir));
+    let sum = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
+    assert_eq!(["a", "b", "c", "e", "y", "z"].map(sum), [100, 200, 300, 900, 50, 100]);
     std::fs::remove_dir_all(&dir).unwrap();
   }
 
@@ -461,13 +516,16 @@ mod tests {
       r#"{"type":"model_change","timestamp":"2026-01-01T00:00:01Z","modelId":"m"}"#,
       r#"{"type":"branch_summary","timestamp":"2026-01-01T00:00:02Z","usage":{"input":5}}"#,
       r#"{"type":"compaction","timestamp":"2026-01-01T00:00:03Z","usage":{"input":7}}"#,
+      r#"{"type":"usage","kind":"cache_warm","timestamp":"2026-01-01T00:05:00Z","model":"w","usage":{"cacheRead":9}}"#,
     ];
     std::fs::write(dir.join("1_s.jsonl"), lines.join("\n")).unwrap();
     let sessions = parse(std::slice::from_ref(&dir));
-    // A compaction may sum a split turn's two requests; a branch's summary is one.
-    let summed: Vec<_> =
-      sessions[0].events.iter().map(|x| (x.model.as_deref(), x.summed)).collect();
-    assert_eq!(summed, [(Some("m"), false), (Some("m"), true)]);
+    // A compaction may sum a split turn's two requests; a branch's summary is one. Cache warming
+    // runs while no one is at work.
+    let flags: Vec<_> =
+      sessions[0].events.iter().map(|x| (x.model.as_deref(), x.summed, x.background)).collect();
+    let expected = [(Some("m"), false, false), (Some("m"), true, false), (Some("w"), false, true)];
+    assert_eq!(flags, expected);
     std::fs::remove_dir_all(&dir).unwrap();
   }
 
@@ -509,6 +567,16 @@ mod tests {
     for (logged, id) in ids {
       assert_eq!(model_id(logged), id);
     }
+  }
+
+  #[test]
+  fn expands_the_home_directory_as_pi() {
+    let dir = std::env::temp_dir();
+    let home = Some(dir.as_path());
+    assert_eq!(expand_home("~/s", home, false), Some(dir.join("s")));
+    assert_eq!(expand_home("~\\s", home, true), Some(dir.join("s")));
+    assert_eq!(expand_home("~\\s", home, false), None);
+    assert_eq!(expand_home(&dir.to_string_lossy(), home, true), Some(dir.clone()));
   }
 
   #[test]
