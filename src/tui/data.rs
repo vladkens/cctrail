@@ -232,10 +232,11 @@ impl Data {
       }
       let part = |e: &Event| {
         let effort = e.effort.as_deref().unwrap_or(UNKNOWN);
-        // A failed response answered nothing: the time stays with the model before it.
+        // A failed response answered nothing, cache warming ran unattended: the time stays with
+        // the model before it.
         e.model
           .as_ref()
-          .filter(|_| !e.failed)
+          .filter(|_| e.active())
           .map(|_| format!("{}\0{}\0{effort}", model_key(s.provider, model(e)), is_fast(e)))
       };
       // A session that names no model is the unknown one, as its usage is.
@@ -369,8 +370,9 @@ impl Data {
     let counted = self.counted(span, prov);
     let mut stamps: HashMap<String, Vec<Ts>> = HashMap::new();
     for s in self.sessions.iter().filter(|s| prov.is_none_or(|p| s.provider == p)) {
-      let key =
-        |e: &Event| e.model.as_ref().filter(|_| !e.failed).map(|_| model_key(s.provider, model(e)));
+      let key = |e: &Event| {
+        e.model.as_ref().filter(|_| e.active()).map(|_| model_key(s.provider, model(e)))
+      };
       let mut last = s.events.iter().find_map(key).unwrap_or(model_key(s.provider, "unknown"));
       for e in &s.events {
         last = key(e).unwrap_or(last);
@@ -906,6 +908,36 @@ pub mod tests {
     let day = data.timeline(Span::Month, None, None).into_iter().find(|x| x.tokens > 0).unwrap();
     assert_eq!((total.sessions, day.sessions), (Some(0), Some(0)));
     assert_eq!(data.bucket_sessions(Span::Month, None, &[day.day.unwrap()]), 0);
+  }
+
+  #[test]
+  fn cache_warming_owns_no_time() {
+    // Model A at high effort, cache warming on B, then a prompt: its time stays with A, high.
+    let mut s = session("s", &[(600, Some("a"), 10), (602, Some("b"), 10), (604, None, 0)]);
+    s.events[0].effort = Some("high".into());
+    s.events[1].background = true;
+    let data = data_with(vec![s], jiff::civil::date(2026, 1, 10));
+    let times = |rows: Vec<Row>| -> Vec<(String, i64)> {
+      rows.into_iter().map(|x| (x.key, x.active.unwrap_or(0) / 60_000_000)).collect()
+    };
+    let models = times(data.models(Span::All, None, None));
+    assert!(
+      models.contains(&("claude/a".into(), 9))
+        && !models.iter().any(|x| x.0 == "claude/b" && x.1 > 0),
+      "{models:?}"
+    );
+    let [_, effort] = data.model_usage(Span::All, None, "claude/a");
+    assert_eq!(times(effort).iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["high"]);
+    let days = data.bucket_models(Span::Month, None);
+    let keys: Vec<(&str, i64)> = days
+      .values()
+      .flatten()
+      .map(|x| (x.key.as_str(), x.active.unwrap_or(0) / 60_000_000))
+      .collect();
+    assert!(
+      keys.contains(&("claude/a", 9)) && !keys.iter().any(|x| x.0 == "claude/b" && x.1 > 0),
+      "{keys:?}"
+    );
   }
 
   #[test]
