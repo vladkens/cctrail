@@ -6,7 +6,7 @@
 
 [<img src="https://badges.ws/crates/v/cctrail" alt="version" />](https://crates.io/crates/cctrail)
 [<img src="https://badges.ws/github/license/vladkens/cctrail" alt="license" />](https://github.com/vladkens/cctrail/blob/main/LICENSE)
-[<img src="https://badges.ws/badge/built_with-ratatui-black?icon=ratatui" alt="built with ratatui" />](https://ratatui.rs/)
+[<img src="https://badges.ws/badge/built_with_ratatui-black?icon=ratatui" alt="built with ratatui" />](https://ratatui.rs/)
 [<img src="https://badges.ws/badge/follow-@uid127-black" alt="follow @uid127" />](https://x.com/uid127)
 
 </div>
