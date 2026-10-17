@@ -564,12 +564,15 @@ fn counts_swearing_per_model() {
   let run = swears();
   let out = run.stdout(&["swears"]);
   let expected = "\
-Model             Prompts Swearing  Share Top words
-claude-sonnet-4-5       1        1 100.0% бля* 1
-gpt-5.5                 1        1 100.0% shit* 1
-gpt-5.4                 3        2  66.7% fuck* 1, wtf 1
-claude-opus-4-6         2        1  50.0% wtf 1
-total                   7        5  71.4% wtf 2, fuck* 1, shit* 1
+Model                      Prompts Swearing  Share Top words
+claude-sonnet-4-5                2        2 100.0% fuck* 1, бля* 1
+claude-sonnet-4-5-20250929       1        1 100.0% бля* 1
+gpt-5.5                          1        1 100.0% shit* 1
+gpt-5.4                          3        2  66.7% fuck* 1, wtf 1
+gpt-6-astra                      3        2  66.7% shit* 1, wtf 1
+claude-opus-4-6                  2        1  50.0% wtf 1
+gpt-5                            2        1  50.0% fuck* 1
+total                           14       10  71.4% fuck* 3, wtf 3, shit* 2
 ";
   assert_eq!(out, expected);
 
@@ -587,15 +590,15 @@ total                   7        5  71.4% wtf 2, fuck* 1, shit* 1
       )
     })
     .collect();
-  assert_eq!(groups[2], ("gpt-5.4", 3, 2));
-  assert_eq!(groups.len(), 4);
+  assert_eq!(groups[3], ("gpt-5.4", 3, 2));
+  assert_eq!(groups.len(), 7);
   let words = json!([
-    {"word": "wtf", "count": 2},
-    {"word": "fuck*", "count": 1},
-    {"word": "shit*", "count": 1},
-    {"word": "бля*", "count": 1},
+    {"word": "fuck*", "count": 3},
+    {"word": "wtf", "count": 3},
+    {"word": "shit*", "count": 2},
+    {"word": "бля*", "count": 2},
   ]);
-  let total = json!({"prompts": 7, "swearing": 5, "share": 5.0 / 7.0, "words": words});
+  let total = json!({"prompts": 14, "swearing": 10, "share": 10.0 / 14.0, "words": words});
   assert_eq!(value["total"], total);
 
   // By project, for one harness and a range.

@@ -7,8 +7,11 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
-use super::{Content, Obj, Present, Val, codex, inherit_roots, jsonl, model_id};
+use super::{
+  Content, Obj, Present, Replies, Val, codex, inherit_roots, jsonl, model_id, own_words,
+};
 use crate::config::home_dir;
 use crate::metrics::local_date;
 use crate::model::{Event, Provider, Session, Speed, Ts, Usage};
@@ -151,11 +154,12 @@ pub fn root() -> PathBuf {
 /// each model's totals are split into its requests over the agent activity of the main session
 /// and its agents (`spread`), each request at one of those moments: totals per session and project
 /// are exact, their split by day approximate.
-pub fn parse(root: &Path, _prompts: bool) -> Vec<Session> {
+pub fn parse(root: &Path, prompts: bool) -> Vec<Session> {
   let dirs = std::fs::read_dir(root.join("sessions")).into_iter().flatten().flatten();
   let mut dirs: Vec<PathBuf> = dirs.map(|x| x.path()).filter(|x| x.is_dir()).collect();
   dirs.sort();
-  let parsed: Vec<(Session, Parsed)> = dirs.par_iter().filter_map(|x| parse_dir(x)).collect();
+  let parsed: Vec<(Session, Parsed)> =
+    dirs.par_iter().filter_map(|x| parse_dir(x, prompts)).collect();
   let (mut sessions, parsed): (Vec<Session>, Vec<Parsed>) = parsed.into_iter().unzip();
 
   let index: HashMap<&str, usize> =
@@ -275,7 +279,7 @@ fn spread(
   shares.into_iter().map(|(at, usage)| (at, usage, cost)).collect()
 }
 
-fn parse_dir(dir: &Path) -> Option<(Session, Parsed)> {
+fn parse_dir(dir: &Path, prompts: bool) -> Option<(Session, Parsed)> {
   let id = dir.file_name()?.to_string_lossy().to_string();
   let meta: Meta = read(&dir.join("session.json"))?;
   let owner: Option<Owner> = read(&dir.join("subagent/owner.json"));
@@ -287,14 +291,30 @@ fn parse_dir(dir: &Path) -> Option<(Session, Parsed)> {
   // fx 0.0.13 writes lines in batches, all with the batch's `timestamp_ms`: a tool result's and a
   // turn's own times are exact.
   let mut agent = vec![];
-  jsonl(&dir.join("events.jsonl"), |line: Line, _| {
+  let mut replies = Replies::default();
+  let prompts = prompts && is_main;
+  jsonl(&dir.join("events.jsonl"), |line: Line, raw| {
     let Some(kind) = line.event.0 else { return true };
     let at = millis(&line.timestamp_ms);
     let turn = kind.turn_completed.0.or(kind.interrupted.0).and_then(|x| x.turn_summary.0);
+    let event = || serde_json::from_slice::<Value>(raw).ok().map(|mut x| x["event"].take());
     if kind.user.0 || kind.steering.0 {
-      session.events.extend(at.map(Event::activity));
+      let text =
+        |e: Value| own_words(&e["user"]["text"]).or_else(|| own_words(&e["steering"]["text"]));
+      if let Some(at) = at {
+        let mut x = Event::activity(at);
+        if prompts && let Some(words) = event().and_then(text) {
+          replies.prompt(&mut x, words);
+        }
+        session.events.push(x);
+      }
     } else if kind.assistant.0 {
       agent.extend(at);
+      let model =
+        |e: Value| e["assistant"]["provider_replay"]["source"]["model"].as_str().map(model_id);
+      if prompts && let Some(x) = event().and_then(model) {
+        replies.answer(&x);
+      }
     } else if let Some(x) = kind.tool_result.0 {
       agent.extend(millis(&x.created_at_ms).or(at));
     } else if let Some(x) = turn {
@@ -303,6 +323,7 @@ fn parse_dir(dir: &Path) -> Option<(Session, Parsed)> {
     }
     true
   });
+  replies.finish(&mut session.events);
   session.events.extend(agent.iter().map(|x| Event::activity(*x)));
 
   let usage: Option<UsageFile> = read(&dir.join("usage-v2.json"));
@@ -336,6 +357,19 @@ mod tests {
 
   fn total<'a>(events: impl IntoIterator<Item = &'a Event>) -> u64 {
     events.into_iter().filter_map(|x| x.usage).map(|x| x.total()).sum()
+  }
+
+  #[test]
+  fn reads_typed_prompts_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/swears/fx");
+    // Steering counts as a prompt; an agent's prompt, which its main session wrote, doesn't.
+    let (astra, sonnet) = ("gpt-6-astra", "claude-sonnet-4-5");
+    let expected =
+      [(astra, "shit"), (astra, "wtf, stop"), (astra, "ok, continue"), (sonnet, "fuck")];
+    let sessions = parse(&root, true);
+    assert_eq!(super::super::tests::prompts(&sessions), expected);
+    let sessions = parse(&root, false);
+    assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
   }
 
   #[test]

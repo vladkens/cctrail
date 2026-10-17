@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use serde::Deserialize;
+use serde_json::Value;
 
-use super::{Obj, Val, jsonl, jsonl_files, model_id, parse_ts};
+use super::{Obj, Replies, Val, jsonl, jsonl_files, model_id, own_words, parse_ts};
 use crate::config::{expand_path, home_dir};
 use crate::model::{Event, Provider, Session, Ts, Usage};
 
@@ -152,13 +153,13 @@ fn base(path: &str) -> &str {
 /// copied between forks counts once in their lineage (the sessions forked from one another): in
 /// the session that holds it nearest its oldest ancestor. A fork of a gone session can't name the
 /// rest of its lineage, so its copies are looked for in every other session.
-pub fn parse(roots: &[PathBuf], _prompts: bool) -> Vec<Session> {
+pub fn parse(roots: &[PathBuf], prompts: bool) -> Vec<Session> {
   // The pi-subagents extension keeps debug copies of its agents' sessions in `subagent-artifacts`.
   let files: Vec<PathBuf> = jsonl_files(roots)
     .into_iter()
     .filter(|x| !x.components().any(|x| x.as_os_str() == "subagent-artifacts"))
     .collect();
-  let parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x)).collect();
+  let parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x, prompts)).collect();
 
   // A session file found under two roots, the same name and id, counts once: the longest copy.
   // `--session` may give independent sessions the same name.
@@ -235,7 +236,7 @@ pub fn parse(roots: &[PathBuf], _prompts: bool) -> Vec<Session> {
   sessions
 }
 
-fn parse_file(path: &Path) -> Parsed {
+fn parse_file(path: &Path, prompts: bool) -> Parsed {
   // `<time>_<id>.jsonl`, the header's id preferred.
   let stem = path.file_stem().map(|x| x.to_string_lossy()).unwrap_or_default();
   let id = stem.rsplit_once('_').map_or(&*stem, |x| x.1);
@@ -247,8 +248,9 @@ fn parse_file(path: &Path) -> Parsed {
   let mut model: Option<String> = None;
   let mut effort: Option<String> = None;
   let mut keys = vec![];
+  let mut replies = Replies::default();
 
-  jsonl(path, |line: Line, _| {
+  jsonl(path, |line: Line, raw| {
     let message = line.message.0.as_ref();
     let millis = message.and_then(|x| x.timestamp.ordinal());
     let at = millis.and_then(|x| jiff::Timestamp::from_millisecond(x).ok());
@@ -288,9 +290,17 @@ fn parse_file(path: &Path) -> Parsed {
         None
       }
       // A prompt, or a shell command the user ran (`!cmd`).
-      (Some("message"), Some((_, Some("user" | "bashExecution")))) => {
-        ts.map(|x| ("user", Event::activity(x)))
-      }
+      (Some("message"), Some((_, Some(role @ ("user" | "bashExecution"))))) => ts.map(|x| {
+        let mut event = Event::activity(x);
+        let line = || serde_json::from_slice::<Value>(raw).ok();
+        if prompts
+          && role == "user"
+          && let Some(words) = line().and_then(|x| own_words(&x["message"]["content"]))
+        {
+          replies.prompt(&mut event, words);
+        }
+        ("user", event)
+      }),
       (Some("message"), Some((m, Some("assistant")))) => {
         if let Some(x) = m.model.str() {
           model = Some(model_id(x));
@@ -308,6 +318,9 @@ fn parse_file(path: &Path) -> Parsed {
           failed: m.stop.str() == Some("error") && usage.is_none_or(|x| x.total() == 0),
           ..Default::default()
         };
+        if prompts && let Some(x) = event.model.as_deref().filter(|_| !event.failed) {
+          replies.answer(x);
+        }
         Some(("assistant", event))
       }
       // Requests apart from the turns, which pi counts in a session's totals too. A tool's nested
@@ -337,6 +350,7 @@ fn parse_file(path: &Path) -> Parsed {
     true
   });
 
+  replies.finish(&mut session.events);
   Parsed { created, parent, session, keys }
 }
 
@@ -350,6 +364,18 @@ mod tests {
 
   fn total(session: &Session) -> u64 {
     session.events.iter().filter_map(|x| x.usage).map(|x| x.total()).sum()
+  }
+
+  #[test]
+  fn reads_typed_prompts_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/swears/pi/sessions");
+    // A skill's body and a shell command are no prompts; a failed response answers nothing.
+    let sonnet = "claude-sonnet-4-5-20250929";
+    let expected = [("gpt-5", "fuck, start"), ("gpt-5", "now tidy up"), (sonnet, "блять")];
+    let sessions = parse(std::slice::from_ref(&root), true);
+    assert_eq!(super::super::tests::prompts(&sessions), expected);
+    let sessions = parse(&[root], false);
+    assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
   }
 
   #[test]
