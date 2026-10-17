@@ -317,7 +317,10 @@ fn note(app: &App) -> Vec<Text<'static>> {
   if let Some(d) = app.open.as_ref().filter(|x| !x.paths.is_empty()) {
     return vec![dim("paths "), Text::styled(d.paths.join(", "), TEXT)];
   }
-  if app.unpriced.is_empty() || app.tab == Tab::Swears {
+  if app.tab == Tab::Swears {
+    return vec![dim(SWEARS)];
+  }
+  if app.unpriced.is_empty() {
     return vec![];
   }
   let t: u64 = app.unpriced.iter().fold(0, |a, x| a.saturating_add(x.1));
@@ -506,7 +509,11 @@ fn table(
   grid(f, &columns, lines, total, area, sel, first, hits)
 }
 
-/// The swears tab: per model the prompts to it, the percent swearing at it, the words typed, the
+/// What the swears tab's numbers are, on its bottom border and in the help.
+const SWEARS: &str = "% dir: messages scolding the model · % any: messages with any swearing · \
+  Score: % dir adjusted for few messages";
+
+/// The swears tab: per model the prompts to it, the words typed, the percent swearing at it, the
 /// percent with any swearing and the score; shares of too few prompts dash.
 fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   if app.list.is_empty() {
@@ -525,8 +532,8 @@ fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
       width: Constraint::Fill(1),
     },
     column(Col::Prompts, "Msgs", 6),
-    column(Col::Directed, "% directed", 10),
     column(Col::Words, "Words", 7),
+    column(Col::Directed, "% dir", 6),
     column(Col::Any, "% any", 6),
     column(Col::Score, "Score", 6),
   ];
@@ -846,10 +853,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
       "mouse",
       "click a row, bar or choice to select it, a row or bar again to open it; a header sorts, again reverses; the wheel moves 3 rows",
     ),
-    (
-      "swears",
-      "per model: your prompts, % swearing at the model (an insult, or a swear word near `you` / `ты`), their words, % with any swearing; Score (0 to 100) is the directed % pulled toward your overall one by 30 prompts, so barely used models sit near the average; pasted text doesn't count",
-    ),
+    ("swears", SWEARS),
     ("?", "this help"),
     ("q", "back; quits from a list"),
   ];

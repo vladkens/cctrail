@@ -77,8 +77,8 @@ start on Monday. `cctrail --help` lists it all.
 timeline (a chart of the days stacked by model over their list) and swears for today, this week,
 this month, the last 30 days or all time. Press `?` in it to see the keys.
 
-Swears shows how often you scold each model: the share of your prompts swearing at it, and a
-Score that pulls that share toward your average, so a model you barely used doesn't top the list.
+Swears shows how often you scold each model: `% dir`, the share of your messages scolding it, and
+a Score that pulls it toward your average, so a model you barely used doesn't top the list.
 [How it counts](#swearing).
 
 <div align="center">
@@ -160,10 +160,10 @@ The Swears view: how often you scold each model, adjusted for how much you used 
   their forms, or of a model's or agent's name (`астра`, `claude`, `агент`, `model`…).
 - **Attribution:** to the model that answered last before the prompt, the first ones of a session
   to the first to answer; a prompt that a fork or copied file repeats counts once.
-- **Columns:** `% directed` and `% any` are shares of your prompts with directed or any swearing.
-  Score is `(directed + 30 × overall) / (msgs + 30) × 100`, overall being your directed share in
-  the period: a few prompts can't move a model far from your average. Shares need 10 prompts;
-  prompts to no known model are `<unknown>`.
+- **Columns:** Msgs and Words, then `% dir`: messages scolding the model · `% any`: messages with
+  any swearing · Score: `% dir` adjusted for few messages, `(dir + 30 × overall) / (msgs + 30) ×
+  100`, overall being your `% dir` in the period, so a few messages can't move a model far from
+  your average. Shares need 10 messages; messages to no known model are `<unknown>`.
 - **Privacy:** each prompt keeps only counts and a hash, never its text, and only for this view.
 - **Your lists:** `~/.config/cctrail/swear/*.txt`, insults in `insult-*.txt`. Lists for other
   languages are welcome as pull requests.

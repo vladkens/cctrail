@@ -39,11 +39,11 @@ pub enum Col {
   Sessions,
   /// The sorted column's share, Time's when sorted by name.
   Share,
-  /// The swears tab's: prompts, % of them swearing at the listener, words typed, % with any
+  /// The swears tab's: prompts, words typed, % of prompts swearing at the listener, % with any
   /// swearing, score.
   Prompts,
-  Directed,
   Words,
+  Directed,
   Any,
   Score,
 }
@@ -60,7 +60,7 @@ impl Col {
   fn cycle(tab: Tab, sessions: bool) -> &'static [Col] {
     match (tab, sessions) {
       (Tab::Swears, _) => {
-        &[Col::Prompts, Col::Directed, Col::Words, Col::Any, Col::Score, Col::Name]
+        &[Col::Prompts, Col::Words, Col::Directed, Col::Any, Col::Score, Col::Name]
       }
       (_, true) => &[Col::Time, Col::Tokens, Col::Cost, Col::Sessions, Col::Name],
       (_, false) => &[Col::Time, Col::Tokens, Col::Cost, Col::Name],
@@ -1381,23 +1381,38 @@ mod tests {
       let buf = frame_of(&app, width, 20);
       assert!(raw(&buf, 0).contains(" Swears 4 "), "{}", raw(&buf, 0));
       let head = cells(&line(&buf, find(&buf, "Model")));
-      assert_eq!(head, ["Model", "Msgs", "% directed", "Words", "% any", "Score ↓"], "{width}");
+      assert_eq!(head, ["Model", "Msgs", "Words", "% dir", "% any", "Score ↓"], "{width}");
       // By score: `small`'s 10 prompts below `sonnet`'s 100 though more swear at it; the
       // unknown model and `tiny` without enough prompts last, with dashes.
       let names = ["sonnet", "small", "gpt", "<unknown>", "tiny", "total"];
       let rows: Vec<Vec<String>> =
         names.iter().map(|x| cells(&line(&buf, find(&buf, x)))).collect();
-      assert_eq!(rows[0], ["sonnet", "100", "50.0%", "2.0K", "60.0%", "47.5"], "{width}");
-      assert_eq!(rows[1], ["small", "10", "60.0%", "100", "60.0%", "44.3"], "{width}");
-      assert_eq!(rows[2], ["gpt", "50", "10.0%", "1.5K", "40.0%", "20.9"], "{width}");
-      assert_eq!(rows[3], ["<unknown>", "1", "–", "2", "–", "–"], "{width}");
-      assert_eq!(rows[4], ["tiny", "3", "–", "15", "–", "–"], "{width}");
-      assert_eq!(rows[5], ["total", "164", "39.0%", "3.6K", "54.3%", "39.0"], "{width}");
+      assert_eq!(rows[0], ["sonnet", "100", "2.0K", "50.0%", "60.0%", "47.5"], "{width}");
+      assert_eq!(rows[1], ["small", "10", "100", "60.0%", "60.0%", "44.3"], "{width}");
+      assert_eq!(rows[2], ["gpt", "50", "1.5K", "10.0%", "40.0%", "20.9"], "{width}");
+      assert_eq!(rows[3], ["<unknown>", "1", "2", "–", "–", "–"], "{width}");
+      assert_eq!(rows[4], ["tiny", "3", "15", "–", "–", "–"], "{width}");
+      assert_eq!(rows[5], ["total", "164", "3.6K", "39.0%", "54.3%", "39.0"], "{width}");
       let ys: Vec<u16> = names.iter().map(|x| find(&buf, x)).collect();
       assert!(ys.windows(2).all(|x| x[0] + 1 == x[1]), "{}", screen_of(&buf));
       // A row of swears opens nothing.
       assert!(!raw(&buf, find(&buf, "Model") - 1).contains("open"));
+      // The legend on the bottom border, faint, cut beside the keys.
+      let bottom = raw(&buf, 19);
+      let two = "% dir: messages scolding the model · % any: messages with any swearing ·";
+      assert_eq!(bottom.contains(two), width == 120, "{bottom}");
+      assert!(
+        bottom.starts_with("╰─ % dir: messages scolding") && bottom.contains('…'),
+        "{bottom}"
+      );
+      assert_eq!(buf[(3, 19)].fg, Color::DarkGray);
     }
+    // Whole when the border has room for it and the keys.
+    let bottom = raw(&frame_of(&app, 160, 20), 19);
+    assert!(
+      bottom.contains("· Score: % dir adjusted for few messages ─") && !bottom.contains('…'),
+      "{bottom}"
+    );
     press(&mut app, KeyCode::Enter);
     assert!(app.open.is_none());
     // `s` sorts by the next column: after the score the names, then the prompts; `S` reverses it.
