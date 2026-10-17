@@ -1,0 +1,9 @@
+{"schema_version": 1, "seq": 1, "timestamp_ms": 1791201600000, "event": {"user": {"text": "hi", "images": [], "work_id": null}}}
+{"schema_version": 1, "seq": 2, "timestamp_ms": 1791201660000, "event": {"assistant": {"text": "ok", "provider_replay": {"source": {"provider": "codex", "model": "gpt-6-astra"}}, "standalone_response": false}}}
+{"schema_version": 1, "seq": 3, "timestamp_ms": 1791201660000, "event": {"tool_call": {"call_id": "c1", "tool_name": "read", "arguments_json": "{}"}}}
+{"schema_version": 1, "seq": 4, "timestamp_ms": 1791201780000, "event": {"tool_result": {"call_id": "c1", "tool_name": "read", "created_at_ms": 1791201690000, "status": "ok"}}}
+{"schema_version": 1, "seq": 5, "timestamp_ms": 1791201780000, "event": {"turn_completed": {"files": [], "turn_summary": {"started_at_ms": 1791201600000, "completed_at_ms": 1791201720000, "thinking_duration_ms": 0, "turn_duration_ms": 120000, "token_progress": {"input_tokens": 0, "output_tokens": 0, "input_exact": true, "output_exact": true}}}}}
+{"schema_version": 1, "seq": 6, "timestamp_ms": 1791374400000, "event": {"user": {"text": "hi", "images": [], "work_id": null}}}
+{"schema_version": 1, "seq": 7, "timestamp_ms": 1791374460000, "event": {"assistant": {"text": "ok", "provider_replay": {"source": {"provider": "codex", "model": "gpt-6-astra"}}, "standalone_response": false}}}
+{"schema_version": 1, "seq": 8, "timestamp_ms": 1791375000000, "event": {"turn_completed": {"files": [], "turn_summary": {"started_at_ms": 1791374400000, "completed_at_ms": 1791375000000, "thinking_duration_ms": 0, "turn_duration_ms": 600000, "token_progress": {"input_tokens": 0, "output_tokens": 0, "input_exact": true, "output_exact": true}}}}}
+{"schema_version":1,"seq":9,"timestamp_ms":17

@@ -62,6 +62,7 @@ struct Run {
   claude: PathBuf,
   codex: PathBuf,
   pi: PathBuf,
+  fx: PathBuf,
   config: Option<PathBuf>,
   cwd: Option<PathBuf>,
   cache: PathBuf,
@@ -74,6 +75,7 @@ impl Run {
       claude: fixtures().join(claude),
       codex: fixtures().join(codex),
       pi: fixtures().join("missing"),
+      fx: fixtures().join("missing"),
       config,
       cwd: None,
       cache: fixtures().join("missing"),
@@ -82,6 +84,11 @@ impl Run {
 
   fn pi(mut self, path: &str) -> Self {
     self.pi = fixtures().join(path);
+    self
+  }
+
+  fn fx(mut self, path: &str) -> Self {
+    self.fx = fixtures().join(path);
     self
   }
 
@@ -94,6 +101,7 @@ impl Run {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
     cmd.args(args).env("CLAUDE_CONFIG_DIR", &self.claude).env("CODEX_HOME", &self.codex);
     cmd.env("PI_CODING_AGENT_DIR", &self.pi).env_remove("PI_CODING_AGENT_SESSION_DIR");
+    cmd.env("FX_HOME", &self.fx);
     // The user's downloaded prices must not change the numbers, and tests never download.
     cmd.env("XDG_CACHE_HOME", &self.cache).env("CCTRAIL_NO_UPDATE", "1").env_remove("COLUMNS");
     match &self.config {
@@ -376,6 +384,47 @@ fn pi_usage_json() {
 }
 
 #[test]
+fn fx_usage_json() {
+  let run = Run::new("claude/projects", "missing").fx("fx");
+  let value = run.json(&["days", "--provider", "fx", "--models", "--json"]);
+  assert_eq!(value["query"]["provider"], "fx");
+  // Each session's totals, an agent's in its main session's, spread over the agents' activity.
+  assert_eq!(value["total"]["usage"]["total"], 3475);
+  let periods = value["periods"].as_array().unwrap();
+  let days: Vec<_> =
+    periods.iter().map(|x| (x["start"].clone(), x["usage"]["total"].clone())).collect();
+  assert_eq!(days, [(json!("2026-10-05"), json!(2500)), (json!("2026-10-07"), json!(975))]);
+  let mut models = vec![];
+  for x in periods.iter().flat_map(|x| x["models"].as_array().unwrap()) {
+    models.push((x["model"].clone(), x["speed"].clone(), x["cost_usd"].clone()));
+  }
+  models.sort_by_key(|x| x.0.to_string());
+  // `codex/…` and a gateway's `anthropic/…` as the catalog names them, at Fast mode's rate when it
+  // was on; a model outside the catalog at fx's own price.
+  let expected = [
+    ("claude-sonnet-4-5", Value::Null, 0.00675),
+    ("gpt-5.6-luna", json!("fast"), 0.000064),
+    ("gpt-6-astra", json!("fast"), 0.01318),
+    ("gpt-6-astra", json!("fast"), 0.02602),
+    ("grok-4", Value::Null, 0.5),
+  ];
+  let expected: Vec<_> = expected.map(|(m, s, c)| (json!(m), s, json!(c))).into();
+  assert_eq!(models, expected);
+
+  // Projects by the main session's directory, with its agent's activity elsewhere.
+  let value = run.json(&["--provider", "fx", "--json"]);
+  let rows = value["groups"].as_array().unwrap().iter().map(|x| {
+    let name = x["project"].as_str().unwrap().to_string();
+    (name, x["sessions"].clone(), x["active_seconds"].clone(), x["usage"]["total"].clone())
+  });
+  let rows: Vec<_> = rows.collect();
+  assert_eq!(rows[0], (REPO.to_string(), json!(1), json!(1200), json!(1410)));
+  assert!(rows[1].0.ends_with("other"));
+  assert_eq!((&rows[1].1, &rows[1].2, &rows[1].3), (&json!(1), &json!(360), &json!(2065)));
+  assert_eq!(total_of(&run, &["--json"]), 3475 + 427);
+}
+
+#[test]
 fn stats_json_over_all_fixtures() {
   let value = Run::new("", "").config("config.toml").json(&["--json"]);
   assert_eq!(value["command"], "stats");
@@ -461,7 +510,10 @@ fn prices_each_day_at_its_rate() {
     cmd.args(["days", "--json"]).env("TZ", tz).env("CCTRAIL_NO_UPDATE", "1");
     cmd.env("CLAUDE_CONFIG_DIR", &run.claude).env("CODEX_HOME", &run.codex);
     cmd.env("PI_CODING_AGENT_DIR", &run.pi).env_remove("PI_CODING_AGENT_SESSION_DIR");
-    cmd.env("XDG_CACHE_HOME", &run.cache).env("CCTRAIL_CONFIG", fixtures().join("empty.toml"));
+    cmd
+      .env("FX_HOME", &run.fx)
+      .env("XDG_CACHE_HOME", &run.cache)
+      .env("CCTRAIL_CONFIG", fixtures().join("empty.toml"));
     let value: Value = serde_json::from_slice(&cmd.output().unwrap().stdout).unwrap();
     value["periods"]
       .as_array()

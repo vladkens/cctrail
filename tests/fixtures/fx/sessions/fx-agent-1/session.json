@@ -1,0 +1,1 @@
+{"schema_version": 4, "id": "fx-agent-1", "origin_workspace_root": "/elsewhere", "workspace_root": "/elsewhere", "created_at_ms": 1791374490000, "updated_at_ms": 1791374550000, "conversation_language": "en", "provider": "codex", "model": "gpt-6-astra", "effort": "medium", "fast_mode": false, "subagent_child": true}

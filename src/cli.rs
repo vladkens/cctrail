@@ -107,7 +107,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
       "--provider" => {
         let v = value()?;
         let Some(x) = Provider::parse(&v) else {
-          bail!("--provider must be claude, codex or pi: {v}")
+          bail!("--provider must be claude, codex, pi or fx: {v}")
         };
         args.provider = Some(x);
       }
@@ -368,7 +368,7 @@ pub fn help() -> String {
     None => String::new(),
   };
   format!(
-    "Time, tokens and cost per project from local Claude Code, Codex and pi history.
+    "Time, tokens and cost per project from local Claude Code, Codex, pi and fx history.
 
 Usage:
   cctrail                                     the interactive view (on a terminal)
@@ -383,7 +383,7 @@ Periods: today, yesterday, this-week, last-week, this-month, last-month, all (de
 Options:
   --since YYYY-MM-DD   first day to include
   --until YYYY-MM-DD   last day to include
-  --provider NAME      claude, codex or pi only
+  --provider NAME      claude, codex, pi or fx only
   --by NAME            group statistics by project, group or dir
   --all                list every row instead of folding the small ones into `other`
   --models             break each period down by model
@@ -444,7 +444,7 @@ mod tests {
     assert!(err(&["nope"]).contains("unknown command or period"));
     assert!(err(&["--since", "2026-1-1"]).contains("YYYY-MM-DD"));
     assert!(err(&["--since"]).contains("needs a value"));
-    assert!(err(&["--provider", "gemini"]).contains("claude, codex or pi"));
+    assert!(err(&["--provider", "gemini"]).contains("claude, codex, pi or fx"));
   }
 
   #[test]

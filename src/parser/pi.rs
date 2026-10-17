@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use serde::Deserialize;
 
-use super::{Obj, Val, jsonl, jsonl_files, parse_ts};
+use super::{Obj, Val, jsonl, jsonl_files, model_id, parse_ts};
 use crate::config::{expand_path, home_dir};
 use crate::model::{Event, Provider, Session, Ts, Usage};
 
@@ -87,44 +87,6 @@ impl RawUsage {
   /// pi's own estimate from its price list; 0 means it has no price.
   fn cost(&self) -> Option<f64> {
     self.cost.0.as_ref()?.total.float().filter(|x| *x > 0.0)
-  }
-}
-
-/// Bedrock's model vendors: its ids are `[<region>.]<vendor>.<model>`.
-const VENDORS: [&str; 10] = [
-  "anthropic",
-  "openai",
-  "amazon",
-  "meta",
-  "mistral",
-  "cohere",
-  "deepseek",
-  "qwen",
-  "ai21",
-  "writer",
-];
-
-/// A model id as pi logs it from any provider, as the price catalog names it: without a router's
-/// vendor (`anthropic/claude-sonnet-4.5`), Bedrock's region, vendor and version
-/// (`us.anthropic.claude-opus-4-6-v1:0`, `global.openai.gpt-6-astra`), with Vertex's date as
-/// theirs (`claude-sonnet-4@20250514` as `claude-sonnet-4-20250514`), and with dashes in Claude's
-/// version (`claude-sonnet-4.5`). One model reads the same by any route.
-fn model_id(model: &str) -> String {
-  let digits = |x: &str| !x.is_empty() && x.bytes().all(|c| c.is_ascii_digit());
-  let id = model.rsplit('/').next().unwrap_or(model);
-  // Vertex's date as Anthropic's and Bedrock's: some models have no undated id.
-  let id = id.replacen('@', "-", 1);
-  let id = id.as_str();
-  let vendor = |v: &str| match id.strip_prefix(v).and_then(|x| x.strip_prefix('.')) {
-    Some(x) => Some(id.len() - x.len()),
-    None => id.find(&format!(".{v}.")).map(|i| i + v.len() + 2),
-  };
-  let id = VENDORS.iter().filter_map(|v| vendor(v)).min().map_or(id, |i| &id[i..]);
-  let id = id.rsplit_once(':').filter(|x| digits(x.1)).map_or(id, |x| x.0);
-  let id = id.rsplit_once("-v").filter(|x| digits(x.1)).map_or(id, |x| x.0);
-  match id.starts_with("claude-") {
-    true => id.replace('.', "-"),
-    false => id.to_string(),
   }
 }
 
@@ -558,30 +520,6 @@ mod tests {
     assert_eq!(costs, [Some(0.01), None, None, None, Some(0.25), Some(0.02)]);
     // Two prompts and a shell command.
     assert_eq!(main.events.iter().filter(|x| x.usage.is_none()).count(), 3);
-  }
-
-  #[test]
-  fn names_a_model_alike_by_any_route() {
-    let ids = [
-      ("us.anthropic.claude-opus-4-6-v1", "claude-opus-4-6"),
-      ("anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
-      ("anthropic/claude-sonnet-4.5", "claude-sonnet-4-5"),
-      ("claude-opus-4-1@20250805", "claude-opus-4-1-20250805"),
-      ("claude-3-7-sonnet@20250219", "claude-3-7-sonnet-20250219"),
-      ("claude-sonnet-4@20250514", "claude-sonnet-4-20250514"),
-      ("anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4-20250514"),
-      ("openai/gpt-6-astra", "gpt-6-astra"),
-      ("gpt-5.6-sol", "gpt-5.6-sol"),
-      ("google/gemini-4-argon", "gemini-4-argon"),
-      ("openai.gpt-5.4", "gpt-5.4"),
-      ("global.openai.gpt-6-astra", "gpt-6-astra"),
-      ("apac.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
-      ("eu.amazon.nova-pro-v1:0", "nova-pro"),
-      ("glm-5", "glm-5"),
-    ];
-    for (logged, id) in ids {
-      assert_eq!(model_id(logged), id);
-    }
   }
 
   #[test]

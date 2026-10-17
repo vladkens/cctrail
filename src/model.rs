@@ -10,6 +10,7 @@ pub enum Provider {
   Claude,
   Codex,
   Pi,
+  Fx,
 }
 
 impl Provider {
@@ -18,6 +19,7 @@ impl Provider {
       "claude" => Some(Self::Claude),
       "codex" => Some(Self::Codex),
       "pi" => Some(Self::Pi),
+      "fx" => Some(Self::Fx),
       _ => None,
     }
   }
@@ -27,15 +29,16 @@ impl Provider {
       Self::Claude => "claude",
       Self::Codex => "codex",
       Self::Pi => "pi",
+      Self::Fx => "fx",
     }
   }
 
-  /// The price catalogs its models are in: pi calls the models of any provider.
+  /// The price catalogs its models are in: pi and fx call the models of any provider.
   pub fn catalogs(self) -> &'static [&'static str] {
     match self {
       Self::Claude => &["anthropic"],
       Self::Codex => &["openai"],
-      Self::Pi => &["anthropic", "openai"],
+      Self::Pi | Self::Fx => &["anthropic", "openai"],
     }
   }
 }
@@ -111,7 +114,7 @@ pub struct Event {
   pub effort: Option<String>,
   /// Claude's `(message.id, requestId)`, shared by copies of one API response across files.
   pub identity: Option<(String, Option<String>)>,
-  /// The harness's own cost estimate (pi's): for a model the price catalog lacks, and for
+  /// The harness's own cost estimate (pi's, fx's): for a model the price catalog lacks, and for
   /// `summed` usage.
   pub cost: Option<f64>,
   /// Usage of several requests at once: priced at the harness's estimate when there is one, as the
