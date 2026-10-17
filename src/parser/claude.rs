@@ -4,12 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-  AgentCall, Content, Obj, Replies, Source, Text, Unit, Val, inherit_roots, jsonl, jsonl_files,
-  own_words, parse_ts,
+  AgentCall, Content, Obj, Replies, Text, Val, inherit_roots, jsonl, jsonl_files, own_words,
+  parse_ts,
 };
 use crate::model::{Event, Provider, Session, Speed, Ts, Usage};
 use crate::swear::Dict;
@@ -124,8 +124,7 @@ impl RawUsage {
 // MARK: Files
 
 /// A spawned agent's usage from its tool result, used when its own log is missing.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Fallback {
+struct Fallback {
   id: String,
   ts: Option<Ts>,
   /// Where in its session's events the result came.
@@ -134,21 +133,11 @@ pub struct Fallback {
   speed: Option<Speed>,
 }
 
-/// A log's agent calls and results, and an agent's spawning tool call from its
-/// `<agent>.meta.json`.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Links {
-  calls: Vec<AgentCall>,
-  fallbacks: Vec<Fallback>,
-  tool_use_id: Option<String>,
-}
-
 struct Parsed {
   path: PathBuf,
   session: Session,
   calls: Vec<AgentCall>,
   fallbacks: Vec<Fallback>,
-  tool_use_id: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -157,79 +146,49 @@ enum TurnKey {
   Anonymous(String),
 }
 
-/// Each root's `projects`, or the root itself.
-pub fn dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
-  let dir = |x: &PathBuf| match x.join("projects") {
-    projects if projects.is_dir() => projects,
-    _ => x.to_path_buf(),
-  };
-  roots.iter().map(dir).collect()
-}
-
-/// The logs under each root's `projects` (or the root itself); an agent's with its meta file.
-pub fn find(roots: &[PathBuf]) -> Vec<Source> {
-  let dirs = dirs(roots);
-  let files: Vec<(&PathBuf, PathBuf)> = dirs
-    .iter()
-    .flat_map(|x| jsonl_files(std::slice::from_ref(x)).into_iter().map(move |f| (x, f)))
-    .collect();
-  files
-    .into_par_iter()
-    .map(|(root, path)| {
-      let meta: Vec<PathBuf> =
-        session_dir(&path).map(|_| path.with_extension("meta.json")).into_iter().collect();
-      Source::found(Provider::Claude, root, path, &meta)
-    })
-    .collect()
-}
-
-pub fn read(path: &Path, swears: Option<&Dict>) -> Unit {
-  let x = parse_file(path, swears);
-  let tool_use_id =
-    session_dir(path).filter(|_| !x.session.is_main).and_then(|_| tool_use_id(path));
-  let links = Links { calls: x.calls, fallbacks: x.fallbacks, tool_use_id };
-  Unit { session: Some(x.session), links: super::Links::Claude(links) }
-}
-
-#[cfg(test)]
+/// Sessions under each root's `projects` (or the root itself); agents carry their main session's
+/// root and working directory. A session found in several roots (a copied profile) is read from the
+/// root with its longest main log, agents included, and skipped in the others.
 pub fn parse(roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
-  super::parse(Provider::Claude, roots, swears)
-}
+  let files: Vec<(usize, PathBuf)> = roots
+    .iter()
+    .map(|x| match x.join("projects") {
+      projects if projects.is_dir() => projects,
+      _ => x.to_path_buf(),
+    })
+    .enumerate()
+    .flat_map(|(i, x)| jsonl_files(&[x]).into_iter().map(move |x| (i, x)))
+    .collect();
 
-/// Sessions of the logs in found order; agents carry their main session's root and working
-/// directory. A session found in several roots (a copied profile) is read from the root with its
-/// longest main log, agents included, and skipped in the others.
-pub fn combine(items: Vec<Source>) -> Vec<Session> {
   // A file's session: its own stem for a main log, its main log's for an agent.
   let key = |path: &Path| {
     let main = session_dir(path).unwrap_or_else(|| path.with_extension(""));
     main.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default()
   };
-  let mut best: HashMap<String, (u64, String)> = HashMap::new();
-  for x in items.iter().filter(|x| session_dir(&x.path).is_none()) {
-    let at = best.entry(key(&x.path)).or_insert((x.size, x.root.clone()));
-    if x.size > at.0 {
-      *at = (x.size, x.root.clone());
+  let mut best: HashMap<String, (u64, usize)> = HashMap::new();
+  for (root, path) in files.iter().filter(|x| session_dir(&x.1).is_none()) {
+    let size = std::fs::metadata(path).map_or(0, |x| x.len());
+    let x = best.entry(key(path)).or_insert((size, *root));
+    if size > x.0 {
+      *x = (size, *root);
     }
   }
-  let mut parsed: Vec<Parsed> = items
+  let files: Vec<PathBuf> = files
     .into_iter()
-    .filter(|x| best.get(&key(&x.path)).is_none_or(|b| b.1 == x.root))
-    .filter_map(|x| {
-      let super::Links::Claude(links) = x.unit.links else { return None };
-      let session = x.unit.session?;
-      let (calls, fallbacks, tool_use_id) = (links.calls, links.fallbacks, links.tool_use_id);
-      Some(Parsed { path: x.path, session, calls, fallbacks, tool_use_id })
-    })
+    .filter(|(root, path)| best.get(&key(path)).is_none_or(|x| x.1 == *root))
+    .map(|x| x.1)
     .collect();
+
+  let mut parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x, swears)).collect();
   let mut agents: HashMap<(PathBuf, String), usize> = HashMap::new();
   for (i, x) in parsed.iter().enumerate() {
     let Some(dir) = session_dir(&x.path).filter(|_| !x.session.is_main) else { continue };
     agents.insert((dir.clone(), x.session.id.clone()), i);
-    if let Some(id) = x.tool_use_id.clone() {
+    if let Some(id) = tool_use_id(&x.path) {
       agents.insert((dir, id), i);
     }
   }
+
   let mut parents: HashMap<usize, usize> = HashMap::new();
   for i in 0..parsed.len() {
     let path = &parsed[i].path;
@@ -262,8 +221,7 @@ pub fn combine(items: Vec<Source>) -> Vec<Session> {
       let mut session = Session::new(&x.id, false, "unknown", Provider::Claude);
       let usage = Some(x.usage);
       session.events.push(Event { ts: x.ts, usage, speed: x.speed, ..Default::default() });
-      let path = PathBuf::new();
-      parsed.push(Parsed { path, session, calls: vec![], fallbacks: vec![], tool_use_id: None });
+      parsed.push(Parsed { path: PathBuf::new(), session, calls: vec![], fallbacks: vec![] });
     }
     let events = &mut parsed[parent].session.events;
     for (at, ts) in stamps.into_iter().rev() {
@@ -324,7 +282,7 @@ fn parse_file(path: &Path, swears: Option<&Dict>) -> Parsed {
     true
   });
   replies.finish(&mut session.events);
-  Parsed { path: path.to_path_buf(), session, calls, fallbacks, tool_use_id: None }
+  Parsed { path: path.to_path_buf(), session, calls, fallbacks }
 }
 
 /// One API response spans several lines (one per content block); merge them into one event.

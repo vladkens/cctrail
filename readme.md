@@ -67,7 +67,8 @@ cctrail days                 # per day; also weeks, months, and --models for a b
 cctrail --provider codex     # one harness only: claude, codex, pi or fx
 cctrail --json               # everything with full paths and exact counts
 cctrail update-pricing       # download the latest prices now
-cctrail export FILE          # save the parsed history into an SQLite file, as a backup
+cctrail export FILE          # save the history into an SQLite file
+cctrail import FILE          # add an exported history to the reports
 ```
 
 Any argument, `--json` or a pipe prints a text report; `NO_COLOR=1` turns its colors off. Weeks
@@ -145,10 +146,13 @@ per project, approximate per day. Claude Code deletes sessions older than 30 day
 [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically)
 to keep a long history.
 
-`cctrail export FILE` saves what cctrail reads into one SQLite file: a backup before the logs are
-deleted or you move to another machine. It holds what the numbers need (times, models, tokens,
-directories) and the swear counts, never a prompt's or answer's text; paths under your home are kept
-as `~/…`. `cctrail import`, to read such a file back into the reports, comes later.
+To move to another machine or keep a backup before the logs are deleted, `cctrail export FILE`
+saves the sessions cctrail reads into one SQLite file, and `cctrail import FILE` on the other
+machine adds them to every report, the interactive view included. The file holds what the numbers
+need (times, models, tokens, directories) and the swear counts, never a prompt's or answer's text;
+paths under your home are kept as `~/…` and read back in the new one. An import is copied into
+`~/.local/share/cctrail` (`XDG_DATA_HOME`; `%LOCALAPPDATA%` on Windows), once per file; a session
+still in the local logs is read from them, an imported one fills in what the logs no longer have.
 
 ### Swearing
 
@@ -176,7 +180,7 @@ The Swears view: how often you scold each model, adjusted for how much you used 
   100`, overall being your `% dir` in the period, so a few messages can't move a model far from
   your average. Shares need 10 messages; messages to no known model are `<unknown>`.
 - **Privacy:** each prompt keeps only counts and a hash, never its text, for this view and
-  `cctrail export`.
+  `cctrail export` and `import`.
 - **Your lists:** `~/.config/cctrail/swear/*.txt`, insults in `insult-*.txt`. Lists for other
   languages are welcome as pull requests.
 
@@ -221,7 +225,7 @@ cargo uninstall cctrail                                                         
   history for the price of each day.
 - [ratatui](https://github.com/ratatui/ratatui) (MIT): the interactive view.
 - [SQLite](https://sqlite.org) (public domain) through
-  [rusqlite](https://github.com/rusqlite/rusqlite) (MIT): `cctrail export`.
+  [rusqlite](https://github.com/rusqlite/rusqlite) (MIT): `cctrail export` and `import`.
 
 ## 📝 License
 

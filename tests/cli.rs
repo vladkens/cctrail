@@ -66,6 +66,9 @@ struct Run {
   config: Option<PathBuf>,
   cwd: Option<PathBuf>,
   cache: PathBuf,
+  home: Option<PathBuf>,
+  /// Where `import` keeps its files, read on every run.
+  data: PathBuf,
 }
 
 impl Run {
@@ -79,6 +82,8 @@ impl Run {
       config,
       cwd: None,
       cache: fixtures().join("missing"),
+      home: None,
+      data: fixtures().join("missing"),
     }
   }
 
@@ -105,6 +110,10 @@ impl Run {
     cmd.env("FX_HOME", &self.fx).env("XDG_CONFIG_HOME", fixtures().join("missing"));
     // The user's downloaded prices must not change the numbers, and tests never download.
     cmd.env("XDG_CACHE_HOME", &self.cache).env("CCTRAIL_NO_UPDATE", "1").env_remove("COLUMNS");
+    cmd.env("XDG_DATA_HOME", &self.data);
+    if let Some(x) = &self.home {
+      cmd.env("HOME", x);
+    }
     match &self.config {
       Some(x) => cmd.env("CCTRAIL_CONFIG", x),
       None => cmd.env_remove("CCTRAIL_CONFIG"),
@@ -211,7 +220,7 @@ fn explains_missing_project_config() {
   let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
   cmd.args(["--provider", "claude"]).env("XDG_CONFIG_HOME", &dir).env_remove("CCTRAIL_CONFIG");
   cmd.env("CLAUDE_CONFIG_DIR", &run.claude).env("XDG_CACHE_HOME", fixtures().join("missing"));
-  cmd.env("CCTRAIL_NO_UPDATE", "1");
+  cmd.env("CCTRAIL_NO_UPDATE", "1").env("XDG_DATA_HOME", fixtures().join("missing"));
   let out = String::from_utf8(cmd.output().unwrap().stdout).unwrap();
   std::fs::remove_dir_all(&dir).unwrap();
 
@@ -530,6 +539,7 @@ fn prices_each_day_at_its_rate() {
     cmd
       .env("FX_HOME", &run.fx)
       .env("XDG_CACHE_HOME", &run.cache)
+      .env("XDG_DATA_HOME", &run.data)
       .env("CCTRAIL_CONFIG", fixtures().join("empty.toml"));
     let value: Value = serde_json::from_slice(&cmd.output().unwrap().stdout).unwrap();
     value["periods"]
@@ -557,23 +567,55 @@ fn prints_version() {
 }
 
 #[test]
-fn exports_the_history_into_a_file() {
-  let dir = tmp("export");
+fn moves_the_history_to_another_machine() {
+  let dir = tmp("move");
   let file = dir.join("history.db");
   let path = file.to_str().unwrap();
-  let run = Run::new("claude", "codex").pi("pi").fx("fx");
-  assert_eq!(run.stdout(&["export", path]), format!("Exported 10 sessions to {path}\n"));
-  let conn = rusqlite::Connection::open(&file).unwrap();
-  let count = |sql: &str| conn.query_row(sql, [], |x| x.get::<_, i64>(0)).unwrap();
-  assert_eq!(count("SELECT count(*) FROM sessions"), 10);
-  assert!(count("SELECT count(*) FROM events") > 10);
-  let version: String = conn
-    .query_row("SELECT value FROM meta WHERE key = 'format_version'", [], |x| x.get(0))
-    .unwrap();
-  assert_eq!(version, "1");
-  let err = run.exec(&["export"]).stderr;
-  assert!(err.ends_with(b"`cctrail export` needs a FILE\n"), "{}", String::from_utf8_lossy(&err));
+  let report = |run: &Run| {
+    let value = run.json(&["--by", "dir", "--json"]);
+    let groups = value["groups"].as_array().unwrap().iter();
+    let mut dirs: Vec<String> = groups.map(|x| x["workdir"].as_str().unwrap().into()).collect();
+    dirs.sort();
+    (dirs, value["total"].clone())
+  };
+
+  // Machine A, at home in the fixtures' `/repo`.
+  let mut a = Run::new("claude", "codex").pi("pi").fx("fx");
+  a.home = Some(REPO.into());
+  assert_eq!(a.stdout(&["export", path]), format!("Exported 10 sessions to {path}\n"));
+  let db = rusqlite::Connection::open(&file).unwrap();
+  let count = |qs: &str| db.query_row(qs, [], |x| x.get::<_, i64>(0)).unwrap();
+  assert!(count("SELECT count(*) FROM sessions WHERE workdir = '~'") > 0);
+  assert_eq!(count(&format!("SELECT count(*) FROM sessions WHERE workdir LIKE '{REPO}%'")), 0);
   // Windows deletes no file still open.
-  drop(conn);
+  drop(db);
+
+  // Machine B without the logs imports it once, with its paths in B's home.
+  let mut b = Run::new("missing", "missing");
+  (b.home, b.data) = (Some(dir.join("b")), dir.join("data"));
+  assert_eq!(b.stdout(&["import", path]), format!("Imported 10 sessions from {path}\n"));
+  assert_eq!(b.stdout(&["import", path]), format!("{path} is imported already\n"));
+  assert_eq!(std::fs::read_dir(dir.join("data/cctrail")).unwrap().count(), 1);
+  let (dirs, total) = report(&a);
+  let home = dir.join("b").to_str().unwrap().to_string();
+  let mut moved: Vec<String> = dirs.iter().map(|x| x.replace(REPO, &home)).collect();
+  moved.sort();
+  assert_ne!(moved, dirs);
+  assert_eq!(report(&b), (moved, total.clone()));
+
+  // With A's logs too, their sessions win and nothing counts twice; with some of them, the import
+  // fills in the rest.
+  for (claude, codex) in [("claude", "codex"), ("claude", "missing")] {
+    let mut c = Run::new(claude, codex).pi("pi").fx("fx");
+    (c.home, c.data) = (Some(REPO.into()), dir.join("data"));
+    assert_eq!(report(&c), (dirs.clone(), total.clone()), "{codex}");
+  }
+
+  for cmd in ["export", "import"] {
+    let err = String::from_utf8(a.exec(&[cmd]).stderr).unwrap();
+    assert!(err.ends_with(&format!("`cctrail {cmd}` needs a FILE\n")), "{err}");
+  }
+  let err = String::from_utf8(b.exec(&["import", "missing.db"]).stderr).unwrap();
+  assert!(err.contains("failed to import missing.db"), "{err}");
   std::fs::remove_dir_all(&dir).unwrap();
 }

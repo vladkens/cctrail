@@ -13,7 +13,7 @@ use crate::model::{Provider, Session};
 use crate::output::{self, Term};
 use crate::parser::parse_history;
 use crate::swear::Dict;
-use crate::{pricing, workdir};
+use crate::{db, pricing, workdir};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -26,6 +26,7 @@ pub enum Cmd {
   Months,
   UpdatePricing,
   Export,
+  Import,
 }
 
 impl Cmd {
@@ -37,6 +38,7 @@ impl Cmd {
       "months" => Some(Self::Months),
       "update-pricing" => Some(Self::UpdatePricing),
       "export" => Some(Self::Export),
+      "import" => Some(Self::Import),
       _ => None,
     }
   }
@@ -50,6 +52,7 @@ impl Cmd {
       Self::Months => "months",
       Self::UpdatePricing => "update-pricing",
       Self::Export => "export",
+      Self::Import => "import",
     }
   }
 
@@ -70,7 +73,7 @@ pub struct Args {
   pub json: bool,
   /// Every row, no `other` collapse.
   pub all: bool,
-  /// `export`'s.
+  /// `export`'s and `import`'s.
   pub file: Option<PathBuf>,
 }
 
@@ -136,7 +139,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
           cmd = Some(c);
           continue;
         }
-        if cmd == Some(Cmd::Export) && args.file.is_none() {
+        if matches!(cmd, Some(Cmd::Export | Cmd::Import)) && args.file.is_none() {
           args.file = Some(PathBuf::from(x));
           continue;
         }
@@ -159,12 +162,12 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
       &["--since", "--until", "--provider", "--json", "--models"]
     }
     Cmd::Here => &["--provider", "--json"],
-    Cmd::UpdatePricing | Cmd::Export => &[],
+    Cmd::UpdatePricing | Cmd::Export | Cmd::Import => &[],
   };
   if let Some(x) = flags.iter().find(|x| !allowed.contains(&x.as_str())) {
     bail!("{x} is not an option of `cctrail {}`", args.cmd.name());
   }
-  if args.cmd == Cmd::Export && args.file.is_none() {
+  if matches!(args.cmd, Cmd::Export | Cmd::Import) && args.file.is_none() {
     bail!("`cctrail {}` needs a FILE", args.cmd.name());
   }
   if args.period.is_some() && !args.cmd.has_period() {
@@ -198,11 +201,8 @@ pub fn run(args: &Args) -> Result<()> {
     Cmd::Weeks => usage(args, Granularity::Week),
     Cmd::Months => usage(args, Granularity::Month),
     Cmd::UpdatePricing => update_pricing(),
-    Cmd::Export => {
-      let file = args.file.as_deref().unwrap_or(Path::new(""));
-      let n = crate::export::export(file)?;
-      output::emit(&format!("Exported {n} sessions to {}\n", file.display()))
-    }
+    Cmd::Export => export(args.file.as_deref().unwrap_or(Path::new(""))),
+    Cmd::Import => import(args.file.as_deref().unwrap_or(Path::new(""))),
   }
 }
 
@@ -370,11 +370,24 @@ fn update_pricing() -> Result<()> {
   output::emit(&format!("Updated {}\n", path.display()))
 }
 
-/// The sessions, with the price catalog refreshed beside the parsing when it is due; with a
-/// dictionary, the swearing in their prompts too.
+fn export(file: &Path) -> Result<()> {
+  let n = db::export(file)?;
+  output::emit(&format!("Exported {n} sessions to {}\n", file.display()))
+}
+
+fn import(file: &Path) -> Result<()> {
+  match db::import(file)? {
+    Some(n) => output::emit(&format!("Imported {n} sessions from {}\n", file.display())),
+    None => output::emit(&format!("{} is imported already\n", file.display())),
+  }
+}
+
+/// The sessions of the logs and the imported ones they lack, with the price catalog refreshed
+/// beside the parsing when it is due; with a dictionary, the swearing in their prompts too.
 pub fn sessions(provider: Option<Provider>, swears: Option<&Dict>) -> Vec<Session> {
   let refresh = pricing::refresh();
-  let sessions = parse_history(provider, swears);
+  let mut sessions = parse_history(provider, swears);
+  db::merge(&mut sessions, provider);
   pricing::finish(refresh);
   sessions
 }
@@ -398,7 +411,8 @@ Usage:
   cctrail here                                the current directory's project
   cctrail days|weeks|months [period] [--models]
   cctrail update-pricing                      download the latest model prices
-  cctrail export FILE                         save the parsed history into an SQLite file
+  cctrail export FILE                         save the history into an SQLite file
+  cctrail import FILE                         add an exported history to every report
 
 Periods: today, yesterday, this-week, last-week, this-month, last-month, all (default)
 

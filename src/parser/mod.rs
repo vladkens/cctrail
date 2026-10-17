@@ -12,141 +12,39 @@ use std::io::{BufRead, BufReader};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
-use rayon::prelude::*;
 use serde::de::{self, DeserializeOwned, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::model::{Event, Provider, Session, Ts};
 use crate::swear::Dict;
 
-/// The harnesses asked for, each with its history roots.
-pub fn harnesses(provider: Option<Provider>) -> Vec<(Provider, Vec<PathBuf>)> {
-  let all = [Provider::Claude, Provider::Codex, Provider::Pi, Provider::Fx];
-  let roots = |x: Provider| match x {
-    Provider::Claude => history_roots("CLAUDE_CONFIG_DIR", ".claude"),
-    Provider::Codex => history_roots("CODEX_HOME", ".codex"),
-    Provider::Pi => pi::roots(),
-    Provider::Fx => vec![fx::root()],
-  };
-  all.into_iter().filter(|x| provider.is_none_or(|p| p == *x)).map(|x| (x, roots(x))).collect()
-}
-
 /// All sessions of every harness, or of one; with a dictionary, the swearing in their main
 /// sessions' prompts too.
 pub fn parse_history(provider: Option<Provider>, swears: Option<&Dict>) -> Vec<Session> {
-  let sessions = harnesses(provider)
-    .into_par_iter()
-    .map(|(p, roots)| combine(p, &roots, read(p, &roots, swears, 0)));
-  sessions.collect::<Vec<_>>().concat()
-}
-
-/// A harness's files, each read alone.
-pub fn read(
-  provider: Provider,
-  roots: &[PathBuf],
-  swears: Option<&Dict>,
-  dict: i64,
-) -> Vec<Source> {
-  find(provider, roots).into_par_iter().map(|x| x.read(swears, dict)).collect()
-}
-
-// MARK: Sources
-
-/// What reading one history file alone gives; the work across files (copies, agents, forks) runs
-/// on these. An export keeps them, so history read back counts as read from the logs.
-#[derive(Clone, Debug, Default)]
-pub struct Unit {
-  pub session: Option<Session>,
-  pub links: Links,
-}
-
-/// What a harness's work across files needs of a file besides its session.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Links {
-  #[default]
-  None,
-  Claude(claude::Links),
-  Codex(codex::Links),
-  Pi(pi::Links),
-  Fx(fx::Links),
-}
-
-/// A history file (fx: a session directory) under one of its harness's roots, and what reading it
-/// gave: a file of an export.
-#[derive(Clone, Debug)]
-pub struct Source {
-  pub provider: Provider,
-  pub root: String,
-  pub path: PathBuf,
-  pub size: u64,
-  /// Nanoseconds since the Unix epoch.
-  pub mtime: i64,
-  /// The parser version and swear dictionary it was read with.
-  pub version: (i64, i64),
-  pub unit: Unit,
-}
-
-impl Source {
-  /// A file found, not read yet; with the files beside it that its reading takes in, their sizes
-  /// summed and the latest mtime.
-  pub fn found(provider: Provider, root: &Path, path: PathBuf, beside: &[PathBuf]) -> Self {
-    let (mut size, mut mtime) = (0u64, 0i64);
-    for x in std::iter::once(&path).chain(beside).filter_map(|x| std::fs::metadata(x).ok()) {
-      size = size.saturating_add(x.len());
-      let at = x.modified().ok().and_then(|x| x.duration_since(std::time::UNIX_EPOCH).ok());
-      mtime = mtime.max(at.map_or(0, |x| i64::try_from(x.as_nanos()).unwrap_or(i64::MAX)));
-    }
-    let root = root.to_string_lossy().to_string();
-    Self { provider, root, path, size, mtime, version: (0, 0), unit: Unit::default() }
-  }
-
-  pub fn read(mut self, swears: Option<&Dict>, dict: i64) -> Self {
-    self.unit = match self.provider {
-      Provider::Claude => claude::read(&self.path, swears),
-      Provider::Codex => codex::read(&self.path, swears),
-      Provider::Pi => pi::read(&self.path, swears),
-      Provider::Fx => fx::read(&self.path, swears),
-    };
-    self.version = (crate::export::PARSER_VERSION, dict);
-    self
-  }
-}
-
-pub fn find(provider: Provider, roots: &[PathBuf]) -> Vec<Source> {
-  match provider {
-    Provider::Claude => claude::find(roots),
-    Provider::Codex => codex::find(roots),
-    Provider::Pi => pi::find(roots),
-    Provider::Fx => fx::find(&roots[0]),
-  }
-}
-
-/// A harness's sessions, its files read and combined.
-#[cfg(test)]
-pub fn parse(provider: Provider, roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
-  combine(provider, roots, read(provider, roots, swears, 0))
-}
-
-/// A harness's sessions from its sources, in the order its files are found: by root (those of
-/// roots gone since last), then path.
-pub fn combine(provider: Provider, roots: &[PathBuf], mut sources: Vec<Source>) -> Vec<Session> {
-  let order = match provider {
-    Provider::Claude => claude::dirs(roots),
-    Provider::Codex => roots.to_vec(),
-    // Found across the roots by path alone.
-    Provider::Pi | Provider::Fx => vec![],
+  let want = |x: Provider| provider.is_none_or(|p| p == x);
+  let claude = || match want(Provider::Claude) {
+    true => claude::parse(&history_roots("CLAUDE_CONFIG_DIR", ".claude"), swears),
+    false => vec![],
   };
-  let order: Vec<String> = order.iter().map(|x| x.to_string_lossy().to_string()).collect();
-  let rank = |x: &Source| order.iter().position(|r| *r == x.root).unwrap_or(order.len());
-  sources.sort_by(|a, b| (rank(a), &a.root, &a.path).cmp(&(rank(b), &b.root, &b.path)));
-  match provider {
-    Provider::Claude => claude::combine(sources),
-    Provider::Codex => codex::combine(sources),
-    Provider::Pi => pi::combine(sources),
-    Provider::Fx => fx::combine(sources),
-  }
+  let codex = || match want(Provider::Codex) {
+    true => codex::parse(&history_roots("CODEX_HOME", ".codex"), swears),
+    false => vec![],
+  };
+  let pi = || match want(Provider::Pi) {
+    true => pi::parse(&pi::roots(), swears),
+    false => vec![],
+  };
+  let fx = || match want(Provider::Fx) {
+    true => fx::parse(&fx::root(), swears),
+    false => vec![],
+  };
+  let ((mut sessions, codex), (pi, fx)) =
+    rayon::join(|| rayon::join(claude, codex), || rayon::join(pi, fx));
+  sessions.extend(codex);
+  sessions.extend(pi);
+  sessions.extend(fx);
+  sessions
 }
 
 /// A harness's history directories: `$var` when set, else `~/<base>` and every `~/<base>-*`
@@ -179,7 +77,7 @@ fn profiles(home: &Path, base: &str) -> Vec<PathBuf> {
 }
 
 /// A tool call that may have spawned an agent.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct AgentCall {
   pub tool_id: String,
   pub agent_id: Option<String>,
