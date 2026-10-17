@@ -12,6 +12,7 @@ use super::{
   own_words, parse_ts,
 };
 use crate::model::{Event, Provider, Session, Speed, Usage};
+use crate::swear::Dict;
 use crate::workdir::normalize_remote;
 
 /// A token count's six numbers: a fork replays its parent's counts, found by these.
@@ -178,7 +179,7 @@ struct Parsed {
 /// agents carry their main session's root and working directory. A rollout id seen twice counts
 /// once: within a root the later file wins (`sessions` over `archived_sessions`), across roots (a
 /// copied profile) the longest file, whole.
-pub fn parse(roots: &[PathBuf], prompts: bool) -> Vec<Session> {
+pub fn parse(roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
   let files: Vec<(usize, PathBuf)> = roots
     .iter()
     .enumerate()
@@ -212,7 +213,7 @@ pub fn parse(roots: &[PathBuf], prompts: bool) -> Vec<Session> {
     }
   }
 
-  let mut parsed: Vec<Parsed> = rollouts.par_iter().map(|x| parse_file(x, prompts)).collect();
+  let mut parsed: Vec<Parsed> = rollouts.par_iter().map(|x| parse_file(x, swears)).collect();
   let signatures: HashMap<&str, Vec<Signature>> =
     rollouts.iter().zip(&parsed).map(|(r, p)| (r.id.as_str(), p.signatures.clone())).collect();
   for (rollout, item) in rollouts.iter().zip(&mut parsed) {
@@ -308,8 +309,8 @@ fn nested_parent_id(value: &Value) -> Option<String> {
   }
 }
 
-fn parse_file(rollout: &Rollout, prompts: bool) -> Parsed {
-  let prompts = prompts && rollout.parent_id.is_none() && rollout.typed;
+fn parse_file(rollout: &Rollout, swears: Option<&Dict>) -> Parsed {
+  let swears = swears.filter(|_| rollout.parent_id.is_none() && rollout.typed);
   let mut session =
     Session::new(&rollout.id, rollout.parent_id.is_none(), &rollout.workdir, Provider::Codex);
   session.remote = rollout.remote.clone();
@@ -353,20 +354,25 @@ fn parse_file(rollout: &Rollout, prompts: bool) -> Parsed {
       (_, Some("user_message")) if event_msg && !inherited => {
         if let Some(ts) = parse_ts(&line.timestamp).filter(|_| p.message.has_text()) {
           let mut event = Event::activity(ts);
-          if prompts && let Some(words) = prompt(raw) {
-            replies.prompt(&mut event, words);
+          if let Some(dict) = swears
+            && let Some(words) = prompt(raw)
+          {
+            replies.prompt(&mut event, dict, ts, &words);
           }
           records.push(Record { event: Some(event), signature: None });
         }
         assistant = None;
       }
-      // Codex logs a prompt as a `UserMessage` item instead since 2026-08.
-      (_, Some("item_completed")) if event_msg && prompts => {
-        if let Some(ts) = parse_ts(&line.timestamp)
+      // Codex logs a prompt as a `UserMessage` item instead since 2026-08. Only its prompt is
+      // kept, in an event of no time, which `swear::take_prompts` takes out again: the reports
+      // don't count these as activity.
+      (_, Some("item_completed")) if event_msg => {
+        if let Some(dict) = swears
+          && let Some(ts) = parse_ts(&line.timestamp)
           && let Some(words) = prompt(raw)
         {
-          let mut event = Event::activity(ts);
-          replies.prompt(&mut event, words);
+          let mut event = Event::default();
+          replies.prompt(&mut event, dict, ts, &words);
           records.push(Record { event: Some(event), signature: None });
         }
       }
@@ -377,7 +383,9 @@ fn parse_file(rollout: &Rollout, prompts: bool) -> Parsed {
         if total.is_some() && total == prev_total {
           return true;
         }
-        if prompts && let Some(x) = info.model.str().or(model.as_deref()) {
+        if swears.is_some()
+          && let Some(x) = info.model.str().or(model.as_deref())
+        {
           replies.answer(x);
         }
         let last = info.last_token_usage.0.as_ref().map(RawUsage::values);
@@ -427,7 +435,7 @@ fn parse_file(rollout: &Rollout, prompts: bool) -> Parsed {
 
 /// A prompt's own words: a `user_message`'s, or a `UserMessage` item's. Only the fields read are
 /// parsed: other items hold commands' output.
-fn prompt(raw: &[u8]) -> Option<Box<str>> {
+fn prompt(raw: &[u8]) -> Option<String> {
   #[derive(Deserialize, Default)]
   #[serde(default)]
   struct Line {
@@ -571,22 +579,18 @@ mod tests {
     // Injected context, an agent's, a review's and `codex exec`'s prompts and the fork's replay are
     // no prompts; a `UserMessage` item is one, without the answer to Codex's question. The
     // fork's own prompt counts toward the last answer it replayed.
-    let expected = [
-      ("gpt-5.4", "wtf now"),
-      ("gpt-5.4", "what the fuck"),
-      ("gpt-5.4", "please rename it"),
-      ("gpt-5.5", "shit, again"),
-    ];
-    let sessions = parse(std::slice::from_ref(&root), true);
+    // `wtf now`, `what the fuck`, `please rename it`, `shit, again`.
+    let expected = [("gpt-5.4", 2, 1), ("gpt-5.4", 3, 1), ("gpt-5.4", 3, 0), ("gpt-5.5", 2, 1)];
+    let sessions = parse(std::slice::from_ref(&root), Some(&super::super::tests::dict()));
     assert_eq!(super::super::tests::prompts(&sessions), expected);
-    let sessions = parse(&[root], false);
+    let sessions = parse(&[root], None);
     assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
   }
 
   #[test]
   fn links_only_spawned_agent_and_removes_fork_replay() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex");
-    let sessions = parse(std::slice::from_ref(&root), false);
+    let sessions = parse(std::slice::from_ref(&root), None);
     let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
     let (main, agent, fork) = (find("codex-main-1"), find("codex-agent-1"), find("codex-fork-1"));
 
@@ -597,7 +601,7 @@ mod tests {
     assert_eq!(total(&sessions.iter().collect::<Vec<_>>()), 455);
 
     // The same rollouts under a second root (a copied profile) count once.
-    let twice = parse(&[root.clone(), root], false);
+    let twice = parse(&[root.clone(), root], None);
     assert_eq!(twice.len(), sessions.len());
     assert_eq!(total(&twice.iter().collect::<Vec<_>>()), 455);
   }
@@ -619,7 +623,7 @@ mod tests {
     };
     let all = |roots: &[&str]| {
       let roots: Vec<PathBuf> = roots.iter().map(|x| base.join(x)).collect();
-      total(&parse(&roots, false).iter().collect::<Vec<_>>())
+      total(&parse(&roots, None).iter().collect::<Vec<_>>())
     };
 
     // Across roots the longest file wins whole, in either order.
@@ -710,7 +714,7 @@ mod tests {
     ];
     std::fs::create_dir_all(base.join("sessions")).unwrap();
     std::fs::write(base.join("sessions/rollout.jsonl"), lines.join("\n")).unwrap();
-    let sessions = parse(std::slice::from_ref(&base), false);
+    let sessions = parse(std::slice::from_ref(&base), None);
     let effort: Vec<_> = sessions[0].events.iter().map(|x| x.effort.as_deref()).collect();
     assert_eq!(effort, [None, Some("high"), Some("high"), Some("low"), None]);
     std::fs::remove_dir_all(&base).unwrap();

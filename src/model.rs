@@ -124,8 +124,20 @@ pub struct Event {
   pub background: bool,
   pub sidechain: bool,
   pub failed: bool,
-  /// A prompt's own words, only for `swears`: its `model` is the one it counts toward.
-  pub prompt: Option<Box<str>>,
+  /// The swearing in a prompt, read only for the interactive view.
+  pub prompt: Option<Box<Prompt>>,
+}
+
+/// A prompt as the swear count takes it: no text, its counts and a hash of its words.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Prompt {
+  pub ts: Ts,
+  /// The model it counts toward: the last to answer before it in its session.
+  pub model: Option<String>,
+  pub words: u32,
+  pub swears: u32,
+  /// Of its normalized words: a copy in another session (a fork, a copied file) is the same.
+  pub hash: u64,
 }
 
 impl Event {

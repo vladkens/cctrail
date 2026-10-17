@@ -11,7 +11,8 @@ use crate::metrics::{self, DateRange, Granularity, Period, UsageSummary};
 use crate::model::{Provider, Session};
 use crate::output::{self, Term};
 use crate::parser::parse_history;
-use crate::{pricing, swear, workdir};
+use crate::swear::Dict;
+use crate::{pricing, workdir};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -22,7 +23,6 @@ pub enum Cmd {
   Days,
   Weeks,
   Months,
-  Swears,
   UpdatePricing,
 }
 
@@ -33,7 +33,6 @@ impl Cmd {
       "days" => Some(Self::Days),
       "weeks" => Some(Self::Weeks),
       "months" => Some(Self::Months),
-      "swears" => Some(Self::Swears),
       "update-pricing" => Some(Self::UpdatePricing),
       _ => None,
     }
@@ -46,13 +45,12 @@ impl Cmd {
       Self::Days => "days",
       Self::Weeks => "weeks",
       Self::Months => "months",
-      Self::Swears => "swears",
       Self::UpdatePricing => "update-pricing",
     }
   }
 
   fn has_period(self) -> bool {
-    matches!(self, Self::Stats | Self::Days | Self::Weeks | Self::Months | Self::Swears)
+    matches!(self, Self::Stats | Self::Days | Self::Weeks | Self::Months)
   }
 }
 
@@ -64,7 +62,6 @@ pub struct Args {
   pub until: Option<Date>,
   pub provider: Option<Provider>,
   pub by: By,
-  /// By model: `--models` for periods, `swears` unless `--by project`.
   pub models: bool,
   pub json: bool,
   /// Every row, no `other` collapse.
@@ -91,7 +88,6 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
     all: false,
   };
   let mut cmd = None;
-  let mut by = None;
   let mut flags = vec![];
   let mut it = argv.iter();
   while let Some(arg) = it.next() {
@@ -116,7 +112,11 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
         };
         args.provider = Some(x);
       }
-      "--by" => by = Some(value()?),
+      "--by" => {
+        let v = value()?;
+        let Some(x) = By::parse(&v) else { bail!("--by must be project, group or dir: {v}") };
+        args.by = x;
+      }
       "--models" => args.models = true,
       "--json" => args.json = true,
       "--all" => args.all = true,
@@ -147,22 +147,11 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
     Cmd::Days | Cmd::Weeks | Cmd::Months => {
       &["--since", "--until", "--provider", "--json", "--models"]
     }
-    Cmd::Swears => &["--since", "--until", "--provider", "--json", "--by", "--all"],
     Cmd::Here => &["--provider", "--json"],
     Cmd::UpdatePricing => &[],
   };
   if let Some(x) = flags.iter().find(|x| !allowed.contains(&x.as_str())) {
     bail!("{x} is not an option of `cctrail {}`", args.cmd.name());
-  }
-  match (args.cmd, by.as_deref()) {
-    (Cmd::Swears, None | Some("model")) => args.models = true,
-    (Cmd::Swears, Some("project")) => {}
-    (Cmd::Swears, Some(v)) => bail!("--by must be model or project: {v}"),
-    (_, Some(v)) => match By::parse(v) {
-      Some(x) => args.by = x,
-      None => bail!("--by must be project, group or dir: {v}"),
-    },
-    (_, None) => {}
   }
   if args.period.is_some() && !args.cmd.has_period() {
     bail!("`cctrail {}` takes no period", args.cmd.name());
@@ -194,7 +183,6 @@ pub fn run(args: &Args) -> Result<()> {
     Cmd::Days => usage(args, Granularity::Day),
     Cmd::Weeks => usage(args, Granularity::Week),
     Cmd::Months => usage(args, Granularity::Month),
-    Cmd::Swears => swears(args),
     Cmd::UpdatePricing => update_pricing(),
   }
 }
@@ -223,7 +211,7 @@ fn stats(args: &Args) -> Result<()> {
     By::Dir => (Config::default(), None),
     _ => (Config::load()?, config::config_path()),
   };
-  let mut sessions = sessions(args.provider);
+  let mut sessions = sessions(args.provider, None);
   workdir::fold_sessions(&mut sessions);
   let events = metrics::billable_events(&sessions);
   let stats = metrics::stats_by(&sessions, &events, &range, &config, args.by);
@@ -251,7 +239,7 @@ fn stats(args: &Args) -> Result<()> {
 
 fn usage(args: &Args, gran: Granularity) -> Result<()> {
   let range = DateRange::resolve(args.period, args.since, args.until);
-  let sessions = sessions(args.provider);
+  let sessions = sessions(args.provider, None);
   let events = metrics::billable_events(&sessions);
   let buckets = metrics::usage_by_period(&sessions, &events, gran, &range);
   let mut total = UsageSummary::default();
@@ -303,7 +291,7 @@ fn here(args: &Args) -> Result<()> {
 
   let config = Config::load()?;
   let cwd = std::env::current_dir()?.to_string_lossy().to_string();
-  let mut sessions = sessions(args.provider);
+  let mut sessions = sessions(args.provider, None);
   let folds = workdir::fold_sessions(&mut sessions);
   let workdir = folds.fold(&cwd);
   let project = config.find(&cwd, &workdir);
@@ -358,41 +346,16 @@ fn here(args: &Args) -> Result<()> {
   output::emit(&out)
 }
 
-fn swears(args: &Args) -> Result<()> {
-  let range = DateRange::resolve(args.period, args.since, args.until);
-  let dict = swear::Dict::load(config::config_dir().map(|x| x.join("swear")).as_deref())?;
-  let config = if args.models { Config::default() } else { Config::load()? };
-  let mut sessions = parse_history(args.provider, true);
-  workdir::fold_sessions(&mut sessions);
-  let (groups, total) = swear::tally(&sessions, &dict, &range, |s, e| match args.models {
-    true => e.model.clone().unwrap_or_else(|| "unknown".into()),
-    false => config.map(&s.cwd, &s.workdir, By::Project),
-  });
-  let by = if args.models { "model" } else { "project" };
-
-  if args.json {
-    let mut query = query(args, &range);
-    query.insert("by".into(), json!(by));
-    return print_json(&json!({
-      "schema_version": 1,
-      "command": "swears",
-      "query": query,
-      "groups": groups.iter().map(|x| output::tally_json(x, Some(by))).collect::<Vec<_>>(),
-      "total": output::tally_json(&total, None),
-    }));
-  }
-  output::emit(&output::swears_text(by, &groups, &total, args.all, &Term::detect()))
-}
-
 fn update_pricing() -> Result<()> {
   let path = pricing::update()?;
   output::emit(&format!("Updated {}\n", path.display()))
 }
 
-/// The sessions, with the price catalog refreshed beside the parsing when it is due.
-pub fn sessions(provider: Option<Provider>) -> Vec<Session> {
+/// The sessions, with the price catalog refreshed beside the parsing when it is due; with a
+/// dictionary, the swearing in their prompts too.
+pub fn sessions(provider: Option<Provider>, swears: Option<&Dict>) -> Vec<Session> {
   let refresh = pricing::refresh();
-  let sessions = parse_history(provider, false);
+  let sessions = parse_history(provider, swears);
   pricing::finish(refresh);
   sessions
 }
@@ -415,8 +378,6 @@ Usage:
                                               statistics per project
   cctrail here                                the current directory's project
   cctrail days|weeks|months [period] [--models]
-  cctrail swears [period] [--by model|project] [--all]
-                                              how often your prompts swear, per model
   cctrail update-pricing                      download the latest model prices
 
 Periods: today, yesterday, this-week, last-week, this-month, last-month, all (default)
@@ -425,7 +386,7 @@ Options:
   --since YYYY-MM-DD   first day to include
   --until YYYY-MM-DD   last day to include
   --provider NAME      claude, codex, pi or fx only
-  --by NAME            group statistics by project, group or dir; swears by model or project
+  --by NAME            group statistics by project, group or dir
   --all                list every row instead of folding the small ones into `other`
   --models             break each period down by model
   --json               machine-readable output
@@ -472,10 +433,6 @@ mod tests {
     assert_eq!(x.cmd, Cmd::Days);
     assert_eq!(x.since, Some(jiff::civil::date(2026, 1, 1)));
     assert_eq!(x.until, Some(jiff::civil::date(2026, 1, 31)));
-    // Swears by model unless by project.
-    let x = run(&["swears", "this-week"]).unwrap();
-    assert_eq!((x.cmd, x.period, x.models), (Cmd::Swears, Some(Period::ThisWeek), true));
-    assert!(!run(&["--by", "project", "swears"]).unwrap().models);
   }
 
   #[test]
@@ -490,9 +447,6 @@ mod tests {
     assert!(err(&["--since", "2026-1-1"]).contains("YYYY-MM-DD"));
     assert!(err(&["--since"]).contains("needs a value"));
     assert!(err(&["--provider", "gemini"]).contains("claude, codex, pi or fx"));
-    assert!(err(&["swears", "--by", "dir"]).contains("--by must be model or project"));
-    assert!(err(&["--by", "model"]).contains("--by must be project, group or dir"));
-    assert!(err(&["swears", "--models"]).contains("--models is not an option"));
   }
 
   #[test]

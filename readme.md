@@ -65,7 +65,6 @@ cctrail here                 # the current directory's project: today, this week
 cctrail days                 # per day; also weeks, months, and --models for a breakdown by model
 cctrail --provider codex     # one harness only: claude, codex, pi or fx
 cctrail --json               # everything with full paths and exact counts
-cctrail swears               # share of your prompts with swearing and swear words per 1k words, per model
 cctrail update-pricing       # download the latest prices now
 ```
 
@@ -74,9 +73,13 @@ start on Monday. `cctrail --help` lists it all.
 
 ### Interactive view
 
-`cctrail` without arguments on a terminal opens the interactive view: projects, models and a
-timeline (a chart of the days stacked by model over their list) for today, this week, this month,
-the last 30 days or all time. Press `?` in it to see the keys.
+`cctrail` without arguments on a terminal opens the interactive view: projects, models, a
+timeline (a chart of the days stacked by model over their list) and swears for today, this week,
+this month, the last 30 days or all time. Press `?` in it to see the keys.
+
+Swears lists per model the words you typed to it, the swear words among them, their rate per 1,000
+words and the share of your prompts with swearing. Score is that rate pulled toward your overall
+one by 2,000 words, so a model you barely used sits near your average instead of at the top.
 
 <div align="center">
   <img src="docs/images/projects.svg" alt="The projects of cctrail's interactive view for the last 30 days: time, tokens, cost, sessions and share per project, with the total" />
@@ -84,7 +87,7 @@ the last 30 days or all time. Press `?` in it to see the keys.
 
 | Key | Action |
 | --- | --- |
-| `1` `2` `3` | Projects, Models, Timeline |
+| `1` `2` `3` `4` | Projects, Models, Timeline, Swears |
 | `t` `T` | The next or the previous period |
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Move the selection |
 | `→` `Enter` | Open the row: a project's models, a model's speeds and efforts, a day's projects |
@@ -140,15 +143,13 @@ to keep a long history.
 
 ### Swearing
 
-`cctrail swears` counts your prompts per model: those with a swear word, their share of the
-prompts, swear words per 1,000 words you typed and the words matched most. Models with fewer than
-100 prompts fold into `other` (`--all` lists them, `--by project` counts per project). A prompt is only what you typed in a main session: no tool output, nothing the harness adds
-(slash commands and their output, reminders, environment context, skills, notifications, summaries
-of compacted history), no prompts that agents get from a model, and none of `codex exec` or the
-Claude Agent SDK, which scripts and other agents send. A prompt counts toward the model that
+The Swears view counts only what you typed in a main session: no tool output, nothing the harness
+adds (slash commands and their output, reminders, environment context, skills, notifications,
+summaries of compacted history), no prompts that agents get from a model, and none of `codex exec`
+or the Claude Agent SDK, which scripts and other agents send. A prompt counts toward the model that
 answered last before it, the first ones of a session toward the first to answer; one that a fork
-or a copied file repeats counts once. Prompts are read only for this command, and it shows only
-counts and the matched words.
+or a copied file repeats counts once. Rates show from 200 words up. Only each prompt's counts of
+words and swear words are kept, never its text, and only for the interactive view.
 
 The words come from [`src/swear/en.txt`](src/swear/en.txt) and
 [`src/swear/ru.txt`](src/swear/ru.txt), one per line: `word` matches the word, `stem*` every word

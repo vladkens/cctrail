@@ -1,12 +1,12 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::metrics::DateRange;
-use crate::model::{Event, Session};
+use crate::model::{Prompt, Provider, Session, Ts};
 
 const BUNDLED: [(&str, &str); 2] =
   [("en.txt", include_str!("swear/en.txt")), ("ru.txt", include_str!("swear/ru.txt"))];
@@ -96,115 +96,76 @@ impl Dict {
     found
   }
 
-  /// The number of words in a text and the entries they match, one per word: words split at
-  /// anything but letters.
-  fn scan(&self, text: &str) -> (u64, Vec<String>) {
+  /// A prompt's counts: its words (split at anything but letters), the swear words among them
+  /// and a hash of them all. Its text isn't kept.
+  pub fn prompt(&self, ts: Ts, text: &str) -> Prompt {
     let text = normalize(text);
     let words: Vec<&str> =
       text.split(|c: char| !c.is_alphabetic()).filter(|x| !x.is_empty()).collect();
-    (words.len() as u64, words.into_iter().filter_map(|x| self.find(x)).collect())
-  }
-}
-
-/// Rows with fewer prompts fold into `other` in the table: their shares say little.
-pub const MIN_PROMPTS: u64 = 100;
-
-/// The prompts counted under one name (a model or a project) and those with swearing.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Tally {
-  pub name: String,
-  pub prompts: u64,
-  /// Prompts with a swear word.
-  pub swearing: u64,
-  /// The words typed in the prompts.
-  pub typed: u64,
-  /// The entries matched, by count, most first.
-  pub words: Vec<(String, u64)>,
-}
-
-impl Tally {
-  pub fn share(&self) -> f64 {
-    self.swearing as f64 / self.prompts.max(1) as f64
-  }
-
-  /// Swear words in all.
-  pub fn swear_words(&self) -> u64 {
-    self.words.iter().map(|x| x.1).sum()
-  }
-
-  /// Swear words per 1,000 words typed.
-  pub fn per_1k_words(&self) -> f64 {
-    self.swear_words() as f64 * 1000.0 / self.typed.max(1) as f64
-  }
-
-  fn count(&mut self, word: &str, n: u64) {
-    match self.words.iter_mut().find(|x| x.0 == word) {
-      Some(x) => x.1 += n,
-      None => self.words.push((word.to_string(), n)),
+    let mut hash = DefaultHasher::new();
+    words.hash(&mut hash);
+    let swears = words.iter().filter(|x| self.find(x).is_some()).count();
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    Prompt {
+      ts,
+      model: None,
+      words: count(words.len()),
+      swears: count(swears),
+      hash: hash.finish(),
     }
   }
-
-  fn add(&mut self, typed: u64, words: &[String]) {
-    self.prompts += 1;
-    self.swearing += u64::from(!words.is_empty());
-    self.typed += typed;
-    words.iter().for_each(|x| self.count(x, 1));
-  }
-
-  /// Adds another row's counts, the words sorted again.
-  pub fn merge(&mut self, x: &Tally) {
-    self.prompts += x.prompts;
-    self.swearing += x.swearing;
-    self.typed += x.typed;
-    x.words.iter().for_each(|(w, n)| self.count(w, *n));
-    self.words.sort_by(|a, b| (b.1, &a.0).cmp(&(a.1, &b.0)));
-  }
 }
 
-/// The prompts of main sessions in the range by name, and their total. A prompt a fork or a copied
-/// file repeats counts once; agents' prompts, which a model wrote, not at all. Sorted by the share
-/// of prompts with swearing, then by their number.
-pub fn tally(
-  sessions: &[Session],
-  dict: &Dict,
-  range: &DateRange,
-  name: impl Fn(&Session, &Event) -> String,
-) -> (Vec<Tally>, Tally) {
-  // A prompt by its harness, time and words, and the session that holds it first.
+/// Takes the prompts out of the sessions, which are then as if read without them: the events only
+/// for a prompt go, and the sessions they leave empty. Returns the main sessions' prompts, one that
+/// another session repeats (a fork, a copied file) once; alike prompts in one session count each,
+/// as fx logs a batch of events at one time.
+pub fn take_prompts(sessions: &mut Vec<Session>) -> Vec<(Provider, Prompt)> {
   let mut seen = HashMap::new();
-  let mut groups: HashMap<String, Tally> = HashMap::new();
-  let mut total = Tally { name: "total".into(), ..Default::default() };
-  for (i, s) in sessions.iter().enumerate().filter(|x| x.1.is_main) {
-    for e in &s.events {
-      let (Some(text), Some(ts)) = (e.prompt.as_deref(), e.ts) else { continue };
-      // Alike prompts in one session are each typed: fx logs a batch of events at one time.
-      if !range.contains(ts) || *seen.entry((s.provider, ts, text)).or_insert(i) != i {
-        continue;
+  let mut out = vec![];
+  let mut keep = vec![];
+  for (i, s) in sessions.iter_mut().enumerate() {
+    let (provider, main, had) = (s.provider, s.is_main, s.events.len());
+    s.events.retain_mut(|e| {
+      let Some(x) = e.prompt.take() else { return true };
+      if main && *seen.entry((provider, x.ts, x.hash)).or_insert(i) == i {
+        out.push((provider, *x));
       }
-      let (typed, words) = dict.scan(text);
-      groups.entry(name(s, e)).or_default().add(typed, &words);
-      total.add(typed, &words);
-    }
+      // Codex's `UserMessage` items: events of no time and no usage, there for their prompts.
+      e.ts.is_some() || e.usage.is_some()
+    });
+    keep.push(had == 0 || !s.events.is_empty());
   }
-  let mut groups: Vec<Tally> = groups.into_iter().map(|(name, x)| Tally { name, ..x }).collect();
-  for x in groups.iter_mut().chain([&mut total]) {
-    x.words.sort_by(|a, b| (b.1, &a.0).cmp(&(a.1, &b.0)));
-  }
-  // Shares compared exactly, as fractions.
-  let share = |x: &Tally, y: &Tally| x.swearing as u128 * y.prompts.max(1) as u128;
-  groups.sort_by(|a, b| {
-    share(b, a).cmp(&share(a, b)).then(b.swearing.cmp(&a.swearing)).then(a.name.cmp(&b.name))
-  });
-  (groups, total)
+  let mut keep = keep.into_iter();
+  sessions.retain(|_| keep.next().unwrap_or(true));
+  out
+}
+
+/// Words at the user's overall rate a model's own words are weighed with: a model with few words
+/// typed to it scores near the overall rate, one with many near its own.
+pub const PRIOR_WORDS: f64 = 2000.0;
+/// Fewest words typed to a model for its rates to show.
+pub const MIN_WORDS: u64 = 200;
+
+/// Swear words per 1,000 words typed, shrunk toward the overall rate (swear words per word) by
+/// `PRIOR_WORDS`: empirical-Bayes shrinkage, so a barely used model sorts near the average.
+pub fn score(swears: u64, words: u64, overall: f64) -> f64 {
+  (swears as f64 + PRIOR_WORDS * overall) / (words as f64 + PRIOR_WORDS) * 1000.0
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::Provider;
+  use crate::model::Event;
 
   fn bundled() -> Dict {
     Dict::load(None).unwrap()
+  }
+
+  /// The entries the words of a text match, one per word.
+  fn matches(dict: &Dict, text: &str) -> Vec<String> {
+    let text = normalize(text);
+    text.split(|c: char| !c.is_alphabetic()).filter_map(|x| dict.find(x)).collect()
   }
 
   #[test]
@@ -232,7 +193,7 @@ mod tests {
       ("ffs", "ffs"),
     ];
     for (word, entry) in hits {
-      assert_eq!(dict.scan(word).1, [entry], "{word}");
+      assert_eq!(matches(&dict, word), [entry], "{word}");
     }
     let misses = [
       "class",
@@ -262,10 +223,10 @@ mod tests {
       "ck",
     ];
     for word in misses {
-      assert_eq!(dict.scan(word).1, Vec::<String>::new(), "{word}");
+      assert_eq!(matches(&dict, word), Vec::<String>::new(), "{word}");
     }
     // Words split at anything but letters: `f*ck` and `sh1t` aren't words of the list.
-    assert_eq!(dict.scan("f*ck, sh1t. WTF?! fuck_this").1, ["wtf", "fuck*"]);
+    assert_eq!(matches(&dict, "f*ck, sh1t. WTF?! fuck_this"), ["wtf", "fuck*"]);
   }
 
   #[test]
@@ -317,7 +278,7 @@ mod tests {
       ("blyat", "blyat*"),
     ];
     for (word, entry) in hits {
-      assert_eq!(dict.scan(word).1, [entry], "{word}");
+      assert_eq!(matches(&dict, word), [entry], "{word}");
     }
     // Words that contain a root or start like one.
     let misses = [
@@ -363,9 +324,9 @@ mod tests {
       "бляхой",
     ];
     for word in misses {
-      assert_eq!(dict.scan(word).1, Vec::<String>::new(), "{word}");
+      assert_eq!(matches(&dict, word), Vec::<String>::new(), "{word}");
     }
-    assert_eq!(dict.scan("ну пиздец... а-а-а, сука!").1, ["пизд*", "сук*"]);
+    assert_eq!(matches(&dict, "ну пиздец... а-а-а, сука!"), ["пизд*", "сук*"]);
   }
 
   #[test]
@@ -402,7 +363,7 @@ mod tests {
     std::fs::write(dir.join("de.txt"), "scheiße*\n# Mist\n").unwrap();
     std::fs::write(dir.join("notes.md"), "not a list\n").unwrap();
     let dict = Dict::load(Some(&dir)).unwrap();
-    assert_eq!(dict.scan("Scheißegal fuck").1, ["scheiße*", "fuck*"]);
+    assert_eq!(matches(&dict, "Scheißegal fuck"), ["scheiße*", "fuck*"]);
     std::fs::write(dir.join("xx.txt"), "o k\n").unwrap();
     let err = format!("{:#}", Dict::load(Some(&dir)).unwrap_err());
     assert!(err.contains("xx.txt") && err.contains("line 1:"), "{err}");
@@ -412,51 +373,60 @@ mod tests {
   }
 
   #[test]
-  fn tallies_main_prompts_once() {
-    let at = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_microsecond();
-    let prompt = |ts: &str, model: &str, text: &str| Event {
-      ts: Some(at(ts)),
-      model: Some(model.into()),
-      prompt: Some(text.into()),
-      ..Default::default()
+  fn counts_a_prompt_without_its_text() {
+    let dict = bundled();
+    let x = dict.prompt(5, "Ну БЛЯДЬ, опять 3 fucking times");
+    assert_eq!((x.ts, x.model, x.words, x.swears), (5, None, 5, 2));
+    // Alike words, alike hash, whatever the case and the signs between them.
+    assert_eq!(dict.prompt(1, "ну блядь опять fucking times!").hash, x.hash);
+    assert_ne!(dict.prompt(1, "ну блядь").hash, x.hash);
+    assert_eq!(dict.prompt(1, "…").words, 0);
+  }
+
+  #[test]
+  fn takes_main_prompts_once() {
+    let dict = bundled();
+    let prompt = |ts: Ts, text: &str| {
+      let p = Prompt { model: Some("m".into()), ..dict.prompt(ts, text) };
+      Event { ts: Some(ts), prompt: Some(Box::new(p)), ..Default::default() }
     };
+    let only = |ts: Ts, text: &str| Event { ts: None, ..prompt(ts, text) };
     let mut main = Session::new("a", true, "/r", Provider::Claude);
-    main.events = vec![
-      prompt("2026-01-01T10:00:00Z", "x", "fuck this shit"),
-      prompt("2026-01-01T10:01:00Z", "x", "ok"),
-      prompt("2026-01-01T10:02:00Z", "y", "блядь"),
-      prompt("2026-01-01T10:02:00Z", "y", "блядь"),
-      prompt("2026-01-01T10:03:00Z", "z", "fine"),
-      prompt("2026-01-01T10:04:00Z", "z", "good"),
-      Event::activity(at("2026-01-01T10:05:00Z")),
-      prompt("2026-03-01T10:00:00Z", "y", "fuck"),
-    ];
-    // A copy of a prompt in another session counts once, an agent's not at all; alike prompts in
-    // one session count each.
+    // Alike prompts in one session count each; the event only for a prompt goes.
+    main.events = vec![prompt(1, "fuck"), prompt(1, "fuck"), only(2, "ok"), Event::default()];
+    // A copy in another session counts once, an agent's prompt not at all.
     let mut copy = Session::new("b", true, "/r", Provider::Claude);
-    copy.events = vec![prompt("2026-01-01T10:02:00Z", "w", "блядь")];
+    copy.events = vec![prompt(1, "fuck"), prompt(3, "new")];
     let mut agent = Session::new("c", false, "/r", Provider::Claude);
-    agent.events = vec![prompt("2026-01-01T10:06:00Z", "y", "fuck")];
-    let sessions = [main, copy, agent];
-    let range = DateRange { since: None, until: Some(jiff::civil::date(2026, 2, 1)) };
-    let model = |_: &Session, e: &Event| e.model.clone().unwrap();
-    let (groups, total) = tally(&sessions, &bundled(), &range, model);
+    agent.events = vec![prompt(4, "fuck")];
+    // A session with only a prompt's event goes; one without events stays, as fx keeps some.
+    let mut gone = Session::new("d", true, "/r", Provider::Codex);
+    gone.events = vec![only(5, "bye")];
+    let empty = Session::new("e", true, "/r", Provider::Fx);
+    let mut sessions = vec![main, copy, agent, gone, empty];
+    let prompts = take_prompts(&mut sessions);
+    let counted: Vec<_> = prompts.iter().map(|x| (x.0, x.1.ts, x.1.swears)).collect();
+    let claude = Provider::Claude;
+    assert_eq!(
+      counted,
+      [(claude, 1, 1), (claude, 1, 1), (claude, 2, 0), (claude, 3, 0), (Provider::Codex, 5, 0)]
+    );
+    let ids: Vec<_> = sessions.iter().map(|x| (x.id.as_str(), x.events.len())).collect();
+    assert_eq!(ids, [("a", 3), ("b", 2), ("c", 1), ("e", 0)]);
+    assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
+  }
 
-    let rows: Vec<_> = groups.iter().map(|x| (x.name.as_str(), x.prompts, x.swearing)).collect();
-    // By share, then by the prompts with swearing.
-    assert_eq!(rows, [("y", 2, 2), ("x", 2, 1), ("z", 2, 0)]);
-    assert_eq!(groups[1].words, [("fuck*".to_string(), 1), ("shit*".to_string(), 1)]);
-    assert_eq!((total.prompts, total.swearing, total.share()), (6, 3, 0.5));
-    let words: Vec<_> = total.words.iter().map(|x| (x.0.as_str(), x.1)).collect();
-    assert_eq!(words, [("бля*", 2), ("fuck*", 1), ("shit*", 1)]);
-    // Four swear words in eight words typed.
-    assert_eq!((total.typed, total.swear_words(), total.per_1k_words()), (8, 4, 500.0));
-
-    // Merged as `other`: counts added, the words sorted again.
-    let mut other = groups[2].clone();
-    other.merge(&groups[1]);
-    assert_eq!((other.prompts, other.swearing, other.typed), (4, 1, 6));
-    assert_eq!(other.words[0], ("fuck*".to_string(), 1));
-    assert_eq!(groups[2].share(), 0.0);
+  #[test]
+  fn scores_shrink_toward_the_overall_rate() {
+    // An overall 10 swear words per 1,000: a model with 20 words and 10 of them swear words
+    // scores barely over it, one with 20,000 words at 50 per 1,000 near its own rate.
+    let overall = 0.01;
+    let few = score(10, 20, overall);
+    assert!((few - 30.0 / 2020.0 * 1000.0).abs() < 1e-9 && few < 15.0, "{few}");
+    let many = score(1000, 20_000, overall);
+    assert!((many - 1020.0 / 22_000.0 * 1000.0).abs() < 1e-9 && many > 45.0, "{many}");
+    // The overall rate scores as itself; no words at all, the overall rate.
+    assert!((score(100, 10_000, overall) - 10.0).abs() < 1e-9);
+    assert!((score(0, 0, overall) - 10.0).abs() < 1e-9);
   }
 }

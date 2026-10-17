@@ -12,7 +12,6 @@ use crate::metrics::{
   DateRange, Granularity, ModelSummary, Stat, UsageSummary, combine_stats, local_date,
 };
 use crate::model::{Ts, Usage};
-use crate::swear::{MIN_PROMPTS, Tally};
 
 pub const CONFIG_GUIDE: &str = "https://github.com/vladkens/cctrail#projects";
 
@@ -110,7 +109,7 @@ impl Table {
       widths[0] = widths[0].min(width.saturating_sub(rest).max(self.headers[0].len()));
     }
 
-    let left = |i: usize| i == 0 || matches!(self.headers[i], "Last active" | "Top words");
+    let left = |i: usize| i == 0 || self.headers[i] == "Last active";
     let mut out = String::new();
     let mut line = |cells: Vec<String>, styles: &dyn Fn(usize, &str) -> Vec<&'static str>| {
       let mut parts = vec![];
@@ -358,49 +357,6 @@ pub fn here_text(title: &str, workdir: &str, rows: &[(&str, UsageSummary)], term
   title + &Table::new(vec!["Period", "Total tokens", "Cost", "Time"], rows).render(term)
 }
 
-/// Rows by share of prompts with swearing; unless `all`, those under `MIN_PROMPTS` prompts fold
-/// into `other`, last. A legend of the numbers below.
-pub fn swears_text(by: &str, groups: &[Tally], total: &Tally, all: bool, term: &Term) -> String {
-  let (small, listed): (Vec<&Tally>, Vec<&Tally>) =
-    groups.iter().partition(|x| !all && x.prompts < MIN_PROMPTS);
-  let noun = if small.len() == 1 { by.to_string() } else { format!("{by}s") };
-  let mut other = Tally { name: format!("other ({} {noun})", small.len()), ..Default::default() };
-  small.iter().for_each(|x| other.merge(x));
-  let row = |x: &Tally| {
-    let words: Vec<String> = x.words.iter().take(3).map(|(w, n)| format!("{w} {n}")).collect();
-    let (share, per_1k) =
-      (format!("{:.1}%", x.share() * 100.0), format!("{:.1}", x.per_1k_words()));
-    let (prompts, swearing) = (x.prompts.to_string(), x.swearing.to_string());
-    vec![workdir_label(&x.name), prompts, swearing, share, per_1k, words.join(", ")]
-  };
-  let mut rows: Vec<Vec<String>> = listed.into_iter().map(row).collect();
-  let faint = if small.is_empty() { vec![] } else { vec![rows.len()] };
-  rows.extend(faint.iter().map(|_| row(&other)));
-  rows.push(row(total));
-  let label = if by == "model" { "Model" } else { "Project" };
-  let headers =
-    vec![label, "Prompts", "With swearing", "% of prompts ↓", "per 1k words", "Top words"];
-  let mut out = Table { headers, rows, dim: None, max_first: Some(60), faint }.render(term) + "\n";
-  if !small.is_empty() {
-    let flag = if by == "model" { "" } else { " --by project" };
-    out += &format!(
-      "{} {} {}\n",
-      term.paint(
-        &format!("{} {noun} under {MIN_PROMPTS} prompts in other · run", small.len()),
-        &[DIM]
-      ),
-      term.paint(&format!("cctrail swears{flag} --all"), &[CYAN]),
-      term.paint("for all", &[DIM])
-    );
-  }
-  let to = if by == "model" { "to that model" } else { "in that project" };
-  let legend = format!(
-    "With swearing: prompts with a swear word · % of prompts: of your prompts {to}\n\
-     per 1k words: swear words per 1,000 words you typed {to}"
-  );
-  out + &term.paint(&legend, &[DIM]) + "\n"
-}
-
 /// The tokens left out of the cost; suggests `update-pricing` only when it may help.
 pub fn unpriced_text(models: &[(String, u64)], stale: bool, term: &Term) -> String {
   if models.is_empty() {
@@ -448,22 +404,6 @@ pub fn total_json(x: &Stat, count: usize, by: By) -> Value {
     By::Dir => "workdirs",
   };
   value.insert(key.into(), json!(count));
-  Value::Object(value)
-}
-
-/// A group's prompts under its name as `key`, or the total's without.
-pub fn tally_json(x: &Tally, key: Option<&str>) -> Value {
-  let words: Vec<Value> = x.words.iter().map(|(w, n)| json!({"word": w, "count": n})).collect();
-  let mut value = serde_json::Map::new();
-  if let Some(key) = key {
-    value.insert(key.into(), json!(x.name));
-  }
-  value.insert("prompts".into(), json!(x.prompts));
-  value.insert("with_swearing".into(), json!(x.swearing));
-  value.insert("share".into(), json!(x.share()));
-  value.insert("words".into(), json!(x.typed));
-  value.insert("per_1k_words".into(), json!(x.per_1k_words()));
-  value.insert("swear_words".into(), json!(words));
   Value::Object(value)
 }
 
@@ -679,39 +619,6 @@ mod tests {
     assert_eq!((&json["group"], &json["project"]), (&json!("@unmapped"), &json!("C:/repo")));
     let json = group_json(&stats[0], By::Project);
     assert_eq!((&json["group"], &json["project"]), (&json!("oss"), &json!("demo")));
-  }
-
-  #[test]
-  fn folds_models_with_few_prompts() {
-    let tally = |name: &str, prompts, swearing, typed| {
-      let words = vec![("fuck*".to_string(), swearing)];
-      Tally { name: name.into(), prompts, swearing, typed, words }
-    };
-    let groups = [
-      tally("small", 99, 90, 1000),
-      tally("big", 100, 10, 2000),
-      tally("unknown", 1, 0, 5),
-      tally("huge", 1000, 1, 10_000),
-    ];
-    let total = tally("total", 1200, 101, 13_005);
-    let lines = |all| {
-      let out = swears_text("model", &groups, &total, all, &Term::default());
-      out
-        .lines()
-        .map(|x| x.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
-        .collect::<Vec<_>>()
-    };
-    // Under 100 prompts in `other`, last, the unknown model too; `--all` lists every row.
-    let folded = lines(false);
-    assert_eq!(folded[1..5], ["big 100 10", "huge 1000 1", "other (2 models)", "total 1200 101"]);
-    let out = swears_text("model", &groups, &total, false, &Term::default());
-    assert!(
-      out.contains("\n2 models under 100 prompts in other · run cctrail swears --all for all\n")
-    );
-    assert_eq!(
-      lines(true)[1..6],
-      ["small 99 90", "big 100 10", "unknown 1 0", "huge 1000 1", "total 1200 101"]
-    );
   }
 
   #[test]

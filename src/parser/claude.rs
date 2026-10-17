@@ -12,6 +12,7 @@ use super::{
   parse_ts,
 };
 use crate::model::{Event, Provider, Session, Speed, Ts, Usage};
+use crate::swear::Dict;
 
 // MARK: Lines
 
@@ -146,7 +147,7 @@ enum TurnKey {
 /// Sessions under each root's `projects` (or the root itself); agents carry their main session's
 /// root and working directory. A session found in several roots (a copied profile) is read from the
 /// root with its longest main log, agents included, and skipped in the others.
-pub fn parse(roots: &[PathBuf], prompts: bool) -> Vec<Session> {
+pub fn parse(roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
   let files: Vec<(usize, PathBuf)> = roots
     .iter()
     .map(|x| match x.join("projects") {
@@ -176,7 +177,7 @@ pub fn parse(roots: &[PathBuf], prompts: bool) -> Vec<Session> {
     .map(|x| x.1)
     .collect();
 
-  let mut parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x, prompts)).collect();
+  let mut parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x, swears)).collect();
   let mut agents: HashMap<(PathBuf, String), usize> = HashMap::new();
   for (i, x) in parsed.iter().enumerate() {
     let Some(dir) = session_dir(&x.path).filter(|_| !x.session.is_main) else { continue };
@@ -221,12 +222,14 @@ pub fn parse(roots: &[PathBuf], prompts: bool) -> Vec<Session> {
   sessions
 }
 
-fn parse_file(path: &Path, prompts: bool) -> Parsed {
+fn parse_file(path: &Path, swears: Option<&Dict>) -> Parsed {
   let stem = path.file_stem().map(|x| x.to_string_lossy()).unwrap_or_default();
   let id = stem.strip_prefix("agent-").unwrap_or(&stem);
   let id = if id.is_empty() { "unknown" } else { id };
   let is_agent = path.components().any(|x| x.as_os_str() == "subagents");
   let mut session = Session::new(id, !is_agent, "unknown", Provider::Claude);
+  // An agent's prompts are a model's.
+  let swears = swears.filter(|_| !is_agent);
   let mut calls = vec![];
   let mut fallbacks = vec![];
   let mut turns: HashMap<TurnKey, usize> = HashMap::new();
@@ -243,7 +246,7 @@ fn parse_file(path: &Path, prompts: bool) -> Parsed {
         record_assistant(&mut session, &mut calls, &mut turns, &line);
         let model = line.message.0.as_ref().and_then(|x| x.model.str());
         // Claude Code's own messages (an interruption, an error) name the model `<synthetic>`.
-        if prompts
+        if swears.is_some()
           && let Some(x) = model.filter(|x| *x != "<synthetic>")
           && !line.sidechain.truthy()
           && !line.api_error.truthy()
@@ -254,12 +257,11 @@ fn parse_file(path: &Path, prompts: bool) -> Parsed {
       Some("user") if !line.meta.truthy() => {
         let n = session.events.len();
         record_user(&mut session, &mut calls, &mut fallbacks, &line);
-        if prompts
-          && !is_agent
-          && session.events.len() > n
+        if let Some(dict) = swears
+          && let Some(ts) = session.events.get(n).and_then(|x| x.ts)
           && let Some(words) = prompt(raw)
         {
-          replies.prompt(&mut session.events[n], words);
+          replies.prompt(&mut session.events[n], dict, ts, &words);
         }
       }
       _ => {}
@@ -359,7 +361,7 @@ fn record_user(
 /// A prompt's own words, none for one Claude Code wrote in the user's name: a summary of compacted
 /// history, a background task's notification, an interruption, a prompt of the SDK or of an agent
 /// logged in its main session.
-fn prompt(raw: &[u8]) -> Option<Box<str>> {
+fn prompt(raw: &[u8]) -> Option<String> {
   let x: Value = serde_json::from_slice(raw).ok()?;
   let human = |x: &Value| x.as_str().is_none_or(|x| x == "human");
   if x["isSidechain"] == true
@@ -455,25 +457,24 @@ mod tests {
   fn reads_typed_prompts_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/swears/claude/projects");
     // Tool results, meta lines, slash commands and their output, notifications, a summary, an
-    // interruption, sidechain and SDK prompts and an agent's are no prompts; reminders are cut.
-    let opus = "claude-opus-4-6";
-    let sonnet = "claude-sonnet-4-5";
-    let again = "ну блядь, опять";
-    let expected = [(opus, "wtf is this"), (opus, "fix the tests please"), (sonnet, again)];
-    let sessions = parse(std::slice::from_ref(&root), true);
-    // The copied file holds the prompt too: counting it once is up to the report.
+    // interruption, sidechain and SDK prompts and an agent's are no prompts; reminders are cut:
+    // `wtf is this`, `fix the tests please`, `ну блядь, опять`.
+    let (opus, sonnet) = ("claude-opus-4-6", "claude-sonnet-4-5");
+    let expected = [(opus, 3, 1), (opus, 4, 0), (sonnet, 3, 1)];
+    let sessions = parse(std::slice::from_ref(&root), Some(&super::super::tests::dict()));
+    // The copied file holds the prompt too: counting it once is up to the view.
     assert_eq!(
       super::super::tests::prompts(&sessions),
-      [&expected[..], &[(sonnet, again)]].concat()
+      [&expected[..], &[(sonnet, 3, 1)]].concat()
     );
-    // The other reports keep no text.
-    let sessions = parse(&[root], false);
+    // The reports keep no prompts.
+    let sessions = parse(&[root], None);
     assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
   }
 
   #[test]
   fn links_subagent_to_main_root() {
-    let sessions = parse(&[fixtures("claude/projects")], false);
+    let sessions = parse(&[fixtures("claude/projects")], None);
     let main = sessions.iter().find(|x| x.is_main).unwrap();
     let agent = sessions.iter().find(|x| !x.is_main).unwrap();
 
@@ -484,7 +485,7 @@ mod tests {
 
   #[test]
   fn keeps_one_copy_of_sidechain_usage() {
-    let sessions = parse(&[fixtures("claude_dedupe/projects")], false);
+    let sessions = parse(&[fixtures("claude_dedupe/projects")], None);
     let events = crate::metrics::billable_events(&sessions);
     let total: u64 =
       events.iter().map(|(s, e)| sessions[*s].events[*e].usage.unwrap().total()).sum();
@@ -501,7 +502,7 @@ mod tests {
     ];
     std::fs::write(dir.join("main.jsonl"), lines.join("\n")).unwrap();
 
-    let sessions = parse(std::slice::from_ref(&dir), false);
+    let sessions = parse(std::slice::from_ref(&dir), None);
     std::fs::remove_dir_all(&dir).unwrap();
     let main = sessions.iter().find(|x| x.is_main).unwrap();
     let agent = sessions.iter().find(|x| !x.is_main).unwrap();
@@ -527,7 +528,7 @@ mod tests {
     write(base.join("a/s/subagents/agent-x.jsonl"), &[line("x1", 4)]);
     write(base.join("b/s.jsonl"), &[line("m1", 1), line("m2", 2)]);
     for roots in [["a", "b"], ["b", "a"]] {
-      let sessions = parse(&roots.map(|x| base.join(x)), false);
+      let sessions = parse(&roots.map(|x| base.join(x)), None);
       assert_eq!((sessions.len(), total(&sessions)), (1, 3), "{roots:?}");
     }
     std::fs::remove_dir_all(&base).unwrap();

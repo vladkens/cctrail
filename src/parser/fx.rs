@@ -15,6 +15,7 @@ use super::{
 use crate::config::home_dir;
 use crate::metrics::local_date;
 use crate::model::{Event, Provider, Session, Speed, Ts, Usage};
+use crate::swear::Dict;
 
 /// A model's requests in a session are split into at most this many events: a crafted count must
 /// not exhaust memory.
@@ -154,12 +155,12 @@ pub fn root() -> PathBuf {
 /// each model's totals are split into its requests over the agent activity of the main session
 /// and its agents (`spread`), each request at one of those moments: totals per session and project
 /// are exact, their split by day approximate.
-pub fn parse(root: &Path, prompts: bool) -> Vec<Session> {
+pub fn parse(root: &Path, swears: Option<&Dict>) -> Vec<Session> {
   let dirs = std::fs::read_dir(root.join("sessions")).into_iter().flatten().flatten();
   let mut dirs: Vec<PathBuf> = dirs.map(|x| x.path()).filter(|x| x.is_dir()).collect();
   dirs.sort();
   let parsed: Vec<(Session, Parsed)> =
-    dirs.par_iter().filter_map(|x| parse_dir(x, prompts)).collect();
+    dirs.par_iter().filter_map(|x| parse_dir(x, swears)).collect();
   let (mut sessions, parsed): (Vec<Session>, Vec<Parsed>) = parsed.into_iter().unzip();
 
   let index: HashMap<&str, usize> =
@@ -279,7 +280,7 @@ fn spread(
   shares.into_iter().map(|(at, usage)| (at, usage, cost)).collect()
 }
 
-fn parse_dir(dir: &Path, prompts: bool) -> Option<(Session, Parsed)> {
+fn parse_dir(dir: &Path, swears: Option<&Dict>) -> Option<(Session, Parsed)> {
   let id = dir.file_name()?.to_string_lossy().to_string();
   let meta: Meta = read(&dir.join("session.json"))?;
   let owner: Option<Owner> = read(&dir.join("subagent/owner.json"));
@@ -292,7 +293,7 @@ fn parse_dir(dir: &Path, prompts: bool) -> Option<(Session, Parsed)> {
   // turn's own times are exact.
   let mut agent = vec![];
   let mut replies = Replies::default();
-  let prompts = prompts && is_main;
+  let swears = swears.filter(|_| is_main);
   jsonl(&dir.join("events.jsonl"), |line: Line, raw| {
     let Some(kind) = line.event.0 else { return true };
     let at = millis(&line.timestamp_ms);
@@ -303,8 +304,10 @@ fn parse_dir(dir: &Path, prompts: bool) -> Option<(Session, Parsed)> {
         |e: Value| own_words(&e["user"]["text"]).or_else(|| own_words(&e["steering"]["text"]));
       if let Some(at) = at {
         let mut x = Event::activity(at);
-        if prompts && let Some(words) = event().and_then(text) {
-          replies.prompt(&mut x, words);
+        if let Some(dict) = swears
+          && let Some(words) = event().and_then(text)
+        {
+          replies.prompt(&mut x, dict, at, &words);
         }
         session.events.push(x);
       }
@@ -312,7 +315,9 @@ fn parse_dir(dir: &Path, prompts: bool) -> Option<(Session, Parsed)> {
       agent.extend(at);
       let model =
         |e: Value| e["assistant"]["provider_replay"]["source"]["model"].as_str().map(model_id);
-      if prompts && let Some(x) = event().and_then(model) {
+      if swears.is_some()
+        && let Some(x) = event().and_then(model)
+      {
         replies.answer(&x);
       }
     } else if let Some(x) = kind.tool_result.0 {
@@ -364,17 +369,17 @@ mod tests {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/swears/fx");
     // Steering counts as a prompt; an agent's prompt, which its main session wrote, doesn't.
     let (astra, sonnet) = ("gpt-6-astra", "claude-sonnet-4-5");
-    let expected =
-      [(astra, "shit"), (astra, "wtf, stop"), (astra, "ok, continue"), (sonnet, "fuck")];
-    let sessions = parse(&root, true);
+    // `shit`, `wtf, stop`, `ok, continue`, `fuck`.
+    let expected = [(astra, 1, 1), (astra, 2, 1), (astra, 2, 0), (sonnet, 1, 1)];
+    let sessions = parse(&root, Some(&super::super::tests::dict()));
     assert_eq!(super::super::tests::prompts(&sessions), expected);
-    let sessions = parse(&root, false);
+    let sessions = parse(&root, None);
     assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
   }
 
   #[test]
   fn links_agents_and_counts_their_usage_once() {
-    let sessions = parse(&fixtures(), false);
+    let sessions = parse(&fixtures(), None);
     let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
     let (main, agent, other) = (find("fx-main-1"), find("fx-agent-1"), find("fx-other-1"));
     // A session.json that doesn't parse skips its directory, as does a directory without one.
@@ -401,7 +406,7 @@ mod tests {
         std::fs::copy(src.join(id).join(x), dir.join("sessions").join(id).join(x)).unwrap();
       }
     }
-    let sessions = parse(&dir, false);
+    let sessions = parse(&dir, None);
     let main = sessions.iter().find(|x| x.id == "fx-main-1").unwrap();
     assert!(main.is_main && main.events.is_empty());
     let agent = sessions.iter().find(|x| x.id == "fx-agent-1").unwrap();
@@ -411,7 +416,7 @@ mod tests {
 
   #[test]
   fn spreads_totals_over_the_agents_activity() {
-    let sessions = parse(&fixtures(), false);
+    let sessions = parse(&fixtures(), None);
     let tree: Vec<&Event> =
       sessions.iter().filter(|x| x.root_id == "fx-main-1").flat_map(|x| &x.events).collect();
     let day = |d: i8| {

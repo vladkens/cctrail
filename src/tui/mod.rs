@@ -26,6 +26,7 @@ pub enum Tab {
   Projects,
   Models,
   Timeline,
+  Swears,
 }
 
 /// A column of a table; the sorted one also gives the share.
@@ -38,18 +39,28 @@ pub enum Col {
   Sessions,
   /// The sorted column's share, Time's when sorted by name.
   Share,
+  /// The swears tab's: words typed, swear words, per 1,000 words, % of prompts, score.
+  Words,
+  Swears,
+  Rate,
+  Msgs,
+  Score,
 }
 
 impl Col {
-  /// The next column in the `s` cycle, as on screen, then the names:
-  /// Time → Tokens → Cost → Sessions (where shown) → Name → Time.
-  fn next(self, sessions: bool) -> Self {
-    match self {
-      Self::Time => Self::Tokens,
-      Self::Tokens => Self::Cost,
-      Self::Cost if sessions => Self::Sessions,
-      Self::Cost | Self::Sessions => Self::Name,
-      Self::Name | Self::Share => Self::Time,
+  /// The next column in the `s` cycle of `cols` (the columns as on screen, then the names), the
+  /// first after any other.
+  fn next(self, cols: &[Col]) -> Self {
+    let at = cols.iter().position(|x| *x == self);
+    at.map_or(cols[0], |i| cols[(i + 1) % cols.len()])
+  }
+
+  /// The `s` cycle of a table's columns.
+  fn cycle(tab: Tab, sessions: bool) -> &'static [Col] {
+    match (tab, sessions) {
+      (Tab::Swears, _) => &[Col::Words, Col::Swears, Col::Rate, Col::Msgs, Col::Score, Col::Name],
+      (_, true) => &[Col::Time, Col::Tokens, Col::Cost, Col::Sessions, Col::Name],
+      (_, false) => &[Col::Time, Col::Tokens, Col::Cost, Col::Name],
     }
   }
 
@@ -65,6 +76,12 @@ impl Col {
       Self::Cost => x.cost,
       Self::Sessions => x.sessions.unwrap_or(0) as f64,
       Self::Name | Self::Time | Self::Share => x.active.unwrap_or(0) as f64,
+      Self::Words => x.words as f64,
+      Self::Swears => x.swears as f64,
+      // A rate from too few words sorts below every other.
+      Self::Rate => x.per_1k().unwrap_or(-1.0),
+      Self::Msgs => x.msgs().unwrap_or(-1.0),
+      Self::Score => x.score.unwrap_or(-1.0),
     }
   }
 
@@ -150,11 +167,11 @@ pub struct App {
   pub span: Span,
   pub prov: Option<Provider>,
   /// Each tab's sort; the timeline's days newest first.
-  pub sorts: [Sort; 3],
+  pub sorts: [Sort; 4],
   /// What the timeline's bars show: time, tokens or cost.
   pub bars: Col,
   pub tab: Tab,
-  sel: [usize; 3],
+  sel: [usize; 4],
   pub open: Option<Detail>,
   /// The selected row of the drill-down.
   pub osel: usize,
@@ -182,10 +199,10 @@ impl App {
       data,
       span: Span::Month,
       prov: None,
-      sorts: [Col::Time.sorted(), Col::Time.sorted(), (Col::Name, true)],
+      sorts: [Col::Time.sorted(), Col::Time.sorted(), (Col::Name, true), Col::Score.sorted()],
       bars: Col::Time,
       tab: Tab::Projects,
-      sel: [0; 3],
+      sel: [0; 4],
       open: None,
       osel: 0,
       help: false,
@@ -233,6 +250,11 @@ impl App {
       Tab::Projects => projects,
       Tab::Models => self.data.models(self.span, self.prov, None),
       Tab::Timeline => self.data.timeline(self.span, self.prov, None),
+      Tab::Swears => {
+        let (rows, total) = self.data.swears(self.span, self.prov);
+        self.total = total;
+        rows
+      }
     };
     sort(&mut list, self.sorts[self.tab as usize]);
     self.all = list.len();
@@ -242,6 +264,8 @@ impl App {
     // report's, a session on two of them counted once.
     if !needle.is_empty() || self.tab == Tab::Timeline {
       self.total = sum(&list);
+      // The rows' own rate: the overall one of what is shown.
+      self.total.score = self.total.per_1k();
     }
     if self.tab == Tab::Timeline {
       let days: Vec<_> = list.iter().filter_map(|x| x.day).collect();
@@ -280,6 +304,7 @@ impl App {
         vec![("Speed", speed), ("Effort", effort)]
       }
       Tab::Timeline => vec![("Project", self.data.bucket_projects(span, prov, day))],
+      Tab::Swears => vec![],
     };
     let sessions = self.tab == Tab::Timeline;
     let sort = if sort.0 == Col::Sessions && !sessions { Col::Time.sorted() } else { sort };
@@ -294,9 +319,9 @@ impl App {
     d
   }
 
-  /// Opens the selected row; an empty day opens nothing.
+  /// Opens the selected row; an empty day opens nothing, nor a row of swears.
   fn open(&mut self) {
-    let row = self.list.get(self.sel());
+    let row = self.list.get(self.sel()).filter(|_| self.tab != Tab::Swears);
     if let Some(row) = row.filter(|x| x.tokens > 0 || x.active.unwrap_or(0) > 0) {
       let sort = self.sorts[self.tab as usize];
       self.open = Some(self.detail(row.clone(), sort));
@@ -346,8 +371,8 @@ impl App {
         return self.bars =
           [Col::Tokens, Col::Cost, Col::Time][(self.bars as usize).clamp(1, 3) - 1];
       }
-      (Some(d), _) => col.next(d.sessions).sorted(),
-      (None, tab) => col.next(tab != Tab::Models).sorted(),
+      (Some(d), tab) => col.next(Col::cycle(tab, d.sessions)).sorted(),
+      (None, tab) => col.next(Col::cycle(tab, tab != Tab::Models)).sorted(),
     };
     self.sort_by(by);
   }
@@ -403,7 +428,7 @@ impl App {
       _ if back => self.filter.clear(),
       KeyCode::Char('q') => return self.quit = true,
       KeyCode::Char('?') => return (self.help, self.help_top) = (true, 0),
-      KeyCode::Char(c @ '1'..='3') => self.tab(c as usize - '1' as usize),
+      KeyCode::Char(c @ '1'..='4') => self.tab(c as usize - '1' as usize),
       KeyCode::Char('T') => self.span = Span::ALL[(self.span as usize + Span::ALL.len() - 1) % 5],
       KeyCode::Char('t') if shift => {
         self.span = Span::ALL[(self.span as usize + Span::ALL.len() - 1) % 5];
@@ -443,7 +468,7 @@ impl App {
   }
 
   fn tab(&mut self, i: usize) {
-    self.tab = [Tab::Projects, Tab::Models, Tab::Timeline][i];
+    self.tab = [Tab::Projects, Tab::Models, Tab::Timeline, Tab::Swears][i];
     (self.open, self.help) = (None, false);
   }
 
@@ -551,16 +576,21 @@ fn step(code: KeyCode, at: usize, page: usize, len: usize) -> Option<usize> {
   })
 }
 
-/// The sum of rows: time, tokens, cost and sessions where they have them.
+/// The sum of rows: time, tokens, cost and sessions where they have them, and the swears.
 fn sum(rows: &[Row]) -> Row {
   let opt = |f: fn(&Row) -> Option<i64>| rows.iter().map(f).sum::<Option<i64>>();
+  let add = |f: fn(&Row) -> u64| rows.iter().map(f).fold(0, u64::saturating_add);
   Row {
     key: "total".into(),
     label: "total".into(),
     active: opt(|x| x.active),
-    tokens: rows.iter().fold(0, |a, x| a.saturating_add(x.tokens)),
+    tokens: add(|x| x.tokens),
     cost: rows.iter().map(|x| x.cost).sum(),
     sessions: opt(|x| x.sessions.map(|x| x as i64)).map(|x| x as usize),
+    words: add(|x| x.words),
+    swears: add(|x| x.swears),
+    prompts: add(|x| x.prompts),
+    swearing: add(|x| x.swearing),
     ..Default::default()
   }
 }
@@ -611,7 +641,9 @@ pub fn run() -> Result<()> {
   let res = (|| -> Result<()> {
     term.draw(draw::loading)?;
     let config = Config::load()?;
-    let sessions = crate::cli::sessions(None);
+    let dict =
+      crate::swear::Dict::load(crate::config::config_dir().map(|x| x.join("swear")).as_deref())?;
+    let sessions = crate::cli::sessions(None, Some(&dict));
     let today = crate::metrics::local_date(jiff::Timestamp::now().as_microsecond());
     let mut app = App::new(Data::new(sessions, config, today));
     let mut wheeled = None;
@@ -1335,6 +1367,52 @@ mod tests {
       assert!(width < 60 || squares >= 2, "{width}: {legend}");
       assert!(!legend.contains("  ·"), "{width}: {legend}");
     }
+  }
+
+  #[test]
+  fn the_swears_tab_scores_models_with_a_total() {
+    let mut app = App::new(data::tests::swearing());
+    press(&mut app, KeyCode::Char('4'));
+    assert_eq!(app.tab, Tab::Swears);
+    for width in [80, 120] {
+      let buf = frame_of(&app, width, 20);
+      assert!(raw(&buf, 0).contains(" Swears 4 "), "{}", raw(&buf, 0));
+      let head = cells(&line(&buf, find(&buf, "Model")));
+      assert_eq!(head, ["Model", "Words", "Swears", "per 1k", "% msgs", "Score ↓"], "{width}");
+      // By score: the barely used `small` below `sonnet` though it swears more per word, `tiny`
+      // without enough words last, with dashes.
+      let rows: Vec<Vec<String>> = ["sonnet", "small", "gpt", "tiny", "total"]
+        .iter()
+        .map(|x| cells(&line(&buf, find(&buf, x))))
+        .collect();
+      assert_eq!(rows[0], ["sonnet", "6.0K", "300", "50.0", "60.0%", "47.3"], "{width}");
+      assert_eq!(rows[1], ["small", "300", "24", "80.0", "100.0%", "44.4"], "{width}");
+      assert_eq!(rows[3], ["tiny", "20", "10", "–", "–", "–"], "{width}");
+      assert_eq!(rows[4], ["total", "9.3K", "364", "39.1", "50.0%", "39.1"], "{width}");
+      let ys: Vec<u16> =
+        ["sonnet", "small", "gpt", "tiny", "total"].iter().map(|x| find(&buf, x)).collect();
+      assert!(ys.windows(2).all(|x| x[0] + 1 == x[1]), "{}", screen_of(&buf));
+      // A row of swears opens nothing.
+      assert!(!raw(&buf, find(&buf, "Model") - 1).contains("open"));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(app.open.is_none());
+    // `s` sorts by the next column: after the score the names, then the words; `S` reverses it.
+    let keys = |app: &App| app.list.iter().map(|x| x.key.clone()).collect::<Vec<_>>();
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(keys(&app), ["gpt", "small", "sonnet", "tiny"]);
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.sort(), (Col::Words, true));
+    assert_eq!(keys(&app), ["sonnet", "gpt", "small", "tiny"]);
+    press(&mut app, KeyCode::Char('S'));
+    assert_eq!(keys(&app), ["tiny", "small", "gpt", "sonnet"]);
+    // The filter totals what it shows, at those rows' own rate.
+    press(&mut app, KeyCode::Char('/'));
+    for c in "s".chars() {
+      press(&mut app, KeyCode::Char(c));
+    }
+    assert_eq!((app.total.words, app.total.swears), (6300, 324));
+    assert!((app.total.score.unwrap() - 324_000.0 / 6300.0).abs() < 1e-9);
   }
 
   #[test]

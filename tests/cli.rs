@@ -66,8 +66,6 @@ struct Run {
   config: Option<PathBuf>,
   cwd: Option<PathBuf>,
   cache: PathBuf,
-  /// `XDG_CONFIG_HOME`: the user's swear lists.
-  config_home: PathBuf,
 }
 
 impl Run {
@@ -81,7 +79,6 @@ impl Run {
       config,
       cwd: None,
       cache: fixtures().join("missing"),
-      config_home: fixtures().join("missing"),
     }
   }
 
@@ -107,7 +104,6 @@ impl Run {
     cmd.env("FX_HOME", &self.fx);
     // The user's downloaded prices must not change the numbers, and tests never download.
     cmd.env("XDG_CACHE_HOME", &self.cache).env("CCTRAIL_NO_UPDATE", "1").env_remove("COLUMNS");
-    cmd.env("XDG_CONFIG_HOME", &self.config_home);
     match &self.config {
       Some(x) => cmd.env("CCTRAIL_CONFIG", x),
       None => cmd.env_remove("CCTRAIL_CONFIG"),
@@ -549,109 +545,6 @@ fn prices_each_day_at_its_rate() {
   let day = |d: &str, cost: f64| (d.to_string(), cost);
   assert_eq!(utc, [day("2026-01-10", 5.0), day("2026-01-31", 5.0), day("2026-02-10", 3.0)]);
   assert_eq!(tokyo, [day("2026-01-10", 5.0), day("2026-02-01", 3.0), day("2026-02-10", 3.0)]);
-}
-
-/// The history of `tests/swears`, apart from `tests/fixtures`: other tests read all of that.
-fn swears() -> Run {
-  let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/swears");
-  let (claude, codex, pi, fx) =
-    (dir.join("claude"), dir.join("codex"), dir.join("pi"), dir.join("fx"));
-  Run { claude, codex, pi, fx, ..Run::new("missing", "missing") }
-}
-
-#[test]
-fn counts_swearing_per_model() {
-  let run = swears();
-  let legend = "\
-With swearing: prompts with a swear word · % of prompts: of your prompts to that model
-per 1k words: swear words per 1,000 words you typed to that model
-";
-  // Every model of the fixtures has fewer than 100 prompts: all in `other`.
-  let out = run.stdout(&["swears"]);
-  let expected = "\
-Model            Prompts With swearing % of prompts ↓ per 1k words Top words
-other (7 models)      14            10          71.4%        312.5 fuck* 3, wtf 3, shit* 2
-total                 14            10          71.4%        312.5 fuck* 3, wtf 3, shit* 2
-
-7 models under 100 prompts in other · run cctrail swears --all for all
-";
-  assert_eq!(out, format!("{expected}{legend}"));
-  let out = run.stdout(&["swears", "--all"]);
-  let expected = "\
-Model                      Prompts With swearing % of prompts ↓ per 1k words Top words
-claude-sonnet-4-5                2             2         100.0%        500.0 fuck* 1, бля* 1
-claude-sonnet-4-5-20250929       1             1         100.0%       1000.0 бля* 1
-gpt-5.5                          1             1         100.0%        500.0 shit* 1
-gpt-5.4                          3             2          66.7%        250.0 fuck* 1, wtf 1
-gpt-6-astra                      3             2          66.7%        400.0 shit* 1, wtf 1
-claude-opus-4-6                  2             1          50.0%        142.9 wtf 1
-gpt-5                            2             1          50.0%        200.0 fuck* 1
-total                           14            10          71.4%        312.5 fuck* 3, wtf 3, shit* 2
-
-";
-  assert_eq!(out, format!("{expected}{legend}"));
-
-  // JSON lists every model.
-  let value = run.json(&["swears", "--json"]);
-  assert_eq!((&value["command"], &value["query"]["by"]), (&json!("swears"), &json!("model")));
-  let groups = value["groups"].as_array().unwrap();
-  assert_eq!(groups.len(), 7);
-  let row = json!({
-    "model": "gpt-5.4",
-    "prompts": 3,
-    "with_swearing": 2,
-    "share": 2.0 / 3.0,
-    "words": 8,
-    "per_1k_words": 250.0,
-    "swear_words": [{"word": "fuck*", "count": 1}, {"word": "wtf", "count": 1}],
-  });
-  assert_eq!(groups[3], row);
-  let words = json!([
-    {"word": "fuck*", "count": 3},
-    {"word": "wtf", "count": 3},
-    {"word": "shit*", "count": 2},
-    {"word": "бля*", "count": 2},
-  ]);
-  let total = json!({
-    "prompts": 14,
-    "with_swearing": 10,
-    "share": 10.0 / 14.0,
-    "words": 32,
-    "per_1k_words": 312.5,
-    "swear_words": words,
-  });
-  assert_eq!(value["total"], total);
-
-  // By project, for one harness and a range.
-  let value = run.json(&["swears", "--by", "project", "--provider", "codex", "--json"]);
-  assert_eq!(value["groups"][0]["project"], "/repo");
-  assert_eq!(
-    (&value["total"]["prompts"], &value["total"]["with_swearing"]),
-    (&json!(4), &json!(3))
-  );
-  let value = run.json(&["swears", "--until", "2026-01-31", "--json"]);
-  assert_eq!((&value["groups"], &value["total"]["prompts"]), (&json!([]), &json!(0)));
-}
-
-#[test]
-fn counts_the_users_swear_words() {
-  let dir = tmp("swear-lists");
-  std::fs::create_dir_all(dir.join("cctrail/swear")).unwrap();
-  std::fs::write(dir.join("cctrail/swear/polite.txt"), "please*\n").unwrap();
-  let mut run = swears();
-  run.config_home = dir.clone();
-  let value = run.json(&["swears", "--provider", "codex", "--json"]);
-  std::fs::write(dir.join("cctrail/swear/bad.txt"), "two words\n").unwrap();
-  let out = run.exec(&["swears"]);
-  std::fs::remove_dir_all(&dir).unwrap();
-
-  assert_eq!(value["total"]["with_swearing"], 4);
-  assert_eq!(value["total"]["swear_words"][0], json!({"word": "fuck*", "count": 1}));
-  let err = String::from_utf8_lossy(&out.stderr);
-  assert!(
-    out.status.code() == Some(2) && err.contains("bad.txt") && err.contains("line 1"),
-    "{err}"
-  );
 }
 
 #[test]
