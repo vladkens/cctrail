@@ -642,5 +642,45 @@ fn refuses_to_export_into_the_history() {
     files,
     std::fs::read_dir(fixtures().join("claude/projects/testproj")).unwrap().count()
   );
+
+  // Nor anywhere in a harness's home: pi's settings beside its sessions.
+  run.pi = dir.join("pi");
+  std::fs::create_dir_all(&run.pi).unwrap();
+  let settings = run.pi.join("settings.json");
+  std::fs::write(&settings, "{}").unwrap();
+  let err = String::from_utf8(run.exec(&["export", settings.to_str().unwrap()]).stderr).unwrap();
+  assert!(err.contains("which cctrail only reads"), "{err}");
+  assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{}");
+  assert_eq!(std::fs::read_dir(&run.pi).unwrap().count(), 1);
+  std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn reads_a_session_from_its_newest_import() {
+  let dir = tmp("newest");
+  // An older snapshot of a session without its last answer, then the session in full.
+  let mut run = Run::new("missing", "missing");
+  run.claude = dir.join("claude");
+  copy_tree(&fixtures().join("claude"), &run.claude);
+  let log = run.claude.join("projects/testproj/s-main-1.jsonl");
+  let text = std::fs::read_to_string(&log).unwrap();
+  let lines: Vec<&str> = text.lines().collect();
+  std::fs::write(&log, lines[..11].join("\n")).unwrap();
+  let (old, new) = (dir.join("old.db"), dir.join("new.db"));
+  let report = |run: &Run| run.json(&["--json"])["total"].clone();
+  run.stdout(&["export", old.to_str().unwrap()]);
+  let before = report(&run);
+  std::fs::write(&log, text).unwrap();
+  run.stdout(&["export", new.to_str().unwrap()]);
+  let after = report(&run);
+  assert_ne!(before, after);
+
+  // Imported in either order, the newer export wins.
+  for (i, files) in [[&old, &new], [&new, &old]].iter().enumerate() {
+    let mut b = Run::new("missing", "missing");
+    b.data = dir.join(format!("data-{i}"));
+    files.iter().for_each(|x| _ = b.stdout(&["import", x.to_str().unwrap()]));
+    assert_eq!(report(&b), after, "{i}");
+  }
   std::fs::remove_dir_all(&dir).unwrap();
 }

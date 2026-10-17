@@ -30,14 +30,15 @@ pub fn export(file: &Path) -> Result<usize> {
   Ok(sessions.len())
 }
 
-/// Refuses a file in a harness's history directories, which cctrail only reads.
+/// Refuses a file in a harness's home (its profiles, pi's session directories), which cctrail only
+/// reads.
 fn outside_history(file: &Path) -> Result<()> {
   let dir = file.parent().filter(|x| !x.as_os_str().is_empty()).unwrap_or(Path::new("."));
   // A missing directory fails the write, with its path.
   let Ok(dir) = dir.canonicalize() else { return Ok(()) };
   let mut roots = history_roots("CLAUDE_CONFIG_DIR", ".claude");
   roots.extend(history_roots("CODEX_HOME", ".codex").into_iter().chain(pi::roots()));
-  roots.push(fx::root());
+  roots.extend([pi::agent_dir(), fx::root()]);
   match roots.iter().filter_map(|x| x.canonicalize().ok()).find(|x| dir.starts_with(x)) {
     Some(x) => {
       bail!("{} is in the history in {}, which cctrail only reads", file.display(), x.display())
@@ -276,10 +277,9 @@ fn home() -> Option<String> {
   (!home.is_empty()).then_some(home)
 }
 
-/// `path` with its leading directory `from` as `to`: the home as `~` and back, a path folded on
-/// another platform with this one's separators.
+/// `path` with its leading directory `from` as `to`: the home as `~` and back. On Windows the rest
+/// is kept with `/` after `~` and read back with `\\`, so it moves to any platform.
 fn rebase(path: &str, from: Option<&str>, to: Option<&str>) -> String {
-  let foreign = if cfg!(windows) { '/' } else { '\\' };
   // Windows paths compare with either separator and in any case, as in `workdir`.
   let same = |x: &str| x.replace('\\', "/").to_lowercase();
   let strip = |x: &str| match cfg!(windows) {
@@ -287,10 +287,10 @@ fn rebase(path: &str, from: Option<&str>, to: Option<&str>) -> String {
     false => path.strip_prefix(x),
   };
   match (from.and_then(strip), to) {
-    (Some(x), Some(to)) if from == Some("~") && x.starts_with(foreign) => {
-      format!("{to}{}", x.replace(foreign, std::path::MAIN_SEPARATOR_STR))
-    }
-    (Some(x), Some(to)) if x.is_empty() || x.starts_with(['/', '\\']) => format!("{to}{x}"),
+    (Some(x), Some(to)) if x.is_empty() || x.starts_with(['/', '\\']) => match cfg!(windows) {
+      true => format!("{to}{}", x.replace(['/', '\\'], if to == "~" { "/" } else { "\\" })),
+      false => format!("{to}{x}"),
+    },
     _ => path.to_string(),
   }
 }
@@ -385,30 +385,35 @@ mod tests {
   fn folds_paths_under_the_home() {
     let native = |x: &str| x.replace('/', std::path::MAIN_SEPARATOR_STR);
     let fold = |x: &str, home: &str| rebase(&native(x), Some(&native(home)), Some("~"));
-    let expand = |x: &str, home: Option<&str>| rebase(&native(x), Some("~"), home);
+    let expand = |x: &str, home: Option<&str>| rebase(x, Some("~"), home);
+    // Kept with `/` after `~` on any platform, read back with this one's separators.
     let cases = [
-      ("/h/me/x", "~/x"),
+      ("/h/me/x/y", "~/x/y"),
       ("/h/me", "~"),
       ("/h/meow/x", "/h/meow/x"),
       ("/other", "/other"),
       ("C:\\h\\me\\x", "C:\\h\\me\\x"),
     ];
     for (path, folded) in cases {
-      assert_eq!(fold(path, "/h/me"), native(folded));
-      assert_eq!(expand(folded, Some(&native("/h/me"))), native(path));
+      let stored = if folded.starts_with('~') { folded.to_string() } else { native(folded) };
+      assert_eq!(fold(path, "/h/me"), stored);
+      assert_eq!(expand(&stored, Some(&native("/h/me"))), native(path));
     }
     assert_eq!(expand("~/x", Some(&native("/h/you"))), native("/h/you/x"));
-    assert_eq!(expand("~/x", None), native("~/x"));
+    assert_eq!(expand("~/x", None), "~/x");
     assert_eq!(expand("~x", Some("/h/me")), "~x");
-    // Windows paths compare with either separator and in any case; Unix ones exactly.
-    for path in ["C:/Users/me/repo", "c:\\users\\me\\repo"] {
-      let folded = if cfg!(windows) { format!("~{}", &path[11..]) } else { path.to_string() };
-      assert_eq!(rebase(path, Some("C:\\Users\\me"), Some("~")), folded);
+    // Windows paths compare with either separator and in any case, mixed ones kept with `/`; Unix
+    // ones exactly.
+    let home = Some("C:\\Users\\me");
+    for path in ["C:/Users/me/repo", "c:\\users\\me\\repo", "C:\\Users\\me/Code\\app"] {
+      let folded = match cfg!(windows) {
+        true => format!("~{}", path[11..].replace('\\', "/")),
+        false if path.starts_with("C:\\Users\\me") => format!("~{}", &path[11..]),
+        false => path.to_string(),
+      };
+      assert_eq!(rebase(path, home, Some("~")), folded);
     }
     let upper = if cfg!(windows) { "~/x" } else { "/H/me/x" };
     assert_eq!(rebase("/H/me/x", Some("/h/me"), Some("~")), upper);
-    // Folded on another platform.
-    let foreign = if cfg!(windows) { "~/x/y" } else { "~\\x\\y" };
-    assert_eq!(rebase(foreign, Some("~"), Some(&native("/h/me"))), native("/h/me/x/y"));
   }
 }

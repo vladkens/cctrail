@@ -119,9 +119,17 @@ fn expand_home(path: &str, home: Option<&Path>, windows: bool) -> Option<PathBuf
   expand_path(&path, home).ok()
 }
 
+/// pi's agent directory: `PI_CODING_AGENT_DIR`, else `~/.pi/agent`.
+pub fn agent_dir() -> PathBuf {
+  let home = home_dir();
+  match env::var("PI_CODING_AGENT_DIR").ok().filter(|x| !x.is_empty()) {
+    Some(x) => expand_home(&x, home.as_deref(), cfg!(windows)).unwrap_or_else(|| x.into()),
+    None => home.unwrap_or_else(|| ".".into()).join(".pi/agent"),
+  }
+}
+
 /// pi's session directories: `PI_CODING_AGENT_SESSION_DIR` when set, else `sessions` in the agent
-/// directory (`PI_CODING_AGENT_DIR`, else `~/.pi/agent`) and the absolute `sessionDir` of its
-/// settings.
+/// directory and the absolute `sessionDir` of its settings.
 pub fn roots() -> Vec<PathBuf> {
   let var = |x: &str| env::var(x).ok().filter(|x| !x.is_empty());
   let home = home_dir();
@@ -129,10 +137,7 @@ pub fn roots() -> Vec<PathBuf> {
   if let Some(x) = var("PI_CODING_AGENT_SESSION_DIR") {
     return vec![expand(&x).unwrap_or_else(|| x.into())];
   }
-  let agent = match var("PI_CODING_AGENT_DIR") {
-    Some(x) => expand(&x).unwrap_or_else(|| x.into()),
-    None => home.clone().unwrap_or_else(|| ".".into()).join(".pi/agent"),
-  };
+  let agent = agent_dir();
   let settings = std::fs::read(agent.join("settings.json")).ok();
   let settings = settings.and_then(|x| {
     let x = x.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&x);
