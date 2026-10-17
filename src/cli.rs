@@ -8,7 +8,6 @@ use jiff::civil::Date;
 use serde_json::{Map, Value, json};
 
 use crate::config::{self, By, Config};
-use crate::ledger::{self, Ledger};
 use crate::metrics::{self, DateRange, Granularity, Period, UsageSummary};
 use crate::model::{Provider, Session};
 use crate::output::{self, Term};
@@ -27,7 +26,6 @@ pub enum Cmd {
   Months,
   UpdatePricing,
   Export,
-  Import,
 }
 
 impl Cmd {
@@ -39,7 +37,6 @@ impl Cmd {
       "months" => Some(Self::Months),
       "update-pricing" => Some(Self::UpdatePricing),
       "export" => Some(Self::Export),
-      "import" => Some(Self::Import),
       _ => None,
     }
   }
@@ -53,7 +50,6 @@ impl Cmd {
       Self::Months => "months",
       Self::UpdatePricing => "update-pricing",
       Self::Export => "export",
-      Self::Import => "import",
     }
   }
 
@@ -74,7 +70,7 @@ pub struct Args {
   pub json: bool,
   /// Every row, no `other` collapse.
   pub all: bool,
-  /// `export`'s and `import`'s.
+  /// `export`'s.
   pub file: Option<PathBuf>,
 }
 
@@ -140,7 +136,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
           cmd = Some(c);
           continue;
         }
-        if matches!(cmd, Some(Cmd::Export | Cmd::Import)) && args.file.is_none() {
+        if cmd == Some(Cmd::Export) && args.file.is_none() {
           args.file = Some(PathBuf::from(x));
           continue;
         }
@@ -163,12 +159,12 @@ pub fn parse(argv: &[String]) -> Result<Parsed> {
       &["--since", "--until", "--provider", "--json", "--models"]
     }
     Cmd::Here => &["--provider", "--json"],
-    Cmd::UpdatePricing | Cmd::Export | Cmd::Import => &[],
+    Cmd::UpdatePricing | Cmd::Export => &[],
   };
   if let Some(x) = flags.iter().find(|x| !allowed.contains(&x.as_str())) {
     bail!("{x} is not an option of `cctrail {}`", args.cmd.name());
   }
-  if matches!(args.cmd, Cmd::Export | Cmd::Import) && args.file.is_none() {
+  if args.cmd == Cmd::Export && args.file.is_none() {
     bail!("`cctrail {}` needs a FILE", args.cmd.name());
   }
   if args.period.is_some() && !args.cmd.has_period() {
@@ -204,17 +200,8 @@ pub fn run(args: &Args) -> Result<()> {
     Cmd::UpdatePricing => update_pricing(),
     Cmd::Export => {
       let file = args.file.as_deref().unwrap_or(Path::new(""));
-      let n = Ledger::new()?.export(file, ledger::enabled())?;
+      let n = crate::export::export(file)?;
       output::emit(&format!("Exported {n} sessions to {}\n", file.display()))
-    }
-    Cmd::Import => {
-      let file = args.file.as_deref().unwrap_or(Path::new(""));
-      if !ledger::enabled() {
-        bail!("the ledger is off (CCTRAIL_NO_LEDGER)");
-      }
-      let (added, replaced, kept) = Ledger::new()?.import(file)?;
-      let file = file.display();
-      output::emit(&format!("Imported {file}: {added} added, {replaced} replaced, {kept} kept\n"))
     }
   }
 }
@@ -243,7 +230,7 @@ fn stats(args: &Args) -> Result<()> {
     By::Dir => (Config::default(), None),
     _ => (Config::load()?, config::config_path()),
   };
-  let mut sessions = sessions(args.provider, None)?;
+  let mut sessions = sessions(args.provider, None);
   workdir::fold_sessions(&mut sessions);
   let events = metrics::billable_events(&sessions);
   let stats = metrics::stats_by(&sessions, &events, &range, &config, args.by);
@@ -271,7 +258,7 @@ fn stats(args: &Args) -> Result<()> {
 
 fn usage(args: &Args, gran: Granularity) -> Result<()> {
   let range = DateRange::resolve(args.period, args.since, args.until);
-  let sessions = sessions(args.provider, None)?;
+  let sessions = sessions(args.provider, None);
   let events = metrics::billable_events(&sessions);
   let buckets = metrics::usage_by_period(&sessions, &events, gran, &range);
   let mut total = UsageSummary::default();
@@ -323,7 +310,7 @@ fn here(args: &Args) -> Result<()> {
 
   let config = Config::load()?;
   let cwd = std::env::current_dir()?.to_string_lossy().to_string();
-  let mut sessions = sessions(args.provider, None)?;
+  let mut sessions = sessions(args.provider, None);
   let folds = workdir::fold_sessions(&mut sessions);
   let workdir = folds.fold(&cwd);
   let project = config.find(&cwd, &workdir);
@@ -385,7 +372,7 @@ fn update_pricing() -> Result<()> {
 
 /// The sessions, with the price catalog refreshed beside the parsing when it is due; with a
 /// dictionary, the swearing in their prompts too.
-pub fn sessions(provider: Option<Provider>, swears: Option<&Dict>) -> Result<Vec<Session>> {
+pub fn sessions(provider: Option<Provider>, swears: Option<&Dict>) -> Vec<Session> {
   let refresh = pricing::refresh();
   let sessions = parse_history(provider, swears);
   pricing::finish(refresh);
@@ -411,8 +398,7 @@ Usage:
   cctrail here                                the current directory's project
   cctrail days|weeks|months [period] [--models]
   cctrail update-pricing                      download the latest model prices
-  cctrail export FILE                         copy the ledger of history into a file
-  cctrail import FILE                         merge an exported ledger into this one
+  cctrail export FILE                         save the parsed history into an SQLite file
 
 Periods: today, yesterday, this-week, last-week, this-month, last-month, all (default)
 

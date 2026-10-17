@@ -659,7 +659,7 @@ pub fn run() -> Result<()> {
     let config = Config::load()?;
     let dict =
       crate::swear::Dict::load(crate::config::config_dir().map(|x| x.join("swear")).as_deref())?;
-    let sessions = crate::cli::sessions(None, Some(&dict))?;
+    let sessions = crate::cli::sessions(None, Some(&dict));
     let today = crate::metrics::local_date(jiff::Timestamp::now().as_microsecond());
     let mut app = App::new(Data::new(sessions, config, today));
     let mut wheeled = None;

@@ -133,7 +133,7 @@ impl Dict {
     Self::load(crate::config::config_dir().map(|x| x.join("swear")).as_deref())
   }
 
-  /// Tells dictionaries apart: the ledger counts prompts read with another one again.
+  /// Tells dictionaries apart: an export keeps it with the counts read with it.
   pub fn fingerprint(&self) -> i64 {
     let mut hash = DefaultHasher::new();
     self.entries.hash(&mut hash);

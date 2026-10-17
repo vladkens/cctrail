@@ -145,12 +145,6 @@ pub struct Links {
   effort: Option<String>,
 }
 
-impl Links {
-  pub fn has_totals(&self) -> bool {
-    !self.models.is_empty()
-  }
-}
-
 /// A model's totals in a session.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Model {

@@ -12,7 +12,6 @@ use std::io::{BufRead, BufReader};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
 use rayon::prelude::*;
 use serde::de::{self, DeserializeOwned, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -34,23 +33,28 @@ pub fn harnesses(provider: Option<Provider>) -> Vec<(Provider, Vec<PathBuf>)> {
 }
 
 /// All sessions of every harness, or of one; with a dictionary, the swearing in their main
-/// sessions' prompts too. Through the ledger unless `CCTRAIL_NO_LEDGER` is set.
-pub fn parse_history(provider: Option<Provider>, swears: Option<&Dict>) -> Result<Vec<Session>> {
-  let harnesses = harnesses(provider);
-  if crate::ledger::enabled() {
-    return crate::ledger::sessions(&harnesses, swears);
-  }
-  let sessions = harnesses.par_iter().map(|(p, roots)| {
-    let sources = find(*p, roots).into_par_iter().map(|x| x.read(swears, 0)).collect();
-    combine(*p, roots, sources)
-  });
-  Ok(sessions.collect::<Vec<_>>().concat())
+/// sessions' prompts too.
+pub fn parse_history(provider: Option<Provider>, swears: Option<&Dict>) -> Vec<Session> {
+  let sessions = harnesses(provider)
+    .into_par_iter()
+    .map(|(p, roots)| combine(p, &roots, read(p, &roots, swears, 0)));
+  sessions.collect::<Vec<_>>().concat()
+}
+
+/// A harness's files, each read alone.
+pub fn read(
+  provider: Provider,
+  roots: &[PathBuf],
+  swears: Option<&Dict>,
+  dict: i64,
+) -> Vec<Source> {
+  find(provider, roots).into_par_iter().map(|x| x.read(swears, dict)).collect()
 }
 
 // MARK: Sources
 
-/// What reading one history file alone gives. The work across files (copies, agents, forks) runs
-/// on these, so the ledger keeps them for the files read before and those gone since.
+/// What reading one history file alone gives; the work across files (copies, agents, forks) runs
+/// on these. An export keeps them, so history read back counts as read from the logs.
 #[derive(Clone, Debug, Default)]
 pub struct Unit {
   pub session: Option<Session>,
@@ -70,7 +74,7 @@ pub enum Links {
 }
 
 /// A history file (fx: a session directory) under one of its harness's roots, and what reading it
-/// gave: a file of the ledger.
+/// gave: a file of an export.
 #[derive(Clone, Debug)]
 pub struct Source {
   pub provider: Provider,
@@ -105,7 +109,7 @@ impl Source {
       Provider::Pi => pi::read(&self.path, swears),
       Provider::Fx => fx::read(&self.path, swears),
     };
-    self.version = (crate::ledger::PARSER_VERSION, dict);
+    self.version = (crate::export::PARSER_VERSION, dict);
     self
   }
 }
@@ -119,11 +123,10 @@ pub fn find(provider: Provider, roots: &[PathBuf]) -> Vec<Source> {
   }
 }
 
-/// A harness's sessions read without the ledger.
+/// A harness's sessions, its files read and combined.
 #[cfg(test)]
 pub fn parse(provider: Provider, roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
-  let sources = find(provider, roots).into_iter().map(|x| x.read(swears, 0));
-  combine(provider, roots, sources.collect())
+  combine(provider, roots, read(provider, roots, swears, 0))
 }
 
 /// A harness's sessions from its sources, in the order its files are found: by root (those of

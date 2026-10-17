@@ -31,10 +31,7 @@ sessions themselves, with agent worktrees and clones counted as one project.
 - 👥 **All accounts.** Every Claude Code and Codex profile (`~/.claude-work`) in one report.
 - 🖥️ **Interactive.** Projects, models and a timeline by model, with drill-downs and the mouse.
 - 📊 **Scriptable.** Reports by day, week or month, per project, group or model, and JSON.
-- 🗄️ **History that stays.** A ledger keeps what was read when the harness deletes old logs, and
-  moves to another machine.
-- ⚡ **Fast and private.** Gigabytes of history read once, then only what changed; it never leaves
-  your machine.
+- ⚡ **Fast and private.** Seconds for gigabytes of history, which never leaves your machine.
 
 ## 📥 Installation
 
@@ -70,8 +67,7 @@ cctrail days                 # per day; also weeks, months, and --models for a b
 cctrail --provider codex     # one harness only: claude, codex, pi or fx
 cctrail --json               # everything with full paths and exact counts
 cctrail update-pricing       # download the latest prices now
-cctrail export FILE          # copy the ledger into a file: a backup, or for another machine
-cctrail import FILE          # merge an exported ledger into this one
+cctrail export FILE          # save the parsed history into an SQLite file, as a backup
 ```
 
 Any argument, `--json` or a pipe prints a text report; `NO_COLOR=1` turns its colors off. Weeks
@@ -145,24 +141,14 @@ Repositories outside the config keep their own rows and form the `@unmapped` gro
 
 A forked pi session counts only what it added to the copy of its source. fx logs a session's tokens
 only as totals, so they are spread over its agents' activity, a share on every active day: exact
-per project, approximate per day.
+per project, approximate per day. Claude Code deletes sessions older than 30 days by default: raise
+[`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically)
+to keep a long history.
 
-### Ledger
-
-What cctrail reads goes into a ledger, an SQLite database in `~/.local/share/cctrail/ledger.db`
-(`XDG_DATA_HOME` moves the root; on Windows `%LOCALAPPDATA%\cctrail\ledger.db`). The next run
-reads only the files that changed, and the sessions of deleted files stay: Claude Code deletes
-sessions older than 30 days by default
-([`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically)),
-the ledger keeps them. It holds what the numbers need (times, models, tokens, the directories)
-and the swear counts, never the text of a prompt or answer.
-
-`cctrail export FILE` copies the ledger into one file: it is the backup, and how history moves to
-another machine, where `cctrail import FILE` merges it in (a session whose log is still on that
-machine is read from the log). Paths under the home directory are kept as `~/…`, so they land in
-the new home. A cctrail that reads some history differently reads the logs still on disk again,
-after copying the ledger to `ledger.db.bak-<version>`. `CCTRAIL_NO_LEDGER=1` reads the logs alone,
-without the ledger.
+`cctrail export FILE` saves what cctrail reads into one SQLite file: a backup before the logs are
+deleted or you move to another machine. It holds what the numbers need (times, models, tokens,
+directories) and the swear counts, never a prompt's or answer's text; paths under your home are kept
+as `~/…`. `cctrail import`, to read such a file back into the reports, comes later.
 
 ### Swearing
 
@@ -189,7 +175,8 @@ The Swears view: how often you scold each model, adjusted for how much you used 
   any swearing · Score: `% dir` adjusted for few messages, `(dir + 30 × overall) / (msgs + 30) ×
   100`, overall being your `% dir` in the period, so a few messages can't move a model far from
   your average. Shares need 10 messages; messages to no known model are `<unknown>`.
-- **Privacy:** each prompt keeps only counts and a hash, never its text, in the ledger too.
+- **Privacy:** each prompt keeps only counts and a hash, never its text, for this view and
+  `cctrail export`.
 - **Your lists:** `~/.config/cctrail/swear/*.txt`, insults in `insult-*.txt`. Lists for other
   languages are welcome as pull requests.
 
@@ -234,7 +221,7 @@ cargo uninstall cctrail                                                         
   history for the price of each day.
 - [ratatui](https://github.com/ratatui/ratatui) (MIT): the interactive view.
 - [SQLite](https://sqlite.org) (public domain) through
-  [rusqlite](https://github.com/rusqlite/rusqlite) (MIT): the ledger.
+  [rusqlite](https://github.com/rusqlite/rusqlite) (MIT): `cctrail export`.
 
 ## 📝 License
 
