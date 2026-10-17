@@ -6,6 +6,7 @@
 
 [<img src="https://badges.ws/crates/v/cctrail" alt="version" />](https://crates.io/crates/cctrail)
 [<img src="https://badges.ws/github/license/vladkens/cctrail" alt="license" />](https://github.com/vladkens/cctrail/blob/main/LICENSE)
+[<img src="https://badges.ws/badge/follow-@uid127-black" alt="follow @uid127" />](https://x.com/uid127)
 
 </div>
 
@@ -14,42 +15,103 @@
 used and what that would cost at API prices. It needs no setup: repositories are found from the
 sessions themselves, with agent worktrees and clones counted as one project.
 
-## Install
+```text
+╭─ Projects 1  Models 2  Timeline 3 ────────────────────────────────── cctrail v0.3.0 ─╮
+│ Today  Week  Month  30d  All                                      claude+codex+pi+fx │
+╰──────────────────────────────────────────────────────────────────────────────────────╯
+╭─ projects 5 ─ / filter ─ sort ────────────────────────────────────────────── → open ─╮
+│   Project                        Time ↓    Tokens         Cost    Sessions    Share  │
+│ ▶ work/web-app                2d 7h 22m    100.4M       $86.85          42      42%  │
+│   work/api                   1d 11h 02m     58.7M       $49.32          21      27%  │
+│   oss/cli-tool                  23h 14m     38.4M       $33.89          21      18%  │
+│   oss/blog                      11h 10m     17.2M       $14.69          20       8%  │
+│   /home/me/Code/dotfiles         6h 08m      8.4M        $7.15          21       5%  │
+│   total                      5d 10h 55m    223.1M      $191.90         125     100%  │
+╰──────────────────────────────────────────────── ? help | quit | t period | provider ─╯
+```
+
+## 🌟 Features
+
+- ⏱️ Active time per project, not session length: idle gaps don't count, and time spent in
+  several projects at once is split between them
+- 💰 Tokens and their cost at [models.dev](https://models.dev) API prices, each request at the
+  price of its day
+- 🌳 Agent worktrees and clones of a repository fold into one project, with no config
+- 🗂️ An optional config to name projects, merge repositories and put them in groups
+- 🧩 Claude Code, Codex, pi and fx, including every Claude Code and Codex profile
+  (`~/.claude-work`)
+- 🖥️ An interactive view of projects, models and a timeline, with drill-downs, keys and mouse
+- 📊 Text reports by period, day, week or month, per project, group, directory or model, and JSON
+- ⚡ Fast: about 4.5 s for ~11 GB of history on an M-series Mac (2026-10-14)
+- 🔒 Local: reads the history only, and goes online only for prices
+- 📦 One binary for macOS, Linux and Windows
+
+## 🤖 How it's made
+
+cctrail is written by AI agents (Claude Code, Codex) following [agents.md](agents.md); I choose
+what to build and review every pull request. The parsers are tested on small synthetic histories
+([fixtures](tests/fixtures/)), every change is run against the previous build on my full local
+history so the tokens, sessions and time don't drift, and every speed change is measured and
+logged in [docs/perf.md](docs/perf.md). This isn't a weekend prompt: I've written software by hand
+for years, such as [macmon](https://github.com/vladkens/macmon) (Rust, Apple Silicon system
+monitor), [twscrape](https://github.com/vladkens/twscrape) (Python, X/Twitter scraping) and
+[ecloop](https://github.com/vladkens/ecloop) (C, low-level elliptic-curve math), and agents are how
+I build now.
+
+## 📥 Installation
+
+Download the archive for macOS (Apple Silicon), Linux (x86_64 or arm64, glibc 2.28 or newer) or
+Windows (x86_64) from the [latest release](https://github.com/vladkens/cctrail/releases/latest)
+and put `cctrail` (`cctrail.exe`) into a folder on your `PATH`, such as `~/.local/bin`. Or build
+it with Rust:
 
 ```sh
 cargo install cctrail
 ```
 
-Or take a prebuilt binary for macOS, Linux or Windows from the
-[releases](https://github.com/vladkens/cctrail/releases).
+Every archive is attested: `gh attestation verify FILE -R vladkens/cctrail` checks that this
+repository's CI built it.
 
-## Usage
+### Newest version
+
+This readme follows main, which may be ahead of the latest release. Binaries of main are in the
+[dev release](https://github.com/vladkens/cctrail/releases/tag/dev), or build it with Rust:
 
 ```sh
-cctrail                  # on a terminal: the interactive view (projects, models, timeline)
-cctrail all              # time, tokens and cost per project as text, all time
-cctrail this-month       # for a period: today, yesterday, this-week, last-week, this-month, last-month
-cctrail --all            # every row; by default rows past 95% of the time are summed up as `other`
-cctrail --by group       # per group from the config, or --by dir per working directory
-cctrail here             # the current directory's project: today, this week, this month, all time
-cctrail days             # per day; also weeks, months, and --models for a breakdown by model
+cargo install --git https://github.com/vladkens/cctrail
 ```
 
-`--since` and `--until` take inclusive `YYYY-MM-DD` dates instead of a period, `--provider
-claude|codex|pi|fx` reads one harness only, and `--json` prints everything with full paths and
-exact counts. Weeks start on Monday. `cctrail --help` lists it all.
+## 🚀 Usage
+
+```sh
+cctrail                      # on a terminal: the interactive view (projects, models, timeline)
+cctrail all                  # time, tokens and cost per project as text, all time
+cctrail this-month           # for a period: today, yesterday, this-week, last-week, this-month, last-month
+cctrail --since 2026-03-01   # from a date; --until sets the last day, both inclusive YYYY-MM-DD
+cctrail --all                # every row; by default rows past 95% of the time are summed up as `other`
+cctrail --by group           # per group from the config, or --by dir per working directory
+cctrail here                 # the current directory's project: today, this week, this month, all time
+cctrail days                 # per day; also weeks, months, and --models for a breakdown by model
+cctrail --provider codex     # one harness only: claude, codex, pi or fx
+cctrail --json               # everything with full paths and exact counts
+cctrail update-pricing       # download the latest prices now
+```
+
+Weeks start on Monday. `cctrail --help` lists it all.
 
 `cctrail` without arguments on a terminal opens the interactive view: projects, models and a
 timeline (a chart of the days stacked by model over their list) for today, this week, this month,
-the last 30 days or all time; `t` and `T` switch the period. `→` or `enter` opens a row (a
-project's models, a model's speeds and efforts, a day's projects) and `←`, `esc` or `q` goes back,
-`s` sorts by the next column and `S` reverses (on the timeline `s` switches the bars between time,
-tokens and cost), `p` switches the provider, `/` filters, `?` lists the keys. The mouse works too:
-a click selects a row or a bar and a second one opens it, a column header sorts, a click on a
-view, period or provider switches it, the wheel scrolls. Any argument, `--json` or a pipe prints
-the text report instead.
+the last 30 days or all time; `1`, `2` and `3` switch the view, `t` and `T` the period. `→` or
+`enter` opens a row (a project's models, a model's speeds and efforts, a day's projects) and `←`,
+`esc` or `q` goes back, `s` sorts by the next column and `S` reverses (on the timeline `s` switches
+the bars between time, tokens and cost), `p` switches the provider, `/` filters, `?` lists the
+keys. The mouse works too: a click selects a row or a bar and a second one opens it, a column
+header sorts, a click on a view, period or provider switches it, the wheel scrolls. Any argument,
+`--json` or a pipe prints the text report instead.
 
-## Projects
+<a name="projects"></a>
+
+## 📁 Projects
 
 Every repository is a row, named by its directory. Agent worktrees count as their repository
 (`<repo>/.claude/worktrees/<name>`, any `<repo>/.<tool>/worktrees/<name>`,
@@ -63,14 +125,14 @@ root, `CCTRAIL_CONFIG` sets the full path):
 
 ```toml
 [projects]
-"env/dotfiles" = ["~/Code/dotfiles", "~/Code/scripts"]
-"oss/cctrail" = ["~/Code/cctrail"]
+"work/web-app" = ["~/Code/web-app", "~/Code/web-app-docs"]
+"oss/cli-tool" = ["~/Code/cli-tool"]
 ```
 
 Each key is `<group>/<project>`. A path includes everything below it, and the longest match wins.
 Repositories outside the config keep their own rows and form the `@unmapped` group.
 
-## How it counts
+## 🧮 How it counts
 
 - **History:** Claude Code from `~/.claude/projects`, Codex from `~/.codex/sessions` and
   `~/.codex/archived_sessions`, plus the same in every profile beside them (`~/.claude-work`,
@@ -97,6 +159,35 @@ Repositories outside the config keep their own rows and form the `@unmapped` gro
   models.dev lacks; an fx session in Fast mode counts at the fast rate throughout. Tokens on other
   unpriced models are listed below the report.
 
-## License
+## 🤝 Contributing
+
+Pull requests are welcome, and so are your agents: point them at [agents.md](agents.md).
+
+<details>
+<summary>Installing a branch</summary>
+
+```sh
+cargo install --git https://github.com/vladkens/cctrail --branch feat/NAME --locked  # a PR branch
+cargo install --git https://github.com/vladkens/cctrail --locked --force             # back to main
+cargo install --path . --locked                                                      # a local checkout
+cargo uninstall cctrail                                                              # remove it
+```
+
+</details>
+
+## 🙏 Credits
+
+- [models.dev](https://github.com/anomalyco/models.dev) (MIT): the model prices, read from its git
+  history for the price of each day.
+- [ratatui](https://github.com/ratatui/ratatui) (MIT): the interactive view.
+
+## 📝 License
 
 Distributed under the [MIT License](LICENSE).
+
+## 🔍 See also
+
+- [ccusage/ccusage](https://github.com/ccusage/ccusage) – Daily, weekly, monthly and session
+  reports of tokens and cost from the local data of many coding agent CLIs.
+- [Maciek-roboblog/Claude-Code-Usage-Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor)
+  – A live terminal monitor of Claude Code usage against its rate limits, with forecasts.
