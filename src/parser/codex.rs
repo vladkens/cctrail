@@ -8,9 +8,11 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-  AgentCall, Content, Obj, Present, Text, Val, inherit_roots, jsonl, jsonl_files, parse_ts,
+  AgentCall, Content, Obj, Present, Replies, Text, Val, inherit_roots, jsonl, jsonl_files,
+  own_words, parse_ts,
 };
 use crate::model::{Event, Provider, Session, Speed, Usage};
+use crate::swear::Dict;
 use crate::workdir::normalize_remote;
 
 /// A token count's six numbers: a fork replays its parent's counts, found by these.
@@ -155,6 +157,9 @@ struct Rollout {
   remote: Option<String>,
   /// Lines with a smaller `ordinal` are the parent's history, copied into an agent's rollout.
   own_start: Option<i64>,
+  /// Its prompts are typed: not an agent's (a `source` that isn't a string, its parent linked or
+  /// not, as a review's) nor of `codex exec`, which scripts and other agents start.
+  typed: bool,
 }
 
 #[derive(Default)]
@@ -174,7 +179,7 @@ struct Parsed {
 /// agents carry their main session's root and working directory. A rollout id seen twice counts
 /// once: within a root the later file wins (`sessions` over `archived_sessions`), across roots (a
 /// copied profile) the longest file, whole.
-pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
+pub fn parse(roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
   let files: Vec<(usize, PathBuf)> = roots
     .iter()
     .enumerate()
@@ -208,7 +213,7 @@ pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
     }
   }
 
-  let mut parsed: Vec<Parsed> = rollouts.par_iter().map(parse_file).collect();
+  let mut parsed: Vec<Parsed> = rollouts.par_iter().map(|x| parse_file(x, swears)).collect();
   let signatures: HashMap<&str, Vec<Signature>> =
     rollouts.iter().zip(&parsed).map(|(r, p)| (r.id.as_str(), p.signatures.clone())).collect();
   for (rollout, item) in rollouts.iter().zip(&mut parsed) {
@@ -289,6 +294,12 @@ fn read_meta(path: &Path) -> Option<Rollout> {
     workdir: meta.cwd.str().unwrap_or("unknown").to_string(),
     remote: meta.git.0.as_ref().and_then(|x| normalize_remote(x.repository_url.str()?)),
     own_start: meta.subagent_history_start_ordinal.ordinal(),
+    // `thread_source` says the same where `source` is missing, as for the parent: `user` typed.
+    typed: match (&meta.source, &meta.thread_source) {
+      (Some(x), _) => x.as_str().is_some_and(|x| x != "exec"),
+      (None, Some(x)) => x.as_str() == Some("user"),
+      (None, None) => true,
+    },
   })
 }
 
@@ -303,7 +314,8 @@ fn nested_parent_id(value: &Value) -> Option<String> {
   }
 }
 
-fn parse_file(rollout: &Rollout) -> Parsed {
+fn parse_file(rollout: &Rollout, swears: Option<&Dict>) -> Parsed {
+  let swears = swears.filter(|_| rollout.parent_id.is_none() && rollout.typed);
   let mut session =
     Session::new(&rollout.id, rollout.parent_id.is_none(), &rollout.workdir, Provider::Codex);
   session.remote = rollout.remote.clone();
@@ -317,6 +329,7 @@ fn parse_file(rollout: &Rollout) -> Parsed {
   let mut calls: Vec<AgentCall> = vec![];
   let mut records: Vec<Record> = vec![];
   let mut signatures: Vec<Signature> = vec![];
+  let mut replies = Replies::default();
 
   jsonl(&rollout.path, |line: Line, raw| {
     let inherited =
@@ -345,9 +358,28 @@ fn parse_file(rollout: &Rollout) -> Parsed {
       }
       (_, Some("user_message")) if event_msg && !inherited => {
         if let Some(ts) = parse_ts(&line.timestamp).filter(|_| p.message.has_text()) {
-          records.push(Record { event: Some(Event::activity(ts)), signature: None });
+          let mut event = Event::activity(ts);
+          if let Some(dict) = swears
+            && let Some(words) = prompt(raw)
+          {
+            replies.prompt(&mut event, dict, ts, &words);
+          }
+          records.push(Record { event: Some(event), signature: None });
         }
         assistant = None;
+      }
+      // Codex logs a prompt as a `UserMessage` item instead since 2026-08. Only its prompt is
+      // kept, in an event of no time, which `swear::take_prompts` takes out again: the reports
+      // don't count these as activity.
+      (_, Some("item_completed")) if event_msg => {
+        if let Some(dict) = swears
+          && let Some(ts) = parse_ts(&line.timestamp)
+          && let Some(words) = prompt(raw)
+        {
+          let mut event = Event::default();
+          replies.prompt(&mut event, dict, ts, &words);
+          records.push(Record { event: Some(event), signature: None });
+        }
       }
       (_, Some("task_complete")) if event_msg && !inherited => assistant = None,
       (_, Some("token_count")) if event_msg => {
@@ -363,6 +395,13 @@ fn parse_file(rollout: &Rollout) -> Parsed {
         let usage = last.or_else(|| total.map(|x| delta(x, prev_total)));
         if total.is_some() {
           prev_total = total;
+        }
+        // A model answered only with tokens: not an empty `info` or a count of none.
+        if swears.is_some()
+          && usage.map(normalize).is_some_and(|x| x.total() > 0)
+          && let Some(x) = info.model.str().or(model.as_deref())
+        {
+          replies.answer(x);
         }
         if inherited {
           return true;
@@ -397,7 +436,38 @@ fn parse_file(rollout: &Rollout) -> Parsed {
     true
   });
 
+  replies.finish(records.iter_mut().filter_map(|x| x.event.as_mut()));
   Parsed { session, calls, records, signatures }
+}
+
+/// A prompt's own words: a `user_message`'s, or a `UserMessage` item's. Only the fields read are
+/// parsed: other items hold commands' output.
+fn prompt(raw: &[u8]) -> Option<String> {
+  #[derive(Deserialize, Default)]
+  #[serde(default)]
+  struct Line {
+    payload: Obj<Payload>,
+  }
+  #[derive(Deserialize, Default)]
+  #[serde(default)]
+  struct Payload {
+    message: Value,
+    item: Obj<Item>,
+  }
+  #[derive(Deserialize, Default)]
+  #[serde(default)]
+  struct Item {
+    #[serde(rename = "type")]
+    kind: Val,
+    content: Value,
+  }
+
+  let p = serde_json::from_slice::<Obj<Line>>(raw).ok()?.0?.payload.0?;
+  match p.item.0 {
+    Some(x) if x.kind.str() == Some("UserMessage") => own_words(&x.content),
+    Some(_) => None,
+    None => own_words(&p.message),
+  }
 }
 
 /// Drops the leading events a fork replays from its parent: records whose signatures match the
@@ -511,9 +581,56 @@ mod tests {
   }
 
   #[test]
+  fn reads_typed_prompts_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/swears/codex");
+    // Injected context, an agent's, a review's and `codex exec`'s prompts (by `source` or by
+    // `thread_source`) and the fork's replay are no prompts; a `UserMessage` item is one, without
+    // the answer to Codex's question. The fork's own prompt counts toward the last answer it
+    // replayed.
+    // `wtf now`, `what the fuck`, `please rename it`, `shit, again`.
+    let expected = [("gpt-5.4", 2, 1), ("gpt-5.4", 3, 1), ("gpt-5.4", 3, 0), ("gpt-5.5", 2, 1)];
+    let sessions = parse(std::slice::from_ref(&root), Some(&super::super::tests::dict()));
+    assert_eq!(super::super::tests::prompts(&sessions), expected);
+    let sessions = parse(&[root], None);
+    assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
+  }
+
+  #[test]
+  fn a_prompt_counts_toward_a_model_that_answered_with_tokens() {
+    let base = std::env::temp_dir().join(format!("cctrail-answers-{}", std::process::id()));
+    let line = |t: u8, kind: &str, payload: &str| {
+      format!(r#"{{"timestamp":"2026-01-01T00:0{t}:00Z","type":"{kind}","payload":{payload}}}"#)
+    };
+    let count = |t, last: &str, total: u64| {
+      let info = format!(r#"{{"total_token_usage":{{"input_tokens":{total}}}{last}}}"#);
+      line(t, "event_msg", &format!(r#"{{"type":"token_count","info":{info}}}"#))
+    };
+    let prompt = |t| line(t, "event_msg", r#"{"type":"user_message","message":"fuck"}"#);
+    let lines = [
+      line(0, "session_meta", r#"{"id":"s","cwd":"/r","source":"cli"}"#),
+      line(1, "turn_context", r#"{"model":"a"}"#),
+      count(1, r#","last_token_usage":{"input_tokens":10}"#, 10),
+      prompt(2),
+      // Another model picked, an empty count and one of no tokens: `a` answered last still.
+      line(3, "turn_context", r#"{"model":"b"}"#),
+      line(3, "event_msg", r#"{"type":"token_count","info":{}}"#),
+      count(4, r#","last_token_usage":{"input_tokens":0}"#, 10),
+      prompt(5),
+      count(6, r#","last_token_usage":{"input_tokens":5}"#, 15),
+      prompt(7),
+    ];
+    std::fs::create_dir_all(base.join("sessions")).unwrap();
+    std::fs::write(base.join("sessions/rollout.jsonl"), lines.join("\n")).unwrap();
+    let sessions = parse(std::slice::from_ref(&base), Some(&super::super::tests::dict()));
+    std::fs::remove_dir_all(&base).unwrap();
+    let models: Vec<_> = super::super::tests::prompts(&sessions).into_iter().map(|x| x.0).collect();
+    assert_eq!(models, ["a", "a", "b"]);
+  }
+
+  #[test]
   fn links_only_spawned_agent_and_removes_fork_replay() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex");
-    let sessions = parse(std::slice::from_ref(&root));
+    let sessions = parse(std::slice::from_ref(&root), None);
     let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
     let (main, agent, fork) = (find("codex-main-1"), find("codex-agent-1"), find("codex-fork-1"));
 
@@ -524,7 +641,7 @@ mod tests {
     assert_eq!(total(&sessions.iter().collect::<Vec<_>>()), 455);
 
     // The same rollouts under a second root (a copied profile) count once.
-    let twice = parse(&[root.clone(), root]);
+    let twice = parse(&[root.clone(), root], None);
     assert_eq!(twice.len(), sessions.len());
     assert_eq!(total(&twice.iter().collect::<Vec<_>>()), 455);
   }
@@ -546,7 +663,7 @@ mod tests {
     };
     let all = |roots: &[&str]| {
       let roots: Vec<PathBuf> = roots.iter().map(|x| base.join(x)).collect();
-      total(&parse(&roots).iter().collect::<Vec<_>>())
+      total(&parse(&roots, None).iter().collect::<Vec<_>>())
     };
 
     // Across roots the longest file wins whole, in either order.
@@ -637,7 +754,7 @@ mod tests {
     ];
     std::fs::create_dir_all(base.join("sessions")).unwrap();
     std::fs::write(base.join("sessions/rollout.jsonl"), lines.join("\n")).unwrap();
-    let sessions = parse(std::slice::from_ref(&base));
+    let sessions = parse(std::slice::from_ref(&base), None);
     let effort: Vec<_> = sessions[0].events.iter().map(|x| x.effort.as_deref()).collect();
     assert_eq!(effort, [None, Some("high"), Some("high"), Some("low"), None]);
     std::fs::remove_dir_all(&base).unwrap();

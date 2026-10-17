@@ -7,9 +7,10 @@ use jiff::civil::Date;
 
 use crate::config::{By, Config};
 use crate::metrics::{self, DateRange, Granularity, Period};
-use crate::model::{Event, Provider, Session, Speed, Ts};
+use crate::model::{Event, Prompt, Provider, Session, Speed, Ts};
 use crate::output::{self, workdir_label};
 use crate::pricing;
+use crate::swear::MIN_PROMPTS;
 
 /// The periods the header switches between.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +63,30 @@ pub struct Row {
   pub day: Option<Date>,
   /// A model without a price: its cost is unknown, not 0.
   pub unpriced: bool,
+  /// The swears tab's: the prompts to a model and the words in them, those swearing at the
+  /// listener and those with any swearing, and the score.
+  pub prompts: u64,
+  pub words: u64,
+  pub directed: u64,
+  pub swearing: u64,
+  pub score: Option<f64>,
+}
+
+/// The swears tab's shares of prompts, in percent, from enough prompts.
+impl Row {
+  fn share(&self, x: u64) -> Option<f64> {
+    (self.prompts >= MIN_PROMPTS).then(|| x as f64 * 100.0 / self.prompts as f64)
+  }
+
+  /// Of the prompts swearing at the listener.
+  pub fn directed_share(&self) -> Option<f64> {
+    self.share(self.directed)
+  }
+
+  /// Of the prompts with any swearing.
+  pub fn any_share(&self) -> Option<f64> {
+    self.share(self.swearing)
+  }
 }
 
 /// Time per project, model, speed and effort, for one span and provider.
@@ -76,6 +101,8 @@ type Kept<T> = Option<((Span, Option<Provider>), T)>;
 /// The parsed history and what each session maps to.
 pub struct Data {
   sessions: Vec<Session>,
+  /// The main sessions' prompts, each once.
+  prompts: Vec<(Provider, Prompt)>,
   events: Vec<(usize, usize)>,
   config: Config,
   /// The project of each session and whether it is a configured one.
@@ -91,6 +118,7 @@ pub struct Data {
 
 impl Data {
   pub fn new(mut sessions: Vec<Session>, config: Config, today: Date) -> Self {
+    let prompts = crate::swear::take_prompts(&mut sessions);
     crate::workdir::fold_sessions(&mut sessions);
     let events = metrics::billable_events(&sessions);
     let mut cache: HashMap<(String, String), (String, bool)> = HashMap::new();
@@ -107,6 +135,7 @@ impl Data {
       .collect();
     Self {
       sessions,
+      prompts,
       events,
       config,
       names,
@@ -150,6 +179,38 @@ impl Data {
       rows.last_mut().unwrap().label = label;
     }
     (rows, row(&total, false))
+  }
+
+  /// The prompts and words typed to each model in the span, the swearing in them, its shares and
+  /// score, and the total, scored at the overall share of prompts swearing at the listener.
+  pub fn swears(&self, span: Span, prov: Option<Provider>) -> (Vec<Row>, Row) {
+    let range = span.range(self.today);
+    let mut rows: HashMap<String, Row> = HashMap::new();
+    let mut total = Row { key: "total".into(), label: "total".into(), ..Default::default() };
+    for (_, x) in self.prompts.iter().filter(|x| prov.is_none_or(|p| p == x.0)) {
+      if !range.contains(x.ts) {
+        continue;
+      }
+      let key = x.model.as_deref().unwrap_or(UNKNOWN);
+      // A model's name, which an unknown model lacks.
+      let new = |k: &String| Row {
+        label: if k == UNKNOWN { "<unknown>".into() } else { k.clone() },
+        ..row_of(k)
+      };
+      for row in [rows.entry(key.to_string()).or_insert_with_key(new), &mut total] {
+        row.prompts += 1;
+        row.words += u64::from(x.words);
+        row.directed += u64::from(x.directed);
+        row.swearing += u64::from(x.swears > 0);
+      }
+    }
+    let overall = total.directed as f64 / total.prompts.max(1) as f64;
+    let mut rows: Vec<Row> = rows.into_values().collect();
+    for x in &mut rows {
+      x.score = x.directed_share().map(|_| crate::swear::score(x.directed, x.prompts, overall));
+    }
+    total.score = total.directed_share();
+    (rows, total)
   }
 
   /// Models, fast and standard together, with their time; within a project or of everything.
@@ -648,8 +709,8 @@ pub mod tests {
   }
 
   fn sessions() -> Vec<Session> {
-    let mut sessions = crate::parser::claude::parse(&[fixtures("claude/projects")]);
-    sessions.extend(crate::parser::codex::parse(&[fixtures("codex")]));
+    let mut sessions = crate::parser::claude::parse(&[fixtures("claude/projects")], None);
+    sessions.extend(crate::parser::codex::parse(&[fixtures("codex")], None));
     for x in &mut sessions {
       if let Some(rest) = x.workdir.strip_prefix("/repo") {
         x.workdir = format!("{REPO}{rest}");
@@ -732,6 +793,63 @@ pub mod tests {
       "[projects]\n\"w/api\" = [\"{ROOT}/w/api\"]\n\"w/web\" = [\"{ROOT}/w/web\"]\n\"w/{name}\" = [\"{ROOT}/w/{name}\"]\n"
     );
     Data::new(sessions, Config::parse(&config, None).unwrap(), jiff::civil::date(2026, 1, 10))
+  }
+
+  /// Prompts to four models on 2026-01-09: `sonnet` 100, half swearing at it; `small` 10, 60%;
+  /// `gpt` (Codex) 50, 10%; `tiny` 3, all; one to no known model.
+  pub fn swearing() -> Data {
+    let tz = jiff::tz::TimeZone::system();
+    let at = jiff::civil::date(2026, 1, 9).at(10, 0, 0, 0).to_zoned(tz).unwrap();
+    let at = at.timestamp().as_microsecond();
+    // Each model's prompts and words in each; the first `any` of them swear, the first `directed`
+    // at the model.
+    let models = [
+      ("sonnet", Provider::Claude, 100, 20, 60, 50),
+      ("small", Provider::Claude, 10, 10, 6, 6),
+      ("gpt", Provider::Codex, 50, 30, 20, 5),
+      ("tiny", Provider::Claude, 3, 5, 3, 3),
+      ("none", Provider::Claude, 1, 2, 0, 0),
+    ];
+    let mut sessions = vec![];
+    for (i, (model, prov, prompts, words, any, directed)) in models.into_iter().enumerate() {
+      let mut s = Session::new(model, true, &format!("{ROOT}/w/api"), prov);
+      for k in 0..prompts {
+        let ts = at + (i as i64 * 100 + k as i64) * 1_000_000;
+        let (swears, directed) = (u32::from(k < any), k < directed);
+        let model = (model != "none").then(|| model.into());
+        let prompt = Prompt { ts, model, words, swears, directed, hash: k as u64 };
+        s.events.push(Event { ts: Some(ts), prompt: Some(Box::new(prompt)), ..Default::default() });
+      }
+      sessions.push(s);
+    }
+    Data::new(sessions, api_config(), jiff::civil::date(2026, 1, 10))
+  }
+
+  #[test]
+  fn scores_swears_per_model() {
+    let data = swearing();
+    let (rows, total) = data.swears(Span::Week, None);
+    let get = |key: &str| rows.iter().find(|x| x.key == key).unwrap();
+    let (sonnet, small, gpt, tiny) = (get("sonnet"), get("small"), get("gpt"), get("tiny"));
+    let counts = |x: &Row| (x.prompts, x.directed, x.swearing, x.words);
+    assert_eq!((counts(sonnet), counts(&total)), ((100, 50, 60, 2000), (164, 64, 89, 3617)));
+    // The raw shares: `small` swears at it in more of its prompts than `sonnet`.
+    assert_eq!((small.directed_share(), sonnet.directed_share()), (Some(60.0), Some(50.0)));
+    assert_eq!((gpt.any_share(), sonnet.any_share()), (Some(40.0), Some(60.0)));
+    // Shrunk toward the overall 64 / 164, `small`'s 10 prompts score below `sonnet`'s 100.
+    let score = |x: &Row| x.score.unwrap();
+    let overall = 64.0 / 164.0;
+    assert!((score(small) - (6.0 + 30.0 * overall) / 40.0 * 100.0).abs() < 1e-9);
+    assert!(score(sonnet) > score(small) && score(small) > score(gpt), "{rows:?}");
+    // Under 10 prompts no shares; the total's score is the overall share.
+    assert_eq!((tiny.directed_share(), tiny.any_share(), tiny.score), (None, None, None));
+    // The prompt to no known model, under its own name.
+    assert_eq!((get(UNKNOWN).label.as_str(), get(UNKNOWN).prompts), ("<unknown>", 1));
+    assert!((total.score.unwrap() - overall * 100.0).abs() < 1e-9);
+    // One provider, its own overall share; nothing in the period, no rows.
+    let (rows, total) = data.swears(Span::Week, Some(Provider::Codex));
+    assert_eq!((rows.len(), total.score, rows[0].score), (1, Some(10.0), Some(10.0)));
+    assert!(data.swears(Span::Today, None).0.is_empty());
   }
 
   #[test]

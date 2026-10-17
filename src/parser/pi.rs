@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use serde::Deserialize;
+use serde_json::Value;
 
-use super::{Obj, Val, jsonl, jsonl_files, model_id, parse_ts};
+use super::{Obj, Replies, Val, jsonl, jsonl_files, model_id, own_words, parse_ts};
 use crate::config::{expand_path, home_dir};
 use crate::model::{Event, Provider, Session, Ts, Usage};
+use crate::swear::Dict;
 
 // MARK: Lines
 
@@ -152,13 +154,13 @@ fn base(path: &str) -> &str {
 /// copied between forks counts once in their lineage (the sessions forked from one another): in
 /// the session that holds it nearest its oldest ancestor. A fork of a gone session can't name the
 /// rest of its lineage, so its copies are looked for in every other session.
-pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
+pub fn parse(roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
   // The pi-subagents extension keeps debug copies of its agents' sessions in `subagent-artifacts`.
   let files: Vec<PathBuf> = jsonl_files(roots)
     .into_iter()
     .filter(|x| !x.components().any(|x| x.as_os_str() == "subagent-artifacts"))
     .collect();
-  let parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x)).collect();
+  let parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x, swears)).collect();
 
   // A session file found under two roots, the same name and id, counts once: the longest copy.
   // `--session` may give independent sessions the same name.
@@ -235,7 +237,7 @@ pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
   sessions
 }
 
-fn parse_file(path: &Path) -> Parsed {
+fn parse_file(path: &Path, swears: Option<&Dict>) -> Parsed {
   // `<time>_<id>.jsonl`, the header's id preferred.
   let stem = path.file_stem().map(|x| x.to_string_lossy()).unwrap_or_default();
   let id = stem.rsplit_once('_').map_or(&*stem, |x| x.1);
@@ -247,8 +249,9 @@ fn parse_file(path: &Path) -> Parsed {
   let mut model: Option<String> = None;
   let mut effort: Option<String> = None;
   let mut keys = vec![];
+  let mut replies = Replies::default();
 
-  jsonl(path, |line: Line, _| {
+  jsonl(path, |line: Line, raw| {
     let message = line.message.0.as_ref();
     let millis = message.and_then(|x| x.timestamp.ordinal());
     let at = millis.and_then(|x| jiff::Timestamp::from_millisecond(x).ok());
@@ -288,9 +291,16 @@ fn parse_file(path: &Path) -> Parsed {
         None
       }
       // A prompt, or a shell command the user ran (`!cmd`).
-      (Some("message"), Some((_, Some("user" | "bashExecution")))) => {
-        ts.map(|x| ("user", Event::activity(x)))
-      }
+      (Some("message"), Some((_, Some(role @ ("user" | "bashExecution"))))) => ts.map(|x| {
+        let mut event = Event::activity(x);
+        let line = || serde_json::from_slice::<Value>(raw).ok();
+        if let Some(dict) = swears.filter(|_| role == "user")
+          && let Some(words) = line().and_then(|x| own_words(&x["message"]["content"]))
+        {
+          replies.prompt(&mut event, dict, x, &words);
+        }
+        ("user", event)
+      }),
       (Some("message"), Some((m, Some("assistant")))) => {
         if let Some(x) = m.model.str() {
           model = Some(model_id(x));
@@ -308,6 +318,11 @@ fn parse_file(path: &Path) -> Parsed {
           failed: m.stop.str() == Some("error") && usage.is_none_or(|x| x.total() == 0),
           ..Default::default()
         };
+        if swears.is_some()
+          && let Some(x) = event.model.as_deref().filter(|_| !event.failed)
+        {
+          replies.answer(x);
+        }
         Some(("assistant", event))
       }
       // Requests apart from the turns, which pi counts in a session's totals too. A tool's nested
@@ -337,6 +352,7 @@ fn parse_file(path: &Path) -> Parsed {
     true
   });
 
+  replies.finish(&mut session.events);
   Parsed { created, parent, session, keys }
 }
 
@@ -353,8 +369,21 @@ mod tests {
   }
 
   #[test]
+  fn reads_typed_prompts_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/swears/pi/sessions");
+    // A skill's body and a shell command are no prompts; a failed response answers nothing.
+    let sonnet = "claude-sonnet-4-5-20250929";
+    // `fuck, start`, `now tidy up`, `блять`.
+    let expected = [("gpt-5", 2, 1), ("gpt-5", 3, 0), (sonnet, 1, 1)];
+    let sessions = parse(std::slice::from_ref(&root), Some(&super::super::tests::dict()));
+    assert_eq!(super::super::tests::prompts(&sessions), expected);
+    let sessions = parse(&[root], None);
+    assert!(sessions.iter().flat_map(|x| &x.events).all(|x| x.prompt.is_none()));
+  }
+
+  #[test]
   fn counts_entries_a_fork_copied_once() {
-    let sessions = parse(&[fixtures()]);
+    let sessions = parse(&[fixtures()], None);
     let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
     let (main, fork) = (find("pi-main-1"), find("pi-fork-1"));
     assert_eq!(sessions.len(), 2);
@@ -366,7 +395,7 @@ mod tests {
     assert_eq!(total(main), 11_220);
 
     // The same sessions under a second root count once.
-    let twice = parse(&[fixtures(), fixtures()]);
+    let twice = parse(&[fixtures(), fixtures()], None);
     assert_eq!(twice.iter().map(total).sum::<u64>(), 11_230);
   }
 
@@ -395,7 +424,7 @@ mod tests {
     let (own_x, own_reply) = (moved(&x), moved(reply));
     file("1_one.jsonl", &[&header("one", ""), &x, &y, reply, late]);
     file("2_two.jsonl", &[&header("two", "/gone/0_zero.jsonl"), &own_x, &own_reply]);
-    let sessions = parse(std::slice::from_ref(&dir));
+    let sessions = parse(std::slice::from_ref(&dir), None);
     let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
     assert_eq!((total(find("one")), total(find("two"))), (210, 110));
     assert_eq!(find("one").events.len(), 3);
@@ -414,7 +443,7 @@ mod tests {
     std::fs::create_dir_all(&other).unwrap();
     let longer = [&header("one", "") as &str, &usage("x"), &usage("y"), reply, &usage("z")];
     std::fs::write(other.join("1_one.jsonl"), longer.join("\n")).unwrap();
-    let sessions = parse(&[dir.clone(), other]);
+    let sessions = parse(&[dir.clone(), other], None);
     let total = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
     let totals = ["one", "two", "three", "four"].map(total);
     assert_eq!(totals, [310, 110, 5, 0]);
@@ -446,7 +475,7 @@ mod tests {
     );
     // An unrelated session alike to a's reply, created before c, still counts.
     file("0_z.jsonl", &[&header("z", 0, ""), &reply(1, 100)]);
-    let sessions = parse(std::slice::from_ref(&dir));
+    let sessions = parse(std::slice::from_ref(&dir), None);
     let first = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
     assert_eq!((first("a"), first("c"), first("z")), (100, 500, 100));
 
@@ -468,14 +497,14 @@ mod tests {
     // Another session that names its file alike, its own.
     std::fs::create_dir_all(dir.join("other")).unwrap();
     put(dir.join("other/0_z.jsonl"), vec![header("y", 1, ""), reply(9, 50)]);
-    let sessions = parse(std::slice::from_ref(&dir));
+    let sessions = parse(std::slice::from_ref(&dir), None);
     let sum = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
     assert_eq!(["a", "b", "c", "e", "y", "z"].map(sum), [100, 200, 300, 900, 50, 100]);
 
     // a gone too: b, c and e each hold what they added, whatever their depth below a gone session.
     std::fs::remove_file(dir.join("1_a.jsonl")).unwrap();
     std::fs::remove_file(dir.join("0_z.jsonl")).unwrap();
-    let sessions = parse(std::slice::from_ref(&dir));
+    let sessions = parse(std::slice::from_ref(&dir), None);
     let sum = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
     assert_eq!(["b", "c", "e"].map(sum), [300, 300, 900]);
     std::fs::remove_dir_all(&dir).unwrap();
@@ -493,7 +522,7 @@ mod tests {
       r#"{"type":"usage","kind":"cache_warm","timestamp":"2026-01-01T00:05:00Z","model":"w","usage":{"cacheRead":9}}"#,
     ];
     std::fs::write(dir.join("1_s.jsonl"), lines.join("\n")).unwrap();
-    let sessions = parse(std::slice::from_ref(&dir));
+    let sessions = parse(std::slice::from_ref(&dir), None);
     // A compaction may sum a split turn's two requests; a branch's summary is one. Cache warming
     // runs while no one is at work.
     let flags: Vec<_> =
@@ -505,7 +534,7 @@ mod tests {
 
   #[test]
   fn reads_turns_summaries_and_failures() {
-    let sessions = parse(&[fixtures()]);
+    let sessions = parse(&[fixtures()], None);
     let main = sessions.iter().find(|x| x.id == "pi-main-1").unwrap();
     let billed: Vec<_> = main.events.iter().filter(|x| x.usage.is_some()).collect();
     let models: Vec<_> = billed.iter().map(|x| x.model.as_deref().unwrap_or("-")).collect();

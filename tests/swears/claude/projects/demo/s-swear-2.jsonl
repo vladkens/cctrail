@@ -1,0 +1,2 @@
+{"type": "user", "promptSource": "typed", "message": {"role": "user", "content": "ну блядь, опять"}, "timestamp": "2026-02-01T10:06:00.000Z", "cwd": "/repo", "sessionId": "s-swear-2"}
+{"type": "assistant", "requestId": "r4", "message": {"id": "m4", "model": "claude-sonnet-4-5", "content": [{"type": "text", "text": "Sorry"}], "usage": {"input_tokens": 10, "output_tokens": 5}}, "timestamp": "2026-02-01T10:08:00.000Z", "cwd": "/repo", "sessionId": "s-swear-2"}

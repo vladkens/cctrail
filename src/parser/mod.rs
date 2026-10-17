@@ -14,26 +14,29 @@ use std::path::{Path, PathBuf};
 
 use serde::de::{self, DeserializeOwned, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 
-use crate::model::{Provider, Session, Ts};
+use crate::model::{Event, Provider, Session, Ts};
+use crate::swear::Dict;
 
-/// All sessions of every harness, or of one.
-pub fn parse_history(provider: Option<Provider>) -> Vec<Session> {
+/// All sessions of every harness, or of one; with a dictionary, the swearing in their main
+/// sessions' prompts too.
+pub fn parse_history(provider: Option<Provider>, swears: Option<&Dict>) -> Vec<Session> {
   let want = |x: Provider| provider.is_none_or(|p| p == x);
   let claude = || match want(Provider::Claude) {
-    true => claude::parse(&history_roots("CLAUDE_CONFIG_DIR", ".claude")),
+    true => claude::parse(&history_roots("CLAUDE_CONFIG_DIR", ".claude"), swears),
     false => vec![],
   };
   let codex = || match want(Provider::Codex) {
-    true => codex::parse(&history_roots("CODEX_HOME", ".codex")),
+    true => codex::parse(&history_roots("CODEX_HOME", ".codex"), swears),
     false => vec![],
   };
   let pi = || match want(Provider::Pi) {
-    true => pi::parse(&pi::roots()),
+    true => pi::parse(&pi::roots(), swears),
     false => vec![],
   };
   let fx = || match want(Provider::Fx) {
-    true => fx::parse(&fx::root()),
+    true => fx::parse(&fx::root(), swears),
     false => vec![],
   };
   let ((mut sessions, codex), (pi, fx)) =
@@ -143,6 +146,80 @@ pub fn jsonl<T: DeserializeOwned>(path: &Path, mut f: impl FnMut(T, &[u8]) -> bo
     }
   }
 }
+
+// MARK: Prompts
+
+/// Tags a harness wraps around what it adds to a prompt: Claude Code's slash commands, shell
+/// commands, reminders and notifications, Codex's context and answers to its questions, pi's
+/// skills. Their spans are not the user's words.
+const INJECTED: &str = "system-reminder command-name command-message command-args \
+  local-command-caveat local-command-stdout local-command-stderr bash-input bash-stdout \
+  bash-stderr task-notification user-prompt-submit-hook ide_opened_file ide_selection \
+  environment_context user_instructions user_action user_shell_command turn_aborted \
+  subagent_notification send_user_message_question_reply realtime_delegation \
+  codex_internal_context recommended_plugins image skill";
+
+/// The user's own words in a message's content (a string or text blocks): without the spans of
+/// injected tags (to the end when one isn't closed), trimmed; none when nothing is left.
+pub fn own_words(content: &Value) -> Option<String> {
+  let mut text = match content {
+    Value::String(x) => x.clone(),
+    Value::Array(x) => {
+      let texts = x.iter().filter(|x| x["type"] == "text").filter_map(|x| x["text"].as_str());
+      texts.collect::<Vec<_>>().join("\n")
+    }
+    _ => return None,
+  };
+  for tag in INJECTED.split_whitespace() {
+    let (open, close) = (format!("<{tag}"), format!("</{tag}>"));
+    let mut from = 0;
+    while let Some(i) = text[from..].find(&open).map(|x| x + from) {
+      from = i + open.len();
+      if !text[from..].starts_with(['>', ' ', '\n']) {
+        continue;
+      }
+      let end = text[from..].find(&close).map_or(text.len(), |x| from + x + close.len());
+      text.replace_range(i..end, "\n");
+      from = i;
+    }
+  }
+  let text = text.trim();
+  (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The model each prompt of a session counts toward: the last to answer before it, the first to
+/// answer for those before any answer.
+#[derive(Default)]
+pub struct Replies {
+  first: Option<String>,
+  last: Option<String>,
+}
+
+impl Replies {
+  pub fn answer(&mut self, model: &str) {
+    self.first.get_or_insert_with(|| model.to_string());
+    if self.last.as_deref() != Some(model) {
+      self.last = Some(model.to_string());
+    }
+  }
+
+  /// Counts the swearing in a prompt's words into its event; the words themselves are dropped.
+  pub fn prompt(&self, event: &mut Event, dict: &Dict, ts: Ts, words: &str) {
+    let mut x = dict.prompt(ts, words);
+    x.model.clone_from(&self.last);
+    event.prompt = Some(Box::new(x));
+  }
+
+  /// Gives the prompts before the first answer its model.
+  pub fn finish<'a>(&self, events: impl IntoIterator<Item = &'a mut Event>) {
+    let prompts = events.into_iter().filter_map(|x| x.prompt.as_mut());
+    for x in prompts.filter(|x| x.model.is_none()) {
+      x.model.clone_from(&self.first);
+    }
+  }
+}
+
+// MARK: Models
 
 /// Bedrock's model vendors: its ids are `[<region>.]<vendor>.<model>`.
 const VENDORS: [&str; 10] = [
@@ -561,6 +638,72 @@ mod tests {
     // The base itself needn't exist.
     assert_eq!(names(".codex"), [".codex", ".codex-alt"]);
     std::fs::remove_dir_all(&home).unwrap();
+  }
+
+  /// The prompts of main sessions as (model, words, swear words), in order.
+  pub(super) fn prompts(sessions: &[Session]) -> Vec<(&str, u32, u32)> {
+    let events = sessions.iter().filter(|x| x.is_main).flat_map(|x| &x.events);
+    let prompts = events.filter_map(|x| x.prompt.as_deref());
+    prompts.map(|x| (x.model.as_deref().unwrap_or("-"), x.words, x.swears)).collect()
+  }
+
+  pub(super) fn dict() -> Dict {
+    Dict::load(None).unwrap()
+  }
+
+  #[test]
+  fn keeps_only_the_users_own_words() {
+    let words = |x: Value| own_words(&x);
+    let text = |x: &str| words(Value::String(x.into()));
+    assert_eq!(text("  fix it \n"), Some("fix it".into()));
+    // Injected spans anywhere, with attributes, an unclosed one to the end.
+    let x = "<command-name>/x</command-name>\n<command-args>a</command-args>";
+    assert_eq!(text(x), None);
+    assert_eq!(text("fix <system-reminder>be nice</system-reminder> it"), Some("fix \n it".into()));
+    assert_eq!(text("<skill name=\"a\" location=\"/s\">body</skill>\n\ngo"), Some("go".into()));
+    assert_eq!(text("go <environment_context>cwd"), Some("go".into()));
+    // Other tags are the user's: pasted markup, a tag that only starts alike.
+    assert_eq!(text("<div>x</div>"), Some("<div>x</div>".into()));
+    assert_eq!(text("<images>x</images>"), Some("<images>x</images>".into()));
+    // Text blocks joined by lines; other blocks and values skipped.
+    let blocks = serde_json::json!([
+      {"type": "text", "text": "a"},
+      {"type": "image", "text": "b"},
+      {"type": "text", "text": "<turn_aborted>x</turn_aborted>"},
+      {"type": "text", "text": "c"},
+    ]);
+    assert_eq!(words(blocks), Some("a\n\n\nc".into()));
+    assert_eq!(words(Value::Null), None);
+    assert_eq!(words(serde_json::json!(5)), None);
+  }
+
+  #[test]
+  fn counts_prompts_toward_the_last_answer() {
+    let dict = dict();
+    let mut events = vec![Event::default(); 4];
+    let mut replies = Replies::default();
+    replies.prompt(&mut events[0], &dict, 1, "fuck it, go");
+    replies.answer("x");
+    replies.prompt(&mut events[1], &dict, 2, "b");
+    replies.answer("y");
+    replies.answer("y");
+    replies.prompt(&mut events[2], &dict, 3, "c");
+    replies.finish(&mut events);
+    let models: Vec<_> =
+      events.iter().map(|x| x.prompt.as_ref().map(|x| x.model.as_deref())).collect();
+    // The first prompt counts toward the first to answer; an event without a prompt has none.
+    assert_eq!(models, [Some(Some("x")), Some(Some("x")), Some(Some("y")), None]);
+    let first = events[0].prompt.as_deref().unwrap();
+    assert_eq!((first.ts, first.words, first.swears), (1, 3, 1));
+    // The events' own models stay as logged.
+    assert!(events.iter().all(|x| x.model.is_none()));
+
+    // Without any answer prompts count toward none.
+    let mut events = vec![Event::default()];
+    let replies = Replies::default();
+    replies.prompt(&mut events[0], &dict, 1, "a");
+    replies.finish(&mut events);
+    assert_eq!(events[0].prompt.as_ref().unwrap().model, None);
   }
 
   #[test]

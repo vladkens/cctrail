@@ -1,0 +1,64 @@
+# English swear words for `cctrail swears`, one entry per line, `#` starts a comment:
+#   word    the word itself
+#   stem*   every word that starts with the stem
+#   !word   never a swear word, nor !stem* any word starting with it: a stem's false positives
+# Words compare lowercased, split at anything but letters (`f*ck` is two words, neither counts).
+
+fuck*
+motherfuck*
+clusterfuck*
+mindfuck*
+unfuck*
+fck
+fcking
+fckin
+fuk
+fukin
+fuking
+effing
+wtf
+stfu
+gtfo
+ffs
+omfg
+fml
+
+shit*
+!shitake*
+!shitcoin*  # crypto slang for a token, not at anyone
+bullshit*
+horseshit*
+batshit*
+apeshit*
+dipshit*
+chickenshit*
+dogshit*
+
+damn*
+dammit
+goddam*
+crap
+crappy
+crapload
+
+ass
+asshole*
+arsehole*
+dumbass*
+jackass*
+smartass*
+bitch*
+bastard*
+cunt*
+twat*
+wank*
+!wankel*
+bollocks
+dick
+dickhead*
+douche
+douchebag*
+piss
+pissed
+pissing
+cocksucker*

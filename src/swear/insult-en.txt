@@ -1,0 +1,16 @@
+# English insults for the interactive view's Swears: words aimed at the listener wherever they are
+# in a prompt. The format of en.txt; `>word` counts only next to an addressee (`you`).
+
+idiot*
+stupid
+stupidest
+dumb
+dumber
+dumbest
+moron*
+useless
+retard*
+imbecil*
+halfwit*
+dimwit*
+nitwit*

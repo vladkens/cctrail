@@ -11,6 +11,7 @@ use crate::metrics::{self, DateRange, Granularity, Period, UsageSummary};
 use crate::model::{Provider, Session};
 use crate::output::{self, Term};
 use crate::parser::parse_history;
+use crate::swear::Dict;
 use crate::{pricing, workdir};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -210,7 +211,7 @@ fn stats(args: &Args) -> Result<()> {
     By::Dir => (Config::default(), None),
     _ => (Config::load()?, config::config_path()),
   };
-  let mut sessions = sessions(args.provider);
+  let mut sessions = sessions(args.provider, None);
   workdir::fold_sessions(&mut sessions);
   let events = metrics::billable_events(&sessions);
   let stats = metrics::stats_by(&sessions, &events, &range, &config, args.by);
@@ -238,7 +239,7 @@ fn stats(args: &Args) -> Result<()> {
 
 fn usage(args: &Args, gran: Granularity) -> Result<()> {
   let range = DateRange::resolve(args.period, args.since, args.until);
-  let sessions = sessions(args.provider);
+  let sessions = sessions(args.provider, None);
   let events = metrics::billable_events(&sessions);
   let buckets = metrics::usage_by_period(&sessions, &events, gran, &range);
   let mut total = UsageSummary::default();
@@ -290,7 +291,7 @@ fn here(args: &Args) -> Result<()> {
 
   let config = Config::load()?;
   let cwd = std::env::current_dir()?.to_string_lossy().to_string();
-  let mut sessions = sessions(args.provider);
+  let mut sessions = sessions(args.provider, None);
   let folds = workdir::fold_sessions(&mut sessions);
   let workdir = folds.fold(&cwd);
   let project = config.find(&cwd, &workdir);
@@ -350,10 +351,11 @@ fn update_pricing() -> Result<()> {
   output::emit(&format!("Updated {}\n", path.display()))
 }
 
-/// The sessions, with the price catalog refreshed beside the parsing when it is due.
-pub fn sessions(provider: Option<Provider>) -> Vec<Session> {
+/// The sessions, with the price catalog refreshed beside the parsing when it is due; with a
+/// dictionary, the swearing in their prompts too.
+pub fn sessions(provider: Option<Provider>, swears: Option<&Dict>) -> Vec<Session> {
   let refresh = pricing::refresh();
-  let sessions = parse_history(provider);
+  let sessions = parse_history(provider, swears);
   pricing::finish(refresh);
   sessions
 }

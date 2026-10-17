@@ -1,0 +1,2 @@
+{"schema_version": 1, "seq": 1, "timestamp_ms": 1769954430000, "event": {"user": {"text": "Fix the fucking test", "images": [], "work_id": null}}}
+{"schema_version": 1, "seq": 2, "timestamp_ms": 1769954435000, "event": {"assistant": {"text": "ok", "provider_replay": {"source": {"provider": "codex", "model": "codex/gpt-6-astra"}}, "standalone_response": false}}}

@@ -1,0 +1,7 @@
+{"schema_version": 1, "seq": 1, "timestamp_ms": 1769954400000, "event": {"user": {"text": "shit", "images": [], "work_id": null}}}
+{"schema_version": 1, "seq": 2, "timestamp_ms": 1769954405000, "event": {"assistant": {"text": "ok", "provider_replay": {"source": {"provider": "codex", "model": "codex/gpt-6-astra"}}, "standalone_response": false}}}
+{"schema_version": 1, "seq": 3, "timestamp_ms": 1769954410000, "event": {"steering": {"text": "wtf, stop"}}}
+{"schema_version": 1, "seq": 4, "timestamp_ms": 1769954460000, "event": {"user": {"text": "ok, continue", "images": [], "work_id": null}}}
+{"schema_version": 1, "seq": 5, "timestamp_ms": 1769954465000, "event": {"assistant": {"text": "ok", "provider_replay": {"source": {"provider": "anthropic", "model": "anthropic/claude-sonnet-4.5"}}, "standalone_response": false}}}
+{"schema_version": 1, "seq": 6, "timestamp_ms": 1769954520000, "event": {"user": {"text": "fuck", "images": [], "work_id": null}}}
+{"schema_version": 1, "seq": 7, "timestamp_ms": 1769954525000, "event": {"assistant": {"text": "ok", "provider_replay": {"source": {"provider": "anthropic", "model": "anthropic/claude-sonnet-4.5"}}, "standalone_response": false}}}

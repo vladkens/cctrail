@@ -124,6 +124,23 @@ pub struct Event {
   pub background: bool,
   pub sidechain: bool,
   pub failed: bool,
+  /// The swearing in a prompt, read only for the interactive view.
+  pub prompt: Option<Box<Prompt>>,
+}
+
+/// A prompt as the swear count takes it: no text, its counts and a hash of its words.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Prompt {
+  pub ts: Ts,
+  /// The model it counts toward: the last to answer before it in its session.
+  pub model: Option<String>,
+  pub words: u32,
+  /// Swear words and insults.
+  pub swears: u32,
+  /// It swears at the listener: an insult, or a swear word near a `ты` or a model's name.
+  pub directed: bool,
+  /// Of its normalized words: a copy in another session (a fork, a copied file) is the same.
+  pub hash: u64,
 }
 
 impl Event {

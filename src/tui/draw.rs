@@ -158,6 +158,10 @@ pub fn draw(f: &mut Frame, app: &App) {
   match &app.open {
     Some(_) => detail(f, app, body, &mut hits),
     None if app.tab == Tab::Timeline => timeline(f, app, body, &mut hits),
+    None if app.tab == Tab::Swears => {
+      let inner = list_box(f, app, body, &mut hits);
+      swears(f, app, inner, &mut hits);
+    }
     None => {
       let inner = list_box(f, app, body, &mut hits);
       let sessions = app.tab == Tab::Projects;
@@ -193,11 +197,13 @@ fn choices<T: Copy + PartialEq>(
 /// first to go when narrow); inside, the periods left and the provider right. All clickable.
 fn header(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let mut tabs = Title::default();
-  for (i, (tab, name)) in
-    [(Tab::Projects, "Projects"), (Tab::Models, "Models"), (Tab::Timeline, "Timeline")]
-      .into_iter()
-      .enumerate()
-  {
+  let tab_names = [
+    (Tab::Projects, "Projects"),
+    (Tab::Models, "Models"),
+    (Tab::Timeline, "Timeline"),
+    (Tab::Swears, "Swears"),
+  ];
+  for (i, (tab, name)) in tab_names.into_iter().enumerate() {
     if i > 0 {
       tabs = tabs.push(Text::raw("  "), None);
     }
@@ -267,7 +273,8 @@ fn list_titles(app: &App, width: u16, name: &str) -> Titles {
     }
   };
   let left = if app.typing { vec![title, filter] } else { vec![title, filter, sort] };
-  let open = (!app.typing && !app.list.is_empty()).then(|| Title::new(boxes::hint("→", "open")));
+  let opens = !app.typing && !app.list.is_empty() && app.tab != Tab::Swears;
+  let open = opens.then(|| Title::new(boxes::hint("→", "open")));
   Titles { left, right: open }
 }
 
@@ -276,7 +283,7 @@ fn list_titles(app: &App, width: u16, name: &str) -> Titles {
 fn list_box(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) -> Rect {
   let name = match app.tab {
     Tab::Projects => "projects",
-    Tab::Models => "models",
+    Tab::Models | Tab::Swears => "models",
     Tab::Timeline if app.span.gran() == crate::metrics::Granularity::Week => "weeks",
     Tab::Timeline => "days",
   };
@@ -309,6 +316,9 @@ fn hints(app: &App) -> Vec<Vec<Text<'static>>> {
 fn note(app: &App) -> Vec<Text<'static>> {
   if let Some(d) = app.open.as_ref().filter(|x| !x.paths.is_empty()) {
     return vec![dim("paths "), Text::styled(d.paths.join(", "), TEXT)];
+  }
+  if app.tab == Tab::Swears {
+    return vec![dim(SWEARS_SHORT)];
   }
   if app.unpriced.is_empty() {
     return vec![];
@@ -489,7 +499,7 @@ fn table(
       Col::Sessions => num(x.sessions.map_or(String::new(), |x| x.to_string()), TEXT),
       // An unknown cost has no share of the cost either.
       Col::Share if x.unpriced && of == Col::Cost => dash(),
-      Col::Share => num(share.to_string(), TEXT),
+      _ => num(share.to_string(), TEXT),
     };
     TableRow::new(columns.iter().map(|c| cell(c.col)).collect::<Vec<_>>())
   };
@@ -497,6 +507,70 @@ fn table(
   let all = if rows.iter().any(|x| of.of(x) > 0.0) { "100%" } else { "" };
   let total = cells(total, "total", all);
   grid(f, &columns, lines, total, area, sel, first, hits)
+}
+
+/// What the swears tab's numbers are: in the help, and short on its bottom border beside the keys.
+const SWEARS: &str = "% dir: messages scolding the model · % any: messages with any swearing · \
+  Score: % dir adjusted for few messages";
+const SWEARS_SHORT: &str =
+  "% dir: scolding the model · % any: any swearing · Score: % dir for few msgs";
+
+/// The swears tab: per model the prompts to it, the words typed, the percent swearing at it, the
+/// percent with any swearing and the score; shares of too few prompts dash.
+fn swears(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
+  if app.list.is_empty() {
+    return empty(f, app, area, hits);
+  }
+  let sort = app.sort();
+  let column = |col, label, width: u16| Column {
+    head: head_label(sort, col, label),
+    col,
+    width: Constraint::Length(width + MARK),
+  };
+  let mut columns = vec![
+    Column {
+      head: head_label(sort, Col::Name, "Model"),
+      col: Col::Name,
+      width: Constraint::Fill(1),
+    },
+    column(Col::Prompts, "Msgs", 6),
+    column(Col::Words, "Words", 7),
+    column(Col::Directed, "% dir", 6),
+    column(Col::Any, "% any", 6),
+    column(Col::Score, "Score", 6),
+  ];
+  // Columns go when the names would get too few cells, never the sorted one.
+  let name_width = |columns: &[Column]| {
+    let mut widths: Vec<Constraint> = columns.iter().map(|x| x.width).collect();
+    widths.push(Constraint::Length(GUTTER - 1));
+    layout(&widths, area)[0].width as usize
+  };
+  for col in [Col::Any, Col::Words, Col::Prompts, Col::Directed] {
+    if name_width(&columns) >= NAME_MIN {
+      break;
+    }
+    if col != sort.0 {
+      columns.retain(|x| x.col != col);
+    }
+  }
+  let name_width = name_width(&columns);
+  let cells = |x: &Row| {
+    let rate = |v: Option<f64>, unit: &str| match v {
+      Some(v) => num(format!("{v:.1}{unit}"), TEXT),
+      None => num("–".into(), NONE),
+    };
+    let cell = |col: Col| match col {
+      Col::Prompts => num(toks(x.prompts), TEXT),
+      Col::Words => num(toks(x.words), TEXT),
+      Col::Directed => rate(x.directed_share(), "%"),
+      Col::Any => rate(x.any_share(), "%"),
+      Col::Score => rate(x.score, ""),
+      _ => Cell::from(cut(&x.label, name_width)).style(TEXT),
+    };
+    TableRow::new(columns.iter().map(|c| cell(c.col)).collect::<Vec<_>>())
+  };
+  let lines = app.list.iter().map(cells).collect();
+  grid(f, &columns, lines, cells(&app.total), area, Some(app.sel()), 0, hits);
 }
 
 /// The column's text and color for a row.
@@ -731,7 +805,7 @@ fn legend<'a>(shown: &[(usize, &'a str)], present: usize) -> (Vec<(usize, &'a st
 /// counts through all of them.
 fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   let d = app.open.as_ref().unwrap();
-  let name = ["models", "usage", "projects"][app.tab as usize];
+  let name = ["models", "usage", "projects", "models"][app.tab as usize];
   let area = boxed(f, app, area, list_titles(app, area.width, name), hits);
   // The tables from the first that lets the selected one fit under it, so the selection is in
   // view; arrows on the right border where tables are out of it.
@@ -766,7 +840,7 @@ fn detail(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
 /// when they don't fit, with a scrollbar then. Returns how far it can scroll.
 fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
   let keys = [
-    ("1 2 3", "projects / models / timeline"),
+    ("1 2 3 4", "projects / models / timeline / swears"),
     ("t T", "period: today, week, month, 30 days, all; wraps around"),
     ("↑ ↓", "select a row or a day; wraps around"),
     ("→ enter", "open: project → models, model → speed and effort, day → projects"),
@@ -781,6 +855,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
       "mouse",
       "click a row, bar or choice to select it, a row or bar again to open it; a header sorts, again reverses; the wheel moves 3 rows",
     ),
+    ("swears", SWEARS),
     ("?", "this help"),
     ("q", "back; quits from a list"),
   ];

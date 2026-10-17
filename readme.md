@@ -73,9 +73,13 @@ start on Monday. `cctrail --help` lists it all.
 
 ### Interactive view
 
-`cctrail` without arguments on a terminal opens the interactive view: projects, models and a
-timeline (a chart of the days stacked by model over their list) for today, this week, this month,
-the last 30 days or all time. Press `?` in it to see the keys.
+`cctrail` without arguments on a terminal opens the interactive view: projects, models, a
+timeline (a chart of the days stacked by model over their list) and swears for today, this week,
+this month, the last 30 days or all time. Press `?` in it to see the keys.
+
+Swears shows how often you scold each model: `% dir`, the share of your messages scolding it, and
+a Score that pulls it toward your average, so a model you barely used doesn't top the list.
+[How it counts](#swearing).
 
 <div align="center">
   <img src="docs/images/projects.svg" alt="The projects of cctrail's interactive view for the last 30 days: time, tokens, cost, sessions and share per project, with the total" />
@@ -83,7 +87,7 @@ the last 30 days or all time. Press `?` in it to see the keys.
 
 | Key | Action |
 | --- | --- |
-| `1` `2` `3` | Projects, Models, Timeline |
+| `1` `2` `3` `4` | Projects, Models, Timeline, Swears |
 | `t` `T` | The next or the previous period |
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Move the selection |
 | `→` `Enter` | Open the row: a project's models, a model's speeds and efforts, a day's projects |
@@ -136,6 +140,33 @@ only as totals, so they are spread over its agents' activity, a share on every a
 per project, approximate per day. Claude Code deletes sessions older than 30 days by default: raise
 [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically)
 to keep a long history.
+
+### Swearing
+
+The Swears view: how often you scold each model, adjusted for how much you used it.
+
+- **Text:** your own prompts in main sessions. Not the harness's (tool output, slash commands and
+  their output, reminders, environment context, skills, notifications, compaction summaries), not
+  the prompts agents get from a model, not `codex exec` or the Claude Agent SDK, which scripts send.
+- **Pastes:** no harness marks them, so these go: code in backticks or ` ``` ` fences, quoted
+  lines (`> `), and runs of 3+ lines that aren't prose (few letters, times, dates, paths,
+  `key: value`, table rows, code).
+- **Swearing:** a word in [`en.txt`](src/swear/en.txt), [`ru.txt`](src/swear/ru.txt) or the
+  insult lists [`insult-en.txt`](src/swear/insult-en.txt), [`insult-ru.txt`](src/swear/insult-ru.txt).
+  One entry a line: `word`, `stem*` (every word it starts), `!word` or `!stem*` (never: a stem's
+  false positives), `>word` in an insult list (only next to an addressee). A word written as an
+  entry in a prompt (`stem*`, from a pasted list) isn't swearing.
+- **Directed:** a prompt with an insult anywhere, or a swear word within 3 words of `ты`/`you` and
+  their forms, or of a model's or agent's name (`астра`, `claude`, `агент`, `model`…).
+- **Attribution:** to the model that answered last before the prompt, the first ones of a session
+  to the first to answer; a prompt that a fork or copied file repeats counts once.
+- **Columns:** Msgs and Words, then `% dir`: messages scolding the model · `% any`: messages with
+  any swearing · Score: `% dir` adjusted for few messages, `(dir + 30 × overall) / (msgs + 30) ×
+  100`, overall being your `% dir` in the period, so a few messages can't move a model far from
+  your average. Shares need 10 messages; messages to no known model are `<unknown>`.
+- **Privacy:** each prompt keeps only counts and a hash, never its text, and only for this view.
+- **Your lists:** `~/.config/cctrail/swear/*.txt`, insults in `insult-*.txt`. Lists for other
+  languages are welcome as pull requests.
 
 ### Time
 
