@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -138,13 +138,15 @@ pub fn tally(
   range: &DateRange,
   name: impl Fn(&Session, &Event) -> String,
 ) -> (Vec<Tally>, Tally) {
-  let mut seen = HashSet::new();
+  // A prompt by its harness, time and words, and the session that holds it first.
+  let mut seen = HashMap::new();
   let mut groups: HashMap<String, Tally> = HashMap::new();
   let mut total = Tally { name: "total".into(), ..Default::default() };
-  for s in sessions.iter().filter(|x| x.is_main) {
+  for (i, s) in sessions.iter().enumerate().filter(|x| x.1.is_main) {
     for e in &s.events {
       let (Some(text), Some(ts)) = (e.prompt.as_deref(), e.ts) else { continue };
-      if !range.contains(ts) || !seen.insert((s.provider, ts, text)) {
+      // Alike prompts in one session are each typed: fx logs a batch of events at one time.
+      if !range.contains(ts) || *seen.entry((s.provider, ts, text)).or_insert(i) != i {
         continue;
       }
       let words = dict.matches(text);
@@ -391,12 +393,14 @@ mod tests {
       prompt("2026-01-01T10:00:00Z", "x", "fuck this shit"),
       prompt("2026-01-01T10:01:00Z", "x", "ok"),
       prompt("2026-01-01T10:02:00Z", "y", "блядь"),
+      prompt("2026-01-01T10:02:00Z", "y", "блядь"),
       prompt("2026-01-01T10:03:00Z", "z", "fine"),
       prompt("2026-01-01T10:04:00Z", "z", "good"),
       Event::activity(at("2026-01-01T10:05:00Z")),
       prompt("2026-03-01T10:00:00Z", "y", "fuck"),
     ];
-    // A copy of a prompt counts once, an agent's not at all.
+    // A copy of a prompt in another session counts once, an agent's not at all; alike prompts in
+    // one session count each.
     let mut copy = Session::new("b", true, "/r", Provider::Claude);
     copy.events = vec![prompt("2026-01-01T10:02:00Z", "w", "блядь")];
     let mut agent = Session::new("c", false, "/r", Provider::Claude);
@@ -408,11 +412,11 @@ mod tests {
 
     let rows: Vec<_> = groups.iter().map(|x| (x.name.as_str(), x.prompts, x.swearing)).collect();
     // By share, then by the prompts with swearing.
-    assert_eq!(rows, [("y", 1, 1), ("x", 2, 1), ("z", 2, 0)]);
+    assert_eq!(rows, [("y", 2, 2), ("x", 2, 1), ("z", 2, 0)]);
     assert_eq!(groups[1].words, [("fuck*".to_string(), 1), ("shit*".to_string(), 1)]);
-    assert_eq!((total.prompts, total.swearing, total.share()), (5, 2, 0.4));
+    assert_eq!((total.prompts, total.swearing, total.share()), (6, 3, 0.5));
     let words: Vec<_> = total.words.iter().map(|x| (x.0.as_str(), x.1)).collect();
-    assert_eq!(words, [("fuck*", 1), ("shit*", 1), ("бля*", 1)]);
+    assert_eq!(words, [("бля*", 2), ("fuck*", 1), ("shit*", 1)]);
     assert_eq!(groups[2].share(), 0.0);
   }
 }

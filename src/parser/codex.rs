@@ -156,8 +156,9 @@ struct Rollout {
   remote: Option<String>,
   /// Lines with a smaller `ordinal` are the parent's history, copied into an agent's rollout.
   own_start: Option<i64>,
-  /// Started by `codex exec`: a script's or another agent's prompt, not one typed.
-  exec: bool,
+  /// Its prompts are typed: not an agent's (a `source` that isn't a string, its parent linked or
+  /// not, as a review's) nor of `codex exec`, which scripts and other agents start.
+  typed: bool,
 }
 
 #[derive(Default)]
@@ -292,7 +293,7 @@ fn read_meta(path: &Path) -> Option<Rollout> {
     workdir: meta.cwd.str().unwrap_or("unknown").to_string(),
     remote: meta.git.0.as_ref().and_then(|x| normalize_remote(x.repository_url.str()?)),
     own_start: meta.subagent_history_start_ordinal.ordinal(),
-    exec: matches!(&meta.source, Some(Value::String(x)) if x == "exec"),
+    typed: meta.source.as_ref().is_none_or(|x| x.as_str().is_some_and(|x| x != "exec")),
   })
 }
 
@@ -308,7 +309,7 @@ fn nested_parent_id(value: &Value) -> Option<String> {
 }
 
 fn parse_file(rollout: &Rollout, prompts: bool) -> Parsed {
-  let prompts = prompts && rollout.parent_id.is_none() && !rollout.exec;
+  let prompts = prompts && rollout.parent_id.is_none() && rollout.typed;
   let mut session =
     Session::new(&rollout.id, rollout.parent_id.is_none(), &rollout.workdir, Provider::Codex);
   session.remote = rollout.remote.clone();
@@ -567,9 +568,9 @@ mod tests {
   #[test]
   fn reads_typed_prompts_only() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/swears/codex");
-    // Injected context, an agent's and `codex exec`'s prompts and the fork's replay are no prompts;
-    // a `UserMessage` item is one, without the answer to Codex's question. The fork's own prompt
-    // counts toward the last answer it replayed.
+    // Injected context, an agent's, a review's and `codex exec`'s prompts and the fork's replay are
+    // no prompts; a `UserMessage` item is one, without the answer to Codex's question. The
+    // fork's own prompt counts toward the last answer it replayed.
     let expected = [
       ("gpt-5.4", "wtf now"),
       ("gpt-5.4", "what the fuck"),
