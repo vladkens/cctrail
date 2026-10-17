@@ -396,18 +396,29 @@ pub fn stats_by(
   let mut roots: HashMap<&str, HashSet<(Provider, &str)>> = HashMap::new();
   let mut stamps: HashMap<&str, Vec<Ts>> = HashMap::new();
   let mut paths: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+  // A session billed in the range without activity there (pi's cache warming) counts too, with no
+  // time and no first or last activity.
+  let billed: HashSet<usize> = events
+    .iter()
+    .filter(|(si, ei)| sessions[*si].events[*ei].ts.is_some_and(|x| range.contains(x)))
+    .map(|x| x.0)
+    .collect();
   for (si, session) in sessions.iter().enumerate() {
     if !billable.contains(&session.root()) {
       continue;
     }
     let own: Vec<Ts> =
       session.events.iter().filter(|e| e.active() && in_range(e)).filter_map(|e| e.ts).collect();
-    let (Some(first), Some(last)) = (own.iter().min(), own.iter().max()) else { continue };
+    if own.is_empty() && !billed.contains(&si) {
+      continue;
+    }
     let name = names[si];
     paths.entry(name).or_default().insert(&session.cwd);
     let stat = stats.entry(name).or_insert_with(|| new_stat(si));
-    stat.first = Some(stat.first.map_or(*first, |x| x.min(*first)));
-    stat.last = Some(stat.last.map_or(*last, |x| x.max(*last)));
+    if let (Some(first), Some(last)) = (own.iter().min(), own.iter().max()) {
+      stat.first = Some(stat.first.map_or(*first, |x| x.min(*first)));
+      stat.last = Some(stat.last.map_or(*last, |x| x.max(*last)));
+    }
     stamps.entry(name).or_default().extend(own);
     if mains.contains(&session.root()) {
       roots.entry(name).or_default().insert(session.root());
@@ -760,6 +771,20 @@ mod tests {
     assert_eq!((stat.usage.total(), stat.active, stat.last), (201, 300 * MICROS, Some(at)));
     let day = usage_by_period(&[x], &events, Granularity::Day, &range);
     assert_eq!(day.values().map(|x| x.active).sum::<i64>(), 300 * MICROS);
+  }
+
+  #[test]
+  fn a_session_with_only_background_usage_counts() {
+    let at = ts("2026-01-01T10:00:00Z");
+    let usage = Some(Usage { input: 100, ..Default::default() });
+    let mut x = Session::new("s", true, "/repo", Provider::Pi);
+    x.events.push(Event { ts: Some(at), usage, background: true, ..Default::default() });
+    let events = billable_events(std::slice::from_ref(&x));
+    let day = local_date(at);
+    let range = DateRange { since: Some(day), until: Some(day) };
+    let stat = &stats_by(&[x], &events, &range, &Config::default(), By::Dir)[0];
+    assert_eq!((stat.sessions, stat.usage.total(), stat.active), (1, 100, 0));
+    assert_eq!((stat.first, stat.last), (None, None));
   }
 
   #[test]
