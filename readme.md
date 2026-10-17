@@ -21,31 +21,16 @@ sessions themselves, with agent worktrees and clones counted as one project.
 
 ## 🌟 Features
 
-- ⏱️ Active time per project, not session length: idle gaps don't count, and time spent in
-  several projects at once is split between them
-- 💰 Tokens and their cost at [models.dev](https://models.dev) API prices, each request at the
-  price of its day
-- 🌳 Agent worktrees and clones of a repository fold into one project, with no config
-- 🗂️ An optional config to name projects, merge repositories and put them in groups
-- 🧩 Claude Code, Codex, pi and fx, every Claude Code and Codex profile included
-  (`~/.claude-work`)
-- 🖥️ An interactive view of projects, models and a timeline, with drill-downs, keys and mouse
-- 📊 Text reports by period, day, week or month, per project, group, directory or model, and JSON
-- ⚡ Fast: about 4.5 s for ~11 GB of history on an M-series Mac (2026-10-14)
-- 🔒 Local: reads the history only, and goes online only for prices
-- 🦀 One Rust binary for macOS, Linux and Windows
-
-## 🤖 How it's made
-
-cctrail is written by AI agents (Claude Code, Codex) following [agents.md](agents.md); I choose
-what to build and review every pull request. The parsers are tested on small synthetic histories
-([fixtures](tests/fixtures/)), every change is run against the previous build on my full local
-history so the tokens, sessions and time don't drift, and every speed change is measured and
-logged in [docs/perf.md](docs/perf.md). This isn't a weekend prompt: I've written software by hand
-for years, such as [macmon](https://github.com/vladkens/macmon) (Rust, Apple Silicon system
-monitor), [twscrape](https://github.com/vladkens/twscrape) (Python, X/Twitter scraping) and
-[ecloop](https://github.com/vladkens/ecloop) (C, low-level elliptic-curve math), and agents are how
-I build now.
+- ⏱️ **Real hours.** Active time per project: idle gaps don't count, parallel projects split it.
+- 💰 **Estimated cost.** Each request at the **API price of its day**, to compare with your
+  subscription.
+- 🧮 **No double counting.** History copied into subagents, forks or another profile counts once.
+- 🌳 **No setup.** Reads the history already on disk; worktrees and clones fold into their
+  repository.
+- 👥 **All accounts.** Every Claude Code and Codex profile (`~/.claude-work`) in one report.
+- 🖥️ **Interactive.** Projects, models and a timeline by model, with drill-downs and the mouse.
+- 📊 **Scriptable.** Reports by day, week or month, per project, group or model, and JSON.
+- ⚡ **Fast and private.** Seconds for gigabytes of history, which never leaves your machine.
 
 ## 📥 Installation
 
@@ -57,9 +42,6 @@ it with Rust:
 ```sh
 cargo install cctrail
 ```
-
-Every archive is attested: `gh attestation verify FILE -R vladkens/cctrail` checks that this
-repository's CI built it.
 
 ### Newest version
 
@@ -199,10 +181,3 @@ cargo uninstall cctrail                                                         
 ## 📝 License
 
 Distributed under the [MIT License](LICENSE).
-
-## 🔍 See also
-
-- [ccusage/ccusage](https://github.com/ccusage/ccusage) – Daily, weekly, monthly and session
-  reports of tokens and cost from the local data of many coding agent CLIs.
-- [Maciek-roboblog/Claude-Code-Usage-Monitor](https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor)
-  – A live terminal monitor of Claude Code usage against its rate limits, with forecasts.
