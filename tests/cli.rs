@@ -604,11 +604,15 @@ fn moves_the_history_to_another_machine() {
   assert_eq!(report(&b), (moved, total.clone()));
 
   // With A's logs too, their sessions win and nothing counts twice; with some of them, the import
-  // fills in the rest.
-  for (claude, codex) in [("claude", "codex"), ("claude", "missing")] {
-    let mut c = Run::new(claude, codex).pi("pi").fx("fx");
-    (c.home, c.data) = (Some(REPO.into()), dir.join("data"));
-    assert_eq!(report(&c), (dirs.clone(), total.clone()), "{codex}");
+  // fills in the rest, an fx agent's time without counting its tree's usage twice.
+  let fx = dir.join("fx");
+  copy_tree(&fixtures().join("fx"), &fx);
+  std::fs::remove_dir_all(fx.join("sessions/fx-agent-1")).unwrap();
+  let all = fixtures().join("fx");
+  for (codex, fx) in [("codex", &all), ("missing", &all), ("codex", &fx)] {
+    let mut c = Run::new("claude", codex).pi("pi");
+    (c.fx, c.home, c.data) = (fx.clone(), Some(REPO.into()), dir.join("data"));
+    assert_eq!(report(&c), (dirs.clone(), total.clone()), "{codex} {}", fx.display());
   }
 
   for cmd in ["export", "import"] {

@@ -111,6 +111,8 @@ pub fn import(file: &Path) -> Result<Option<usize>> {
 pub fn merge(sessions: &mut Vec<Session>, provider: Option<Provider>) {
   let key = |x: &Session| (x.provider, x.id.clone());
   let mut seen: HashSet<_> = sessions.iter().map(key).collect();
+  let fx = |x: &Session| (x.provider == Provider::Fx).then(|| x.root_id.clone());
+  let mut trees: HashSet<_> = sessions.iter().filter_map(fx).collect();
   let home = home();
 
   let files = dir().and_then(|x| std::fs::read_dir(x).ok()).into_iter().flatten().flatten();
@@ -124,8 +126,13 @@ pub fn merge(sessions: &mut Vec<Session>, provider: Option<Provider>) {
       vec![]
     });
     let want = |x: &Session| provider.is_none_or(|p| p == x.provider) && !seen.contains(&key(x));
-    let items: Vec<Session> = items.into_iter().filter(want).collect();
+    let mut items: Vec<Session> = items.into_iter().filter(want).collect();
+    // fx spreads a tree's usage over its sessions: in a tree already read, a session adds only its
+    // time.
+    let known = items.iter_mut().filter(|x| fx(x).is_some_and(|x| trees.contains(&x)));
+    known.flat_map(|x| &mut x.events).for_each(|x| x.usage = None);
     seen.extend(items.iter().map(key));
+    trees.extend(items.iter().filter_map(fx));
     sessions.extend(items);
   }
 }
@@ -172,12 +179,17 @@ fn session_from_row(row: &Row<'_>, provider: Provider, home: Option<&str>) -> Re
 
 fn event_from_row(row: &Row<'_>) -> rusqlite::Result<(i64, Event)> {
   let t = |key: &str| row.get::<_, Option<i64>>(key).map(|x| x.unwrap_or(0).max(0) as u64);
+  // A time past jiff's range, only in a crafted file, is none.
+  let ts = |key: &str| {
+    let x = row.get::<_, Option<i64>>(key);
+    x.map(|x| x.filter(|x| Timestamp::from_microsecond(*x).is_ok()))
+  };
   #[rustfmt::skip]
   let usage = Usage {
     input: t("input")?, cache_write_5m: t("cache_write_5m")?, cache_write_1h: t("cache_write_1h")?,
     cache_read: t("cache_read")?, output: t("output")?, reasoning: t("reasoning")?,
   };
-  let prompt = match row.get::<_, Option<i64>>("prompt_ts")? {
+  let prompt = match ts("prompt_ts")? {
     #[rustfmt::skip]
     Some(ts) => Some(Box::new(Prompt {
       ts, model: row.get("prompt_model")?, words: row.get("prompt_words")?,
@@ -191,7 +203,7 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<(i64, Event)> {
     (row.get("message_id")?, row.get("request_id")?);
   #[rustfmt::skip]
   let event = Event {
-    ts: row.get("ts")?, usage: row.get::<_, Option<i64>>("input")?.map(|_| usage),
+    ts: ts("ts")?, usage: row.get::<_, Option<i64>>("input")?.map(|_| usage),
     model: row.get("model")?, effort: row.get("effort")?,
     speed: row.get::<_, Option<String>>("speed")?.as_deref().and_then(Speed::parse),
     identity: message_id.map(|x| (x, request_id)), cost: row.get("cost")?,
@@ -232,9 +244,14 @@ fn home() -> Option<String> {
   (!home.is_empty()).then_some(home)
 }
 
-/// `path` with its leading directory `from` as `to`: the home as `~` and back.
+/// `path` with its leading directory `from` as `to`: the home as `~` and back, a path folded on
+/// another platform with this one's separators.
 fn rebase(path: &str, from: Option<&str>, to: Option<&str>) -> String {
+  let foreign = if cfg!(windows) { '/' } else { '\\' };
   match (from.and_then(|x| path.strip_prefix(x)), to) {
+    (Some(x), Some(to)) if from == Some("~") && x.starts_with(foreign) => {
+      format!("{to}{}", x.replace(foreign, std::path::MAIN_SEPARATOR_STR))
+    }
     (Some(x), Some(to)) if x.is_empty() || x.starts_with(['/', '\\']) => format!("{to}{x}"),
     _ => path.to_string(),
   }
@@ -318,8 +335,9 @@ mod tests {
 
   #[test]
   fn folds_paths_under_the_home() {
-    let fold = |x, home| rebase(x, home, Some("~"));
-    let expand = |x, home| rebase(x, Some("~"), home);
+    let native = |x: &str| x.replace('/', std::path::MAIN_SEPARATOR_STR);
+    let fold = |x: &str, home: &str| rebase(&native(x), Some(&native(home)), Some("~"));
+    let expand = |x: &str, home: Option<&str>| rebase(&native(x), Some("~"), home);
     let cases = [
       ("/h/me/x", "~/x"),
       ("/h/me", "~"),
@@ -328,12 +346,14 @@ mod tests {
       ("C:\\h\\me\\x", "C:\\h\\me\\x"),
     ];
     for (path, folded) in cases {
-      assert_eq!(fold(path, Some("/h/me")), folded);
-      assert_eq!(expand(folded, Some("/h/me")), path);
+      assert_eq!(fold(path, "/h/me"), native(folded));
+      assert_eq!(expand(folded, Some(&native("/h/me"))), native(path));
     }
-    assert_eq!(fold("C:\\h\\me\\x", Some("C:\\h\\me")), "~\\x");
-    assert_eq!(expand("~/x", Some("/h/you")), "/h/you/x");
-    assert_eq!(expand("~/x", None), "~/x");
+    assert_eq!(expand("~/x", Some(&native("/h/you"))), native("/h/you/x"));
+    assert_eq!(expand("~/x", None), native("~/x"));
     assert_eq!(expand("~x", Some("/h/me")), "~x");
+    // Folded on another platform.
+    let foreign = if cfg!(windows) { "~/x/y" } else { "~\\x\\y" };
+    assert_eq!(rebase(foreign, Some("~"), Some(&native("/h/me"))), native("/h/me/x/y"));
   }
 }
