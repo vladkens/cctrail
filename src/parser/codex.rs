@@ -424,14 +424,33 @@ fn parse_file(rollout: &Rollout, prompts: bool) -> Parsed {
   Parsed { session, calls, records, signatures }
 }
 
-/// A prompt's own words: a `user_message`'s, or a `UserMessage` item's.
+/// A prompt's own words: a `user_message`'s, or a `UserMessage` item's. Only the fields read are
+/// parsed: other items hold commands' output.
 fn prompt(raw: &[u8]) -> Option<Box<str>> {
-  let x: Value = serde_json::from_slice(raw).ok()?;
-  let (p, item) = (&x["payload"], &x["payload"]["item"]);
-  match item["type"].as_str() {
-    Some("UserMessage") => own_words(&item["content"]),
+  #[derive(Deserialize, Default)]
+  #[serde(default)]
+  struct Line {
+    payload: Obj<Payload>,
+  }
+  #[derive(Deserialize, Default)]
+  #[serde(default)]
+  struct Payload {
+    message: Value,
+    item: Obj<Item>,
+  }
+  #[derive(Deserialize, Default)]
+  #[serde(default)]
+  struct Item {
+    #[serde(rename = "type")]
+    kind: Val,
+    content: Value,
+  }
+
+  let p = serde_json::from_slice::<Obj<Line>>(raw).ok()?.0?.payload.0?;
+  match p.item.0 {
+    Some(x) if x.kind.str() == Some("UserMessage") => own_words(&x.content),
     Some(_) => None,
-    None => own_words(&p["message"]),
+    None => own_words(&p.message),
   }
 }
 
