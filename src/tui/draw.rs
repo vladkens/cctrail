@@ -224,7 +224,7 @@ fn header(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
     spans.push(span);
   }
   f.render_widget(Line::from(spans), line);
-  let provider = app.prov.map_or("claude+codex+pi", |x| x.name());
+  let provider = app.prov.map_or("claude+codex+pi+fx", |x| x.name());
   let w = provider.len() as u16;
   if x + 2 + w <= line.right() {
     let at = Rect::new(line.right() - w, line.y, w, 1);
@@ -775,7 +775,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
     ("Home End", "the first / last row"),
     ("s", "sort by the next column; on the timeline: bars of time / tokens / cost"),
     ("S", "reverse the sort"),
-    ("p", "provider: all / claude / codex / pi"),
+    ("p", "provider: all / claude / codex / pi / fx"),
     ("/", "filter by name"),
     (
       "mouse",

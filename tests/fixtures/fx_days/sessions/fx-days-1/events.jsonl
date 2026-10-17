@@ -1,0 +1,14 @@
+{"schema_version": 1, "seq": 1, "timestamp_ms": 1791201600000, "event": {"user": {"text": "hi"}}}
+{"schema_version": 1, "seq": 2, "timestamp_ms": 1791201630000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 3, "timestamp_ms": 1791201660000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 4, "timestamp_ms": 1791374400000, "event": {"user": {"text": "hi"}}}
+{"schema_version": 1, "seq": 5, "timestamp_ms": 1791374430000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 6, "timestamp_ms": 1791374490000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 7, "timestamp_ms": 1791374550000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 8, "timestamp_ms": 1791374610000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 9, "timestamp_ms": 1791374670000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 10, "timestamp_ms": 1791374730000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 11, "timestamp_ms": 1791374790000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 12, "timestamp_ms": 1791374850000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 13, "timestamp_ms": 1791374910000, "event": {"assistant": {"text": "ok"}}}
+{"schema_version": 1, "seq": 14, "timestamp_ms": 1791374970000, "event": {"assistant": {"text": "ok"}}}

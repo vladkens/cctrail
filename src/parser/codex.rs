@@ -124,7 +124,7 @@ impl RawUsage {
 }
 
 /// Codex counts cached input inside input and reasoning inside output.
-fn normalize([input, cached, write, output, reasoning, _]: Signature) -> Usage {
+pub(super) fn normalize([input, cached, write, output, reasoning, _]: Signature) -> Usage {
   let cache_read = cached.min(input);
   let reasoning = reasoning.min(output);
   Usage {

@@ -437,7 +437,8 @@ impl App {
       None => Some(Provider::Claude),
       Some(Provider::Claude) => Some(Provider::Codex),
       Some(Provider::Codex) => Some(Provider::Pi),
-      Some(Provider::Pi) => None,
+      Some(Provider::Pi) => Some(Provider::Fx),
+      Some(Provider::Fx) => None,
     }
   }
 
@@ -779,7 +780,7 @@ mod tests {
     assert!((0..buf.area.width).all(|x| !buf[(x, 0)].modifier.contains(Modifier::REVERSED)));
     assert_eq!(fg(&buf, 1, "All"), Color::Cyan);
     assert_eq!(fg(&buf, 1, "Week"), Color::DarkGray);
-    assert_eq!(fg(&buf, 1, "claude+codex+pi"), Color::Reset);
+    assert_eq!(fg(&buf, 1, "claude+codex+pi+fx"), Color::Reset);
     assert_eq!(fg(&buf, 0, "cctrail v"), Color::Reset);
     assert_eq!(fg(&buf, 0, "Projects"), Color::Cyan);
     assert_eq!(fg(&buf, 0, "Models"), Color::DarkGray);
@@ -948,7 +949,7 @@ mod tests {
     click(&mut app, col(&buf, 1, "Week"), 1);
     assert_eq!(app.span, Span::Week);
     click(&mut app, col(&buf, 1, "All"), 1);
-    click(&mut app, col(&buf, 1, "claude+codex+pi"), 1);
+    click(&mut app, col(&buf, 1, "claude+codex+pi+fx"), 1);
     assert_eq!(app.prov, Some(Provider::Claude));
     let buf = frame(&app);
     click(&mut app, col(&buf, 1, "claude") + 1, 1);
@@ -956,6 +957,9 @@ mod tests {
     assert_eq!(app.prov, Some(Provider::Pi));
     let buf = frame(&app);
     click(&mut app, col(&buf, 1, " pi") + 1, 1);
+    assert_eq!(app.prov, Some(Provider::Fx));
+    let buf = frame(&app);
+    click(&mut app, col(&buf, 1, " fx") + 1, 1);
     assert_eq!(app.prov, None);
     click(&mut app, col(&buf, 0, "Models 2"), 0);
     assert_eq!(app.tab, Tab::Models);
@@ -1003,6 +1007,7 @@ mod tests {
     press(&mut app, KeyCode::Char('p'));
     let open = app.open.as_ref().unwrap();
     assert!(open.rows().into_iter().all(|x| x.key.starts_with("codex/")));
+    press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Esc);
@@ -1083,7 +1088,7 @@ mod tests {
       // keys right and the unpriced note left, cut to fit; its title the filter.
       let (top, bottom) = (raw(&buf, 0), raw(&buf, height - 1));
       assert!(top.contains("Timeline 3") && top.contains("cctrail v"), "{top}");
-      assert!(raw(&buf, 1).contains("All") && raw(&buf, 1).contains("claude+codex+pi"));
+      assert!(raw(&buf, 1).contains("All") && raw(&buf, 1).contains("claude+codex+pi+fx"));
       assert!(bottom.contains("? help | quit") && raw(&buf, 3).contains("/ filter"), "{bottom}");
       assert!(bottom.contains(" unpriced 37.8"), "{bottom}");
       // A sort arrow fits its column and keeps the headers apart.
@@ -1297,7 +1302,7 @@ mod tests {
     let colors: Vec<Color> = models.map(|m| square(&buf, m)).to_vec();
     // The same colors whatever the bars show, the period and the provider (a model without a
     // price has no cost to show).
-    for key in ['s', 's', 'T', 't', 't', 'p', 'p', 'p'] {
+    for key in ['s', 's', 'T', 't', 't', 'p', 'p', 'p', 'p'] {
       press(&mut app, KeyCode::Char(key));
       let buf = frame(&app);
       for (model, color) in models.iter().zip(&colors) {

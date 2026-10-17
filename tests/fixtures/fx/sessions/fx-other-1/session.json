@@ -1,0 +1,1 @@
+{"schema_version": 4, "id": "fx-other-1", "origin_workspace_root": "/other", "workspace_root": "/other", "created_at_ms": 1791208740000, "updated_at_ms": 1791208800000, "conversation_language": "en", "provider": "codex", "model": "gpt-6-astra", "effort": "medium", "fast_mode": false, "subagent_child": false}

@@ -1,6 +1,6 @@
 # cctrail
 
-A small Rust CLI that reads local Claude Code, Codex and pi history and reports, per project,
+A small Rust CLI that reads local Claude Code, Codex, pi and fx history and reports, per project,
 active time, tokens and estimated cost. Its one user is the author: keep the CLI minimal and the
 numbers right. Agents carry out each change end to end by following this file; plan in
 [docs/roadmap.md](docs/roadmap.md).
@@ -11,16 +11,16 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 
 ## Scope
 
-- Read history only: never write into `~/.claude`, `~/.codex` or `~/.pi`. cctrail writes only under
-  `~/.cache/cctrail`, and uses the network only to fetch the price catalog from the `pricing`
-  release: on `cctrail update-pricing`, and in the background when the cached one is a day old
-  (`CCTRAIL_NO_UPDATE=1` turns that off; tests set it).
+- Read history only: never write into `~/.claude`, `~/.codex`, `~/.pi` or `~/.fx`. cctrail writes
+  only under `~/.cache/cctrail`, and uses the network only to fetch the price catalog from the
+  `pricing` release: on `cctrail update-pricing`, and in the background when the cached one is a
+  day old (`CCTRAIL_NO_UPDATE=1` turns that off; tests set it).
 - Prices are dated: `scripts/pricing-history.py` builds them from the models.dev git history, the
   daily `pricing.yml` workflow publishes them. Price an event at its day's rate, never at today's.
 - Support Claude Code (`~/.claude/projects`, `CLAUDE_CONFIG_DIR`), Codex (`~/.codex/sessions`
-  and `archived_sessions`, `CODEX_HOME`) and pi (`~/.pi/agent/sessions`, `PI_CODING_AGENT_DIR`,
-  `PI_CODING_AGENT_SESSION_DIR`, the `sessionDir` setting). Add another harness only on request,
-  as its own `src/parser/<harness>.rs`.
+  and `archived_sessions`, `CODEX_HOME`), pi (`~/.pi/agent/sessions`, `PI_CODING_AGENT_DIR`,
+  `PI_CODING_AGENT_SESSION_DIR`, the `sessionDir` setting) and fx (`~/.fx/sessions`, `FX_HOME`).
+  Add another harness only on request, as its own `src/parser/<harness>.rs`.
 - Keep the build fast: prefer a small own routine to a generic dependency that compiles far more
   code than cctrail uses (`cargo build --timings`). The dependencies are serde/serde_json (history
   and JSON output), toml (config), jiff (local time zones), rayon (parallel parsing), anyhow, ureq
@@ -35,7 +35,7 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 ## Code
 
 - One binary crate, flat modules: `cli` (arguments, commands), `config`, `model`,
-  `parser/{claude,codex,pi}`, `workdir` (worktrees and same-named clones folded into their
+  `parser/{claude,codex,pi,fx}`, `workdir` (worktrees and same-named clones folded into their
   repository), `metrics`, `output` (tables, JSON), `pricing`, `tui` (the interactive view, on the
   same accounting). Keep it within ~7000 lines of Rust, tests excluded; simplify before growing
   past it.

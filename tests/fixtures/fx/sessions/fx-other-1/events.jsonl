@@ -1,0 +1,2 @@
+{"schema_version": 1, "seq": 1, "timestamp_ms": 1791208800000, "event": {"user": {"text": "hi", "images": [], "work_id": null}}}
+{"schema_version": 1, "seq": 2, "timestamp_ms": 1791208860000, "event": {"assistant": {"text": "ok", "provider_replay": {"source": {"provider": "codex", "model": "gpt-6-astra"}}, "standalone_response": false}}}
