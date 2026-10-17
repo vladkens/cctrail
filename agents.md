@@ -59,8 +59,7 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 - `make compare REF=<binary>` runs the branch and a reference build (usually `main`) on the local
   history: totals must match (tokens, sessions and first/last activity exact, costs within 1e-9,
   active time within a second per group), and it lists how groups and periods moved. When grouping
-  changes on purpose, describe in the PR body which rule moved what, without the numbers. The Rust
-  port matched the Python cctrail 0.2.1 exactly.
+  changes on purpose, describe in the PR body which rule moved what, without the numbers.
 - Unit-test logic that can break silently, inline in `#[cfg(test)] mod tests`: deduplication,
   subagent linking, fork replay, activity windows and their split by day and between projects, date
   ranges, config mapping, pricing. `tests/` holds end-to-end CLI tests on `tests/fixtures/`.
