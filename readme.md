@@ -79,7 +79,8 @@ Repositories outside the config keep their own rows and form the `@unmapped` gro
   `sessionDir` from its `settings.json`; `PI_CODING_AGENT_SESSION_DIR` replaces both. A forked pi
   session counts only what it added to the copy of its source. fx from `~/.fx/sessions`
   (`FX_HOME`, which only cctrail reads, moves `~/.fx`); fx logs a session's tokens only as totals,
-  so they are spread evenly over its agents' activity: exact per project, approximate per day.
+  so they are spread over its agents' activity, a share on every active day: exact per project,
+  approximate per day.
   Claude Code deletes sessions older than 30 days by default: raise
   [`cleanupPeriodDays`](https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically)
   to keep a long history.

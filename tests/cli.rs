@@ -393,7 +393,7 @@ fn fx_usage_json() {
   let periods = value["periods"].as_array().unwrap();
   let days: Vec<_> =
     periods.iter().map(|x| (x["start"].clone(), x["usage"]["total"].clone())).collect();
-  assert_eq!(days, [(json!("2026-10-05"), json!(2500)), (json!("2026-10-07"), json!(975))]);
+  assert_eq!(days, [(json!("2026-10-05"), json!(2555)), (json!("2026-10-07"), json!(920))]);
   let mut models = vec![];
   for x in periods.iter().flat_map(|x| x["models"].as_array().unwrap()) {
     models.push((x["model"].clone(), x["speed"].clone(), x["cost_usd"].clone()));
@@ -403,7 +403,8 @@ fn fx_usage_json() {
   // was on; a model outside the catalog at fx's own price.
   let expected = [
     ("claude-sonnet-4-5", Value::Null, 0.00675),
-    ("gpt-5.6-luna", json!("fast"), 0.000064),
+    ("gpt-5.6-luna", json!("fast"), 0.000032),
+    ("gpt-5.6-luna", json!("fast"), 0.000032),
     ("gpt-6-astra", json!("fast"), 0.01318),
     ("gpt-6-astra", json!("fast"), 0.02602),
     ("grok-4", Value::Null, 0.5),
@@ -422,6 +423,21 @@ fn fx_usage_json() {
   assert!(rows[1].0.ends_with("other"));
   assert_eq!((&rows[1].1, &rows[1].2, &rows[1].3), (&json!(1), &json!(360), &json!(2065)));
   assert_eq!(total_of(&run, &["--json"]), 3475 + 427);
+}
+
+#[test]
+fn fx_usage_on_every_active_day() {
+  // Two requests over two agent moments on one day and ten on another: one on each day, so a
+  // report of the first keeps the session and its time.
+  let run = Run::new("missing", "missing").fx("fx_days");
+  let value = run.json(&["--since", "2026-10-05", "--until", "2026-10-05", "--json"]);
+  let row = &value["groups"][0];
+  assert_eq!((&row["sessions"], &row["active_seconds"]), (&json!(1), &json!(360)));
+  assert_eq!(row["usage"]["total"], 550);
+  let value = run.json(&["days", "--json"]);
+  let days: Vec<_> =
+    value["periods"].as_array().unwrap().iter().map(|x| &x["usage"]["total"]).collect();
+  assert_eq!(days, [&json!(550), &json!(550)]);
 }
 
 #[test]

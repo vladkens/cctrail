@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 
 use super::{Content, Obj, Present, Val, codex, inherit_roots, jsonl, model_id};
 use crate::config::home_dir;
+use crate::metrics::local_date;
 use crate::model::{Event, Provider, Session, Speed, Ts, Usage};
 
 /// A model's requests in a session are split into at most this many events: a crafted count must
@@ -147,8 +148,8 @@ pub fn root() -> PathBuf {
 /// fx (0.0.13) logs a session's usage only as per-model totals in `usage-v2.json`, without times,
 /// and an agent's usage in its main session's totals. The global `usage.jsonl` has the times of
 /// the requests but no session, and parallel sessions make matching them by time unreliable. So
-/// each model's totals are split into its requests, evenly over the agent activity of the main
-/// session and its agents, each request at one of those moments: totals per session and project
+/// each model's totals are split into its requests over the agent activity of the main session
+/// and its agents (`spread`), each request at one of those moments: totals per session and project
 /// are exact, their split by day approximate.
 pub fn parse(root: &Path) -> Vec<Session> {
   let dirs = std::fs::read_dir(root.join("sessions")).into_iter().flatten().flatten();
@@ -213,8 +214,13 @@ pub fn parse(root: &Path) -> Vec<Session> {
   sessions
 }
 
-/// A model's usage over its requests, each an equal share (the remainder a token each to the first
-/// ones) at the moment evenly placed among `at` for it; a share of the cost fx billed.
+/// A model's usage in equal shares (the remainder a token each to the first ones), one per request
+/// but at least one per local day with activity in `at`: each such day gets one share and the rest
+/// go to the days in proportion to their moments, placed evenly among them. A day with activity
+/// thus always has usage, and the reports keep its session and time. With fewer requests than
+/// active days a share is less than a request, so the long-context rate may be missed but never
+/// applied to a request below its threshold. Shares without tokens are dropped, and fx's cost is
+/// split over the others.
 fn spread(
   total: Usage,
   requests: u64,
@@ -224,10 +230,34 @@ fn spread(
   if total.total() == 0 {
     return vec![];
   }
-  let k = requests.clamp(1, MAX_REQUESTS);
+  let mut days: Vec<&[Moment]> = vec![];
+  let mut start = 0;
+  for i in 1..=at.len() {
+    if i == at.len() || local_date(at[i].0) != local_date(at[start].0) {
+      days.push(&at[start..i]);
+      start = i;
+    }
+  }
+  let k = requests.clamp(1, MAX_REQUESTS).max(days.len() as u64);
+  // Shares per day: one each, the rest by moments, the largest remainders (earlier on ties) last.
+  let (n, extra) = (at.len() as u128, (k - days.len() as u64) as u128);
+  let mut counts: Vec<u64> =
+    days.iter().map(|x| 1 + (extra * x.len() as u128 / n.max(1)) as u64).collect();
+  let mut order: Vec<usize> = (0..days.len()).collect();
+  order.sort_by_key(|i| std::cmp::Reverse(extra * days[*i].len() as u128 % n.max(1)));
+  let left = k.saturating_sub(counts.iter().sum());
+  for i in order.into_iter().take(left as usize) {
+    counts[i] += 1;
+  }
+  let mut moments: Vec<Option<Moment>> = vec![];
+  for (day, c) in days.iter().zip(counts) {
+    let m = day.len() as u128;
+    moments.extend((0..c).map(|i| Some(day[((2 * i as u128 + 1) * m / (2 * c as u128)) as usize])));
+  }
+  moments.resize(k as usize, None);
+
   let part = |v: u64, j: u64| v / k + u64::from(j < v % k);
-  let n = at.len() as u128;
-  (0..k)
+  let shares: Vec<(Option<Moment>, Usage)> = (0..k)
     .map(|j| {
       let usage = Usage {
         input: part(total.input, j),
@@ -237,10 +267,12 @@ fn spread(
         output: part(total.output, j),
         reasoning: part(total.reasoning, j),
       };
-      let i = (2 * j as u128 + 1) * n / (2 * k as u128);
-      (at.get(i as usize).copied(), usage, cost.map(|x| x / k as f64))
+      (moments[j as usize], usage)
     })
-    .collect()
+    .filter(|x| x.1.total() > 0)
+    .collect();
+  let cost = cost.map(|x| x / shares.len() as f64);
+  shares.into_iter().map(|(at, usage)| (at, usage, cost)).collect()
 }
 
 fn parse_dir(dir: &Path) -> Option<(Session, Parsed)> {
@@ -297,7 +329,6 @@ fn parse_dir(dir: &Path) -> Option<(Session, Parsed)> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::metrics::local_date;
 
   fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fx")
@@ -319,7 +350,7 @@ mod tests {
     assert_eq!((agent.root_id.as_str(), agent.workdir.as_str()), ("fx-main-1", "/repo"));
     assert_eq!(agent.cwd, "/elsewhere");
     // Its main session's totals hold its usage, placed at its own activity.
-    assert_eq!((total(&main.events), total(&agent.events)), (978, 432));
+    assert_eq!((total(&main.events), total(&agent.events)), (922, 488));
     assert_eq!(total(&other.events), 2065);
   }
 
@@ -353,12 +384,14 @@ mod tests {
       let on = |x: &&&Event| x.ts.is_some_and(|t| local_date(t).day() == d);
       total(tree.iter().filter(on).copied())
     };
-    // Three requests of one model over seven moments, one on the first day.
-    assert_eq!((day(5), day(7)), (435, 975));
+    // Three requests of one model over three moments on one day and four on another: one and two.
+    // One request of another over both days: half on each.
+    assert_eq!((day(5), day(7)), (435 + 55, 975 - 55));
     let billed: Vec<&Event> = tree.into_iter().filter(|x| x.usage.is_some()).collect();
     let mut models: Vec<&str> = billed.iter().filter_map(|x| x.model.as_deref()).collect();
     models.sort();
-    assert_eq!(models, ["gpt-5.6-luna", "gpt-6-astra", "gpt-6-astra", "gpt-6-astra"]);
+    let luna = "gpt-5.6-luna";
+    assert_eq!(models, [luna, luna, "gpt-6-astra", "gpt-6-astra", "gpt-6-astra"]);
     // The main session's speed and effort, its agent's own unused.
     assert!(billed.iter().all(|x| x.speed == Some(Speed::Fast)));
     assert!(billed.iter().all(|x| x.effort.as_deref() == Some("xhigh")));
@@ -399,7 +432,61 @@ mod tests {
     assert!(spread(total, 2, None, &[]).iter().all(|x| x.0.is_none()));
     assert_eq!(spread(total, 0, None, &at).len(), 1);
     assert!(spread(Usage::default(), 5, None, &at).is_empty());
-    assert_eq!(spread(total, u64::MAX, None, &at).len() as u64, MAX_REQUESTS);
+    // A crafted count is capped; shares without tokens are dropped.
+    let pieces = spread(total, u64::MAX, None, &at);
+    assert_eq!(pieces.len(), 600);
+    assert_eq!(pieces.iter().fold(Usage::default(), |a, x| a + x.1), total);
+  }
+
+  #[test]
+  fn gives_every_active_day_usage() {
+    let day = |d: &str, n: i64| {
+      let t: jiff::Timestamp = format!("2026-10-{d}T12:00:00Z").parse().unwrap();
+      t.as_microsecond() + n * 60_000_000
+    };
+    let mut at: Vec<Moment> = (0..2).map(|n| (day("05", n), 0)).collect();
+    at.extend((0..10).map(|n| (day("07", n), 1)));
+    let total = Usage { input: 1000, output: 101, ..Default::default() };
+    // Two requests evenly over the moments would both fall on the second day.
+    let pieces = spread(total, 2, None, &at);
+    let days: Vec<_> = pieces.iter().map(|x| local_date(x.0.unwrap().0).day()).collect();
+    assert_eq!(days, [5, 7]);
+    // Fewer requests than days: a share each, the totals exact.
+    let pieces = spread(total, 1, None, &at);
+    let tokens: Vec<_> = pieces.iter().map(|x| x.1.total()).collect();
+    assert_eq!(tokens, [551, 550]);
+    // More: one each, the other ten by activity (1⅔ and 8⅓, the larger remainder rounded up).
+    let pieces = spread(total, 12, None, &at);
+    assert_eq!(pieces.iter().filter(|x| x.0.unwrap().1 == 0).count(), 3);
+    assert_eq!(pieces.iter().fold(Usage::default(), |a, x| a + x.1), total);
+  }
+
+  #[test]
+  fn bills_all_of_fxs_cost() {
+    let raw = r#"{"input_tokens": 3, "cache_read_tokens": 1, "output_tokens": 3,
+      "reasoning_tokens": 1}"#;
+    let usage = serde_json::from_str::<ModelUsage>(raw).unwrap().usage();
+    // Three requests share six tokens as 4, 2 and 0: the cost goes to the two with tokens.
+    let at = [(0, 0)];
+    let mut session = Session::new("s", true, "/r", Provider::Fx);
+    for (at, usage, cost) in spread(usage, 3, Some(0.9), &at) {
+      let model = Some("grok-4".into());
+      session.events.push(Event {
+        ts: at.map(|x| x.0),
+        usage: Some(usage),
+        model,
+        cost,
+        ..Default::default()
+      });
+    }
+    let sessions = [session];
+    let events = crate::metrics::billable_events(&sessions);
+    let cost: f64 = events
+      .iter()
+      .map(|(s, e)| crate::pricing::cost(Provider::Fx, &sessions[*s].events[*e]))
+      .sum();
+    assert_eq!(events.len(), 2);
+    assert!((cost - 0.9).abs() < 1e-12, "{cost}");
   }
 
   #[test]
