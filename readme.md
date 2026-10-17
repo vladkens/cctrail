@@ -7,6 +7,7 @@
 [<img src="https://badges.ws/crates/v/cctrail" alt="version" />](https://crates.io/crates/cctrail)
 [<img src="https://badges.ws/github/license/vladkens/cctrail" alt="license" />](https://github.com/vladkens/cctrail/blob/main/LICENSE)
 [<img src="https://badges.ws/badge/follow-@uid127-black" alt="follow @uid127" />](https://x.com/uid127)
+[![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
 
 </div>
 
@@ -16,7 +17,7 @@ used and what that would cost at API prices. It needs no setup: repositories are
 sessions themselves, with agent worktrees and clones counted as one project.
 
 <div align="center">
-  <img src="docs/images/timeline.svg" alt="The timeline of cctrail's interactive view: a bar per day for the last 30 days, stacked by model, over the list of days with their time, tokens, cost and sessions" />
+  <img src="docs/images/demo.gif" alt="cctrail's interactive view: the projects for the last 30 days and a project's models, the models with their cost per hour and per million tokens and one split by harness, speed and effort, the timeline of days stacked by model by time and by cost, and the swears per model" />
 </div>
 
 ## 🌟 Features
