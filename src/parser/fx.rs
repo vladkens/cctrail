@@ -29,6 +29,7 @@ const MAX_REQUESTS: u64 = 1 << 16;
 struct Meta {
   workspace_root: Val,
   subagent_child: Val,
+  model: Val,
   fast_mode: Val,
   effort: Val,
   created_at_ms: Val,
@@ -135,6 +136,8 @@ struct Parsed {
   /// When the session was created and last updated, for usage without any activity.
   meta: Vec<Ts>,
   models: Vec<ModelUsage>,
+  /// The session's model in `session.json`.
+  model: Option<String>,
   speed: Option<Speed>,
   effort: Option<String>,
 }
@@ -209,8 +212,21 @@ pub fn parse(root: &Path, swears: Option<&Dict>) -> Vec<Session> {
   for (i, event) in placed {
     sessions[i].events.push(event);
   }
-  for x in &mut sessions {
-    x.events.sort_by_key(|x| x.ts);
+  for (s, x) in sessions.iter_mut().zip(&parsed) {
+    s.events.sort_by_key(|x| x.ts);
+    // An agent may get none of its main session's requests: its time goes to the model of its
+    // `session.json`, named by an event of no time and no usage.
+    if let Some(model) = x.model.clone().filter(|_| s.events.iter().all(|e| e.model.is_none()))
+      && !s.events.is_empty()
+    {
+      let event = Event {
+        model: Some(model),
+        speed: x.speed,
+        effort: x.effort.clone(),
+        ..Default::default()
+      };
+      s.events.insert(0, event);
+    }
   }
   // A main session without events of its own still counts its agents' work as a session.
   let busy: HashSet<String> =
@@ -346,6 +362,7 @@ fn parse_dir(dir: &Path, swears: Option<&Dict>) -> Option<(Session, Parsed)> {
     agent,
     meta: [&meta.created_at_ms, &meta.updated_at_ms].into_iter().filter_map(millis).collect(),
     models,
+    model: meta.model.str().map(model_id),
     speed,
     effort: meta.effort.str().map(String::from),
   };
@@ -412,6 +429,45 @@ mod tests {
     let agent = sessions.iter().find(|x| x.id == "fx-agent-1").unwrap();
     assert_eq!((agent.root_id.as_str(), total(&agent.events)), ("fx-main-1", 1410));
     std::fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn names_the_model_of_an_agent_without_requests() {
+    let dir = std::env::temp_dir().join(format!("cctrail-fx-model-{}", std::process::id()));
+    let write = |path: &str, data: &str| {
+      let path = dir.join("sessions").join(path);
+      std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+      std::fs::write(path, data).unwrap();
+    };
+    let session = |model: &str, child: bool| {
+      format!(
+        r#"{{"workspace_root": "/repo", "model": "{model}", "effort": "low", "subagent_child": {child}}}"#
+      )
+    };
+    write("main/session.json", &session("codex/gpt-6-astra", false));
+    write(
+      "main/usage-v2.json",
+      r#"{"snapshot": {"models": [{"model": "codex/gpt-6-astra", "input_tokens": 10, "request_count": 1}]}}"#,
+    );
+    write("main/events.jsonl", r#"{"timestamp_ms": 1791201660000, "event": {"assistant": {}}}"#);
+    // The agent's only line is its prompt, no moment of agent activity: the request goes elsewhere.
+    write("agent/session.json", &session("codex/gpt-5.6-luna", true));
+    write("agent/subagent/owner.json", r#"{"parent_id": "main"}"#);
+    write(
+      "agent/events.jsonl",
+      r#"{"timestamp_ms": 1791201600000, "event": {"user": {"text": "hi"}}}"#,
+    );
+
+    let sessions = parse(&dir, None);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let find = |id: &str| sessions.iter().find(|x| x.id == id).unwrap();
+    let (main, agent) = (find("main"), find("agent"));
+    assert_eq!((total(&main.events), total(&agent.events)), (10, 0));
+    let named: Vec<_> = agent.events.iter().map(|x| (x.ts.is_some(), x.model.as_deref())).collect();
+    assert_eq!(named, [(false, Some("gpt-5.6-luna")), (true, None)]);
+    assert_eq!((agent.events[0].usage, agent.events[0].effort.as_deref()), (None, Some("low")));
+    // A session with a request of its own gets no such event.
+    assert!(main.events.iter().all(|x| x.ts.is_some()));
   }
 
   #[test]
