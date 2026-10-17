@@ -54,13 +54,14 @@ pub fn export(file: &Path) -> Result<usize> {
   write(file, &sources, home.as_deref().filter(|x| !x.is_empty()))
 }
 
-/// Writes the sources into a new database at `file`, through a temporary file beside it, so a
-/// failed export leaves an earlier one as it was.
+/// Writes the sources into a new database at `file`, through a temporary file of its own beside
+/// it, so a failed export leaves an earlier one as it was.
 fn write(file: &Path, sources: &[Source], home: Option<&str>) -> Result<usize> {
   let name = file.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
-  let tmp = file.with_file_name(format!(".{name}.tmp"));
+  let tmp = file.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+  let context = || format!("failed to write {}", file.display());
+  std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).with_context(context)?;
   let res = (|| -> Result<usize> {
-    let _ = std::fs::remove_file(&tmp);
     let mut conn = Connection::open(&tmp)?;
     let tx = conn.transaction()?;
     tx.execute_batch(SCHEMA)?;
@@ -78,7 +79,7 @@ fn write(file: &Path, sources: &[Source], home: Option<&str>) -> Result<usize> {
   if res.is_err() {
     let _ = std::fs::remove_file(&tmp);
   }
-  res.with_context(|| format!("failed to write {}", file.display()))
+  res.with_context(context)
 }
 
 /// A path under the home directory as `~/…`; one starting with `~` gets another.
@@ -336,7 +337,7 @@ mod tests {
       std::fs::write(&file, "an earlier export").unwrap();
       let ours = home.to_string_lossy().to_string();
       let n = write(&file, &sources, Some(&ours)).unwrap();
-      assert!(!dir.join(".export.db.tmp").exists());
+      assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "only the export beside the home");
 
       // Read back, the sessions and events are the parse's.
       let conn = Connection::open(&file).unwrap();
@@ -376,13 +377,15 @@ mod tests {
       let theirs = load(&conn, Some("/elsewhere")).unwrap();
       let paths = theirs.iter().map(|x| x.path.to_string_lossy().to_string());
       assert!(paths.into_iter().all(|x| x.starts_with("/elsewhere")));
+      drop(conn);
       std::fs::remove_dir_all(&dir).unwrap();
     }
   }
 
   #[test]
   fn folds_paths_under_the_home() {
-    let home = Some("/h/me");
+    let native = |x: &str| x.replace('/', std::path::MAIN_SEPARATOR_STR);
+    let home = native("/h/me");
     let cases = [
       ("/h/me/x", "~/x"),
       ("/h/me", "~"),
@@ -391,10 +394,13 @@ mod tests {
       ("/other", "/other"),
       ("unknown", "unknown"),
     ];
-    for (path, folded) in cases {
-      assert_eq!(fold(home, path), folded);
-      assert_eq!(unfold(home, folded), path);
+    for (path, folded) in cases.map(|(x, y)| (native(x), native(y))) {
+      assert_eq!(fold(Some(&home), &path), folded);
+      assert_eq!(unfold(Some(&home), &folded), path);
     }
-    assert_eq!(unfold(Some("/h/you"), "~/x"), "/h/you/x");
+    assert_eq!(unfold(Some(&native("/h/you")), &native("~/x")), native("/h/you/x"));
+    // Folded on another platform.
+    let foreign = if cfg!(windows) { "~/x/y" } else { "~\\x\\y" };
+    assert_eq!(unfold(Some(&home), foreign), native("/h/me/x/y"));
   }
 }

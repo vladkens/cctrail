@@ -573,5 +573,7 @@ fn exports_the_history_into_a_file() {
   assert_eq!(version, "1");
   let err = run.exec(&["export"]).stderr;
   assert!(err.ends_with(b"`cctrail export` needs a FILE\n"), "{}", String::from_utf8_lossy(&err));
+  // Windows deletes no file still open.
+  drop(conn);
   std::fs::remove_dir_all(&dir).unwrap();
 }
