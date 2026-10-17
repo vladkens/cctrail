@@ -1,6 +1,6 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/cctrail
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -206,7 +206,10 @@ pub fn parse(root: &Path) -> Vec<Session> {
   for x in &mut sessions {
     x.events.sort_by_key(|x| x.ts);
   }
-  sessions.retain(|x| !x.events.is_empty());
+  // A main session without events of its own still counts its agents' work as a session.
+  let busy: HashSet<String> =
+    sessions.iter().filter(|x| !x.events.is_empty()).map(|x| x.root_id.clone()).collect();
+  sessions.retain(|x| !x.events.is_empty() || (x.is_main && busy.contains(&x.id)));
   sessions
 }
 
@@ -318,6 +321,27 @@ mod tests {
     // Its main session's totals hold its usage, placed at its own activity.
     assert_eq!((total(&main.events), total(&agent.events)), (978, 432));
     assert_eq!(total(&other.events), 2065);
+  }
+
+  #[test]
+  fn keeps_a_main_session_without_events_for_its_agents() {
+    let dir = std::env::temp_dir().join(format!("cctrail-fx-{}", std::process::id()));
+    let src = fixtures().join("sessions");
+    for (id, files) in [
+      ("fx-main-1", &["session.json", "usage-v2.json"][..]),
+      ("fx-agent-1", &["session.json", "usage-v2.json", "events.jsonl", "subagent/owner.json"]),
+    ] {
+      std::fs::create_dir_all(dir.join("sessions").join(id).join("subagent")).unwrap();
+      for x in files {
+        std::fs::copy(src.join(id).join(x), dir.join("sessions").join(id).join(x)).unwrap();
+      }
+    }
+    let sessions = parse(&dir);
+    let main = sessions.iter().find(|x| x.id == "fx-main-1").unwrap();
+    assert!(main.is_main && main.events.is_empty());
+    let agent = sessions.iter().find(|x| x.id == "fx-agent-1").unwrap();
+    assert_eq!((agent.root_id.as_str(), total(&agent.events)), ("fx-main-1", 1410));
+    std::fs::remove_dir_all(&dir).unwrap();
   }
 
   #[test]
