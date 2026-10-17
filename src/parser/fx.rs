@@ -145,6 +145,12 @@ pub struct Links {
   effort: Option<String>,
 }
 
+impl Links {
+  pub fn has_totals(&self) -> bool {
+    !self.models.is_empty()
+  }
+}
+
 /// A model's totals in a session.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Model {
@@ -163,14 +169,7 @@ pub fn root() -> PathBuf {
   }
 }
 
-/// Sessions in `<root>/sessions/<id>/`; subagents carry their main session's root and directory.
-///
-/// fx (0.0.13) logs a session's usage only as per-model totals in `usage-v2.json`, without times,
-/// and an agent's usage in its main session's totals. The global `usage.jsonl` has the times of
-/// the requests but no session, and parallel sessions make matching them by time unreliable. So
-/// each model's totals are split into its requests over the agent activity of the main session
-/// and its agents (`spread`), each request at one of those moments: totals per session and project
-/// are exact, their split by day approximate.
+/// The session directories in `<root>/sessions/<id>/`, each with the files read in it.
 pub fn find(root: &Path) -> Vec<Source> {
   let dirs = std::fs::read_dir(root.join("sessions")).into_iter().flatten().flatten();
   let mut dirs: Vec<PathBuf> = dirs.map(|x| x.path()).filter(|x| x.is_dir()).collect();
@@ -192,6 +191,13 @@ pub fn read(dir: &Path, swears: Option<&Dict>) -> Unit {
 
 /// Sessions of the directories in found order; subagents carry their main session's root and
 /// directory.
+///
+/// fx (0.0.13) logs a session's usage only as per-model totals in `usage-v2.json`, without times,
+/// and an agent's usage in its main session's totals. The global `usage.jsonl` has the times of
+/// the requests but no session, and parallel sessions make matching them by time unreliable. So
+/// each model's totals are split into its requests over the agent activity of the main session
+/// and its agents (`spread`), each request at one of those moments: totals per session and project
+/// are exact, their split by day approximate.
 pub fn combine(items: Vec<Source>) -> Vec<Session> {
   let (mut sessions, mut parsed) = (vec![], vec![]);
   for x in items {

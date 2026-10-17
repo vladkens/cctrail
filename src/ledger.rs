@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
-use rusqlite::{Connection, OpenFlags, Row, params};
+use rusqlite::{Connection, OpenFlags, Row, TransactionBehavior, params};
 
 use crate::config::home_dir;
 use crate::model::{Event, Prompt, Provider, Session, Speed, Usage};
@@ -20,7 +20,6 @@ pub const PARSER_VERSION: i64 = 1;
 /// A file's one session or none, an event's usage in six token columns, its flags (with its
 /// prompt's `directed`) as bits; models and efforts in `strings`.
 const SCHEMA: &str = "
-  PRAGMA journal_mode = WAL;
   CREATE TABLE files (id INTEGER PRIMARY KEY, harness TEXT NOT NULL, root TEXT NOT NULL,
     path TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, mtime INTEGER NOT NULL,
     parser_version INTEGER NOT NULL, dict INTEGER NOT NULL);
@@ -89,7 +88,8 @@ impl Ledger {
     let mut groups: HashMap<Provider, (Vec<Source>, Vec<Source>)> = HashMap::new();
     x.live.into_iter().for_each(|x| groups.entry(x.provider).or_default().0.push(x));
     x.gone.into_iter().for_each(|x| groups.entry(x.provider).or_default().1.push(x));
-    let mut take = |p: Provider| groups.remove(&p).map(|x| current(x.0, x.1)).unwrap_or_default();
+    let mut take =
+      |p: Provider| groups.remove(&p).map(|x| current(p, x.0, x.1)).unwrap_or_default();
     let jobs: Vec<_> = harnesses.iter().map(|(p, roots)| (*p, roots, take(*p))).collect();
     let sessions = jobs.into_par_iter().map(|(p, roots, x)| parser::combine(p, roots, x));
     let mut sessions = sessions.collect::<Vec<_>>().concat();
@@ -113,7 +113,7 @@ impl Ledger {
     .with_context(|| format!("failed to replace {}", file.display()))?;
     copy(&conn, file)?;
     // A file on its own, without a write-ahead log beside it.
-    open(file, true)?.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
+    Connection::open(file)?.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
     Ok(conn.query_row("SELECT count(*) FROM sessions", [], |x| x.get::<_, i64>(0))? as usize)
   }
 
@@ -156,15 +156,20 @@ struct Refresh {
 }
 
 /// The ledger's sources with the harnesses' files: unchanged ones (size, mtime, parser version and
-/// dictionary) as stored, the others read again, keeping the stored ones when a file that had
-/// events reads to none (unreadable, truncated).
+/// dictionary) as stored, the others read again, keeping the stored ones when a file reads to less
+/// than it had (unreadable, truncated).
 fn refresh(old: Vec<Source>, harnesses: &[(Provider, Vec<PathBuf>)], dict: &Dict) -> Refresh {
   let version = (PARSER_VERSION, dict.fingerprint());
-  let events = |x: &Source| x.unit.session.as_ref().map_or(0, |x| x.events.len());
+  // What a failed read would lose: a session, its events, fx's totals.
+  let holds = |x: &Source| {
+    let s = x.unit.session.as_ref();
+    let totals = matches!(&x.unit.links, Links::Fx(x) if x.has_totals());
+    [s.is_some(), s.is_some_and(|x| !x.events.is_empty()), totals]
+  };
   let read = |(x, old): (Source, Option<Source>)| {
     let new = x.read(Some(dict), version.1);
     match old {
-      Some(old) if events(&new) == 0 && events(&old) > 0 => (old, false, None),
+      Some(old) if holds(&old).iter().zip(holds(&new)).any(|(o, n)| *o && !n) => (old, false, None),
       old => (new, true, old.map(|x| x.version.0).filter(|x| *x < PARSER_VERSION)),
     }
   };
@@ -205,12 +210,18 @@ fn refresh(old: Vec<Source>, harnesses: &[(Provider, Vec<PathBuf>)], dict: &Dict
   x
 }
 
-/// A harness's sources to count: the live ones, and of the gone ones those whose session no live
-/// one has (not a moved file), the last read of each.
-fn current(mut live: Vec<Source>, gone: Vec<Source>) -> Vec<Source> {
-  let id = |x: &Source| Some(x.unit.session.as_ref()?.id.clone());
-  let here: HashSet<String> = live.iter().filter_map(id).collect();
-  let mut last: HashMap<String, Source> = HashMap::new();
+/// A harness's sources to count: the live ones and the gone ones, which its work across files
+/// counts as if their files were here. Claude's counts every log of a session in a root (a copied
+/// project) though: of its gone logs, those of a session that a log here has in the same root (a
+/// moved file) don't count, and of several gone ones in a root the last read.
+fn current(provider: Provider, mut live: Vec<Source>, gone: Vec<Source>) -> Vec<Source> {
+  if provider != Provider::Claude {
+    live.extend(gone);
+    return live;
+  }
+  let id = |x: &Source| Some((x.root.clone(), x.unit.session.as_ref()?.id.clone()));
+  let here: HashSet<_> = live.iter().filter_map(id).collect();
+  let mut last: HashMap<_, Source> = HashMap::new();
   for x in gone {
     let Some(key) = id(&x).filter(|x| !here.contains(x)) else { continue };
     match last.get(&key) {
@@ -268,13 +279,20 @@ fn open(path: &Path, write: bool) -> Result<Connection> {
     false => OpenFlags::SQLITE_OPEN_READ_ONLY,
   };
   let context = || format!("failed to open {}", path.display());
-  let conn = Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+  let mut conn = Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
     .with_context(context)?;
   conn.busy_timeout(Duration::from_secs(30))?;
-  let version: i64 =
-    conn.query_row("PRAGMA user_version", [], |x| x.get(0)).with_context(context)?;
-  match version {
-    0 if write => conn.execute_batch(SCHEMA).with_context(context)?,
+  let version = |x: &Connection| x.query_row("PRAGMA user_version", [], |x| x.get::<_, i64>(0));
+  if write {
+    conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(())).with_context(context)?;
+    // Under the write lock, so a run beside it doesn't create the tables too.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if version(&tx)? == 0 {
+      tx.execute_batch(SCHEMA).with_context(context)?;
+    }
+    tx.commit()?;
+  }
+  match version(&conn).with_context(context)? {
     1 => {}
     0 => bail!("{} is no cctrail ledger", path.display()),
     _ => bail!("{} is from a newer cctrail", path.display()),
@@ -319,9 +337,14 @@ fn fold(home: Option<&str>, path: &str) -> String {
   }
 }
 
+/// A folded path in this home; one folded on another platform with this one's separators.
 fn unfold(home: Option<&str>, path: &str) -> String {
+  let foreign = if cfg!(windows) { '/' } else { '\\' };
   match (path.strip_prefix('~'), home) {
     (Some(rest), _) if rest.starts_with('~') => rest.to_string(),
+    (Some(rest), Some(home)) if rest.starts_with(foreign) => {
+      format!("{home}{}", rest.replace(foreign, std::path::MAIN_SEPARATOR_STR))
+    }
     (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
       format!("{home}{rest}")
     }
@@ -433,7 +456,7 @@ fn read_event(x: &Row, strings: &HashMap<i64, String>) -> Result<Event> {
 
 /// Replaces the stored sources of the paths of `write` with them, in one transaction.
 fn store(conn: &mut Connection, home: Option<&str>, write: &[&Source]) -> Result<()> {
-  let tx = conn.transaction()?;
+  let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
   insert(&tx, |x| fold(home, x), write)?;
   Ok(tx.commit()?)
 }
@@ -643,6 +666,58 @@ mod tests {
   }
 
   #[test]
+  fn keeps_what_a_failed_read_would_lose() {
+    let home = Home::new("failed", "fixtures");
+    let before = home.sessions();
+    // fx's totals: a session that doesn't parse, totals that don't.
+    std::fs::write(home.file("fx/sessions/fx-main-1/session.json"), "{").unwrap();
+    std::fs::write(home.file("fx/sessions/fx-other-1/usage-v2.json"), "{").unwrap();
+    assert_eq!(home.sessions(), before);
+  }
+
+  #[test]
+  fn counts_copies_across_profiles_as_before_when_gone() {
+    let mut home = Home::new("copies", "fixtures");
+    let line = |id: &str, n: u64| {
+      format!(
+        r#"{{"type": "assistant", "timestamp": "2026-01-01T00:00:0{n}Z", "message": {{"id": "{id}", "usage": {{"input_tokens": {n}}}}}}}"#
+      )
+    };
+    let write = |path: &str, lines: &[String]| {
+      let path = home.file(path);
+      std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+      std::fs::write(path, lines.join("\n")).unwrap();
+    };
+    // The longer main log in `b`, the agent in both, the last written in `a`.
+    write("a/s.jsonl", &[line("m1", 1)]);
+    write("b/s.jsonl", &[line("m1", 1), line("m2", 2)]);
+    write("b/s/subagents/agent-x.jsonl", &[line("x1", 4), line("x2", 3)]);
+    write("a/s/subagents/agent-x.jsonl", &[line("x1", 4)]);
+    home.harnesses[0].1 = vec![home.file("a"), home.file("b")];
+    let before = home.sessions();
+    assert_eq!(before, home.parsed());
+    for x in ["a", "b"] {
+      std::fs::remove_dir_all(home.file(x)).unwrap();
+    }
+    assert_eq!(home.sessions(), before);
+  }
+
+  #[test]
+  fn updates_beside_another_run() {
+    let home = Home::new("parallel", "fixtures");
+    let dict = Dict::load(None).unwrap();
+    let run = || home.ledger.sessions(&home.harnesses, &dict, false).map(|x| format!("{x:?}"));
+    for i in 0..2 {
+      let runs: Vec<_> = std::thread::scope(|s| {
+        let runs: Vec<_> = (0..4).map(|_| s.spawn(run)).collect();
+        runs.into_iter().map(|x| x.join().unwrap().unwrap()).collect()
+      });
+      assert!(runs.iter().all(|x| *x == runs[0]), "run {i}");
+      std::fs::write(home.file("claude/projects/testproj/s-main-1.jsonl"), "").unwrap();
+    }
+  }
+
+  #[test]
   fn reads_again_for_a_new_parser_version_after_a_backup() {
     let home = Home::new("version", "fixtures");
     let before = home.sessions();
@@ -732,7 +807,7 @@ mod tests {
     let live = vec![source("c", &here, 1)];
     let gone =
       vec![source("c", &gone("c"), 9), source("d", &gone("d1"), 1), source("d", &gone("d2"), 2)];
-    let paths: Vec<_> = current(live, gone).into_iter().map(|x| x.path).collect();
+    let paths: Vec<_> = current(Provider::Claude, live, gone).into_iter().map(|x| x.path).collect();
     assert_eq!(paths, [here, dir.join("gone-d2.jsonl")]);
   }
 
@@ -752,5 +827,10 @@ mod tests {
       assert_eq!(unfold(home, folded), path);
     }
     assert_eq!(unfold(Some("/h/you"), "~/x"), "/h/you/x");
+    // Folded on another platform.
+    match cfg!(windows) {
+      true => assert_eq!(unfold(Some("C:\\h"), "~/x/y"), "C:\\h\\x\\y"),
+      false => assert_eq!(unfold(Some("/h"), "~\\x\\y"), "/h/x/y"),
+    }
   }
 }
