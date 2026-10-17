@@ -25,3 +25,12 @@ and 4.42 s, the branch 4.53 s, user time 7.50 / 7.41 / 7.32 s: unchanged. Codex 
 report; a struct with only the fields read, 1.15 s. Kept the struct. The interactive view's load,
 one run each in one process: 4.54 s to parse without prompts and 0.05 s for its data, 4.36 s and
 0.02 s with them: within noise.
+
+`cctrail export` (feat/ledger, 2026-10-17): the parsers split into reading each file alone and the
+work across files, which now reads every copy of a file before dropping the extra ones. The
+reports, A/B/A/B against main: 3.98 / 4.38 / 4.29 / 4.16 s wall, 7.30 / 7.35 / 7.20 / 7.36 s
+user: within noise. One export of the full history (prompts' swear counts read too, 510k events
+written in one transaction): 5.25 s wall, 10.30 s user, 517 MB peak RSS, against 4.41 s for the
+report beside it; the file is 42.5 MB for 4.3k files and 11.8 GB of logs, models and efforts
+interned. A clean release build with rusqlite takes 39.3 s instead of 24.2 s (158 s CPU instead of
+130 s): bundled SQLite's C, 25 s, is the longest unit; the binary grows from 6.6 to 8.8 MB.
