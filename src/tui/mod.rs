@@ -1397,22 +1397,14 @@ mod tests {
       assert!(ys.windows(2).all(|x| x[0] + 1 == x[1]), "{}", screen_of(&buf));
       // A row of swears opens nothing.
       assert!(!raw(&buf, find(&buf, "Model") - 1).contains("open"));
-      // The legend on the bottom border, faint, cut beside the keys.
+      // The legend on the bottom border, faint: whole beside the keys at 120, cut at 80.
       let bottom = raw(&buf, 19);
-      let two = "% dir: messages scolding the model · % any: messages with any swearing ·";
-      assert_eq!(bottom.contains(two), width == 120, "{bottom}");
-      assert!(
-        bottom.starts_with("╰─ % dir: messages scolding") && bottom.contains('…'),
-        "{bottom}"
-      );
+      let legend = "% dir: scolding the model · % any: any swearing · Score: % dir for few msgs";
+      assert_eq!(bottom.contains(legend), width == 120, "{bottom}");
+      assert_eq!(bottom.contains('…'), width == 80, "{bottom}");
+      assert!(bottom.starts_with("╰─ % dir: scolding the model") && bottom.contains("? help"));
       assert_eq!(buf[(3, 19)].fg, Color::DarkGray);
     }
-    // Whole when the border has room for it and the keys.
-    let bottom = raw(&frame_of(&app, 160, 20), 19);
-    assert!(
-      bottom.contains("· Score: % dir adjusted for few messages ─") && !bottom.contains('…'),
-      "{bottom}"
-    );
     press(&mut app, KeyCode::Enter);
     assert!(app.open.is_none());
     // `s` sorts by the next column: after the score the names, then the prompts; `S` reverses it.

@@ -318,7 +318,7 @@ fn note(app: &App) -> Vec<Text<'static>> {
     return vec![dim("paths "), Text::styled(d.paths.join(", "), TEXT)];
   }
   if app.tab == Tab::Swears {
-    return vec![dim(SWEARS)];
+    return vec![dim(SWEARS_SHORT)];
   }
   if app.unpriced.is_empty() {
     return vec![];
@@ -509,9 +509,11 @@ fn table(
   grid(f, &columns, lines, total, area, sel, first, hits)
 }
 
-/// What the swears tab's numbers are, on its bottom border and in the help.
+/// What the swears tab's numbers are: in the help, and short on its bottom border beside the keys.
 const SWEARS: &str = "% dir: messages scolding the model · % any: messages with any swearing · \
   Score: % dir adjusted for few messages";
+const SWEARS_SHORT: &str =
+  "% dir: scolding the model · % any: any swearing · Score: % dir for few msgs";
 
 /// The swears tab: per model the prompts to it, the words typed, the percent swearing at it, the
 /// percent with any swearing and the score; shares of too few prompts dash.
