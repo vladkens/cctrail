@@ -1,3 +1,24 @@
+## v0.4.0 – 2026-10-18
+
+### Features
+
+- Added a Swears view to the interactive view: how often you scold each model, adjusted for how much you used it (#15)
+- Added `cctrail export FILE` and `cctrail import FILE` to move the history to another machine, or keep it after the harnesses delete their logs (#19)
+- Added cost per active hour and per million tokens to the Models view (#16)
+
+### Improvements
+
+- Improved the Models view: one row per model whichever harness ran it, with a per-harness breakdown inside a model, dated model ids merged, sorted by cost by default (#16)
+
+### Fixes
+
+- Fixed time of Claude Code background agents and fx agents counted under an unknown model in the interactive view (#17)
+- Fixed Claude Code's interruption and error messages taking model time in the interactive view (#16)
+
+**Full Changelog**: https://github.com/vladkens/cctrail/compare/v0.3.0...v0.4.0
+
+---
+
 ## v0.3.0 – 2026-10-17
 
 ### Breaking Changes
