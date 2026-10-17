@@ -106,13 +106,15 @@ const VENDORS: [&str; 10] = [
 
 /// A model id as pi logs it from any provider, as the price catalog names it: without a router's
 /// vendor (`anthropic/claude-sonnet-4.5`), Bedrock's region, vendor and version
-/// (`us.anthropic.claude-opus-4-6-v1:0`, `global.openai.gpt-6-astra`) or Vertex's date
-/// (`claude-opus-4-1@20250805`), and with dashes in Claude's version (`claude-sonnet-4.5`). One
-/// model reads the same by any route.
+/// (`us.anthropic.claude-opus-4-6-v1:0`, `global.openai.gpt-6-astra`), with Vertex's date as
+/// theirs (`claude-sonnet-4@20250514` as `claude-sonnet-4-20250514`), and with dashes in Claude's
+/// version (`claude-sonnet-4.5`). One model reads the same by any route.
 fn model_id(model: &str) -> String {
   let digits = |x: &str| !x.is_empty() && x.bytes().all(|c| c.is_ascii_digit());
   let id = model.rsplit('/').next().unwrap_or(model);
-  let id = id.split('@').next().unwrap_or(id);
+  // Vertex's date as Anthropic's and Bedrock's: some models have no undated id.
+  let id = id.replacen('@', "-", 1);
+  let id = id.as_str();
   let vendor = |v: &str| match id.strip_prefix(v).and_then(|x| x.strip_prefix('.')) {
     Some(x) => Some(id.len() - x.len()),
     None => id.find(&format!(".{v}.")).map(|i| i + v.len() + 2),
@@ -564,7 +566,10 @@ mod tests {
       ("us.anthropic.claude-opus-4-6-v1", "claude-opus-4-6"),
       ("anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
       ("anthropic/claude-sonnet-4.5", "claude-sonnet-4-5"),
-      ("claude-opus-4-1@20250805", "claude-opus-4-1"),
+      ("claude-opus-4-1@20250805", "claude-opus-4-1-20250805"),
+      ("claude-3-7-sonnet@20250219", "claude-3-7-sonnet-20250219"),
+      ("claude-sonnet-4@20250514", "claude-sonnet-4-20250514"),
+      ("anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4-20250514"),
       ("openai/gpt-6-astra", "gpt-6-astra"),
       ("gpt-5.6-sol", "gpt-5.6-sol"),
       ("google/gemini-4-argon", "gemini-4-argon"),

@@ -190,7 +190,16 @@ fn lookup<'a>(
   day: Option<Date>,
 ) -> Option<&'a Price> {
   let model = ALIASES.iter().find(|x| x.0 == model).map_or(model, |x| x.1);
-  p.catalogs().iter().find_map(|x| pick(catalog.get(*x)?.get(model)?, day))
+  let find =
+    |model: &str| p.catalogs().iter().find_map(|x| pick(catalog.get(*x)?.get(model)?, day));
+  // pi names a model by its date (`claude-opus-4-1-20250805`) where the catalog may know only
+  // its undated id.
+  let undated = || {
+    let (id, date) = model.rsplit_once('-')?;
+    (p == Provider::Pi && date.len() == 8 && date.bytes().all(|c| c.is_ascii_digit()))
+      .then(|| find(id))?
+  };
+  find(model).or_else(undated)
 }
 
 fn pick(prices: &[Price], day: Option<Date>) -> Option<&Price> {
@@ -345,6 +354,14 @@ mod tests {
     let gpt = lookup(&catalog, Provider::Codex, "gpt-5.4", day).unwrap();
     assert_eq!(lookup(&catalog, Provider::Pi, "gpt-5.4", day), Some(gpt));
     assert_eq!(lookup(&catalog, Provider::Claude, "gpt-5.4", day), None);
+
+    // Vertex's dated ids from the catalog, by their date or else without it.
+    for id in ["claude-3-7-sonnet-20250219", "claude-sonnet-4-20250514"] {
+      assert!(lookup(&catalog, Provider::Pi, id, day).is_some(), "{id}");
+    }
+    let opus = lookup(&catalog, Provider::Pi, "claude-opus-4-6", day);
+    assert_eq!(lookup(&catalog, Provider::Pi, "claude-opus-4-6-20990101", day), opus);
+    assert_eq!(lookup(&catalog, Provider::Claude, "claude-opus-4-6-20990101", day), None);
   }
 
   #[test]
