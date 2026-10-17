@@ -225,7 +225,7 @@ pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
   let source =
     |x: &str| by_path.get(x).copied().or_else(|| by_name.get(base(x)).copied().flatten());
   // A lineage is named by its oldest ancestor, a session file or a gone one; the depth counts the
-  // forks down from it.
+  // forks down from it, the top is its oldest session left.
   let lineage = |i: usize| {
     let (mut at, mut depth) = (i, 0);
     while depth < files.len() {
@@ -233,23 +233,26 @@ pub fn parse(roots: &[PathBuf]) -> Vec<Session> {
       match source(parent) {
         Some(j) if j != at => (at, depth) = (j, depth + 1),
         Some(_) => break,
-        None => return (format!("gone {}", base(parent)), depth + 1, true),
+        None => return (format!("gone {}", base(parent)), depth + 1, true, at),
       }
     }
-    (format!("file {at}"), depth, false)
+    (format!("file {at}"), depth, false, at)
   };
-  let lineages: Vec<(String, usize, bool)> = (0..parsed.len()).map(lineage).collect();
-  // Sources before their forks whatever their headers' times say, forks of gone sessions last.
+  let lineages: Vec<(String, usize, bool, usize)> = (0..parsed.len()).map(lineage).collect();
+  // Sources before their forks whatever their headers' times say. Forks of gone sessions come last,
+  // in pieces by when the oldest session left of each was created: a piece cut off further down a
+  // lineage (a → b → c → d → e with a and d gone: b and c, then e) holds later copies.
+  let created = |i: usize| (parsed[i].created.is_none(), parsed[i].created);
   let mut order: Vec<usize> = (0..parsed.len()).collect();
   order.sort_by_key(|i| {
-    let (_, depth, gone) = lineages[*i];
-    (gone, depth, parsed[*i].created.is_none(), parsed[*i].created)
+    let (_, depth, gone, top) = lineages[*i];
+    (gone, created(top), depth, created(*i))
   });
   let mut held: HashMap<&str, HashSet<&Key>> = HashMap::new();
   let mut all: HashSet<&Key> = HashSet::new();
   let mut keep: Vec<Vec<bool>> = vec![vec![]; parsed.len()];
   for i in order {
-    let (keys, (root, _, gone)) = (&parsed[i].keys, &lineages[i]);
+    let (keys, (root, _, gone, _)) = (&parsed[i].keys, &lineages[i]);
     let copied = held.entry(root).or_default();
     keep[i] = keys.iter().map(|k| !copied.contains(k) && !(*gone && all.contains(k))).collect();
     copied.extend(keys);
@@ -504,6 +507,13 @@ mod tests {
     let sessions = parse(std::slice::from_ref(&dir));
     let sum = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
     assert_eq!(["a", "b", "c", "e", "y", "z"].map(sum), [100, 200, 300, 900, 50, 100]);
+
+    // a gone too: b, c and e each hold what they added, whatever their depth below a gone session.
+    std::fs::remove_file(dir.join("1_a.jsonl")).unwrap();
+    std::fs::remove_file(dir.join("0_z.jsonl")).unwrap();
+    let sessions = parse(std::slice::from_ref(&dir));
+    let sum = |id: &str| sessions.iter().find(|x| x.id == id).map_or(0, total);
+    assert_eq!(["b", "c", "e"].map(sum), [300, 300, 900]);
     std::fs::remove_dir_all(&dir).unwrap();
   }
 
