@@ -12,9 +12,10 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 ## Scope
 
 - Read history only: never write into `~/.claude`, `~/.codex`, `~/.pi` or `~/.fx`. cctrail writes
-  only under `~/.cache/cctrail` and, on `cctrail export`, to the file the user names, and uses the network only to fetch the price catalog from the
-  `pricing` release: on `cctrail update-pricing`, and in the background when the cached one is a
-  day old (`CCTRAIL_NO_UPDATE=1` turns that off; tests set it).
+  only under `~/.cache/cctrail` and, on `cctrail export`, to the file the user names. It uses the
+  network only to fetch the price catalog from the `pricing` release: on `cctrail update-pricing`,
+  and in the background when the cached one is a day old (`CCTRAIL_NO_UPDATE=1` turns that off;
+  tests set it).
 - Prices are dated: `scripts/pricing-history.py` builds them from the models.dev git history, the
   daily `pricing.yml` workflow publishes them. Price an event at its day's rate, never at today's.
 - Support Claude Code (`~/.claude/projects`, `CLAUDE_CONFIG_DIR`), Codex (`~/.codex/sessions`
@@ -25,9 +26,9 @@ CI the `Makefile` and `.github/workflows/main.yml`.
   code than cctrail uses (`cargo build --timings`). The dependencies are serde/serde_json (history
   and JSON output), toml (config), jiff (local time zones), rayon (parallel parsing), anyhow, ureq
   (`update-pricing`), libc (terminal width), ratatui with only its crossterm backend (the
-  interactive view) and rusqlite with its bundled SQLite (`export`). No clap, table or color crates for the text report: its arguments, tables and
-  ANSI colors are hand-rolled. Change dependencies only with `cargo add` / `cargo remove` /
-  `cargo upgrade`, never by hand.
+  interactive view) and rusqlite with its bundled SQLite (`export`). No clap, table or color crates
+  for the text report: its arguments, tables and ANSI colors are hand-rolled. Change dependencies
+  only with `cargo add` / `cargo remove` / `cargo upgrade`, never by hand.
 - The CLI is what `cctrail --help` shows and the JSON output carries `schema_version`: change
   either only with the person's approval.
 - Run on macOS, Linux and Windows.
