@@ -950,10 +950,19 @@ mod tests {
     let labels = ["Model", "Time", "Tokens", "Cost ↓", "$/h", "$/M", "Share"];
     assert_eq!(cells(&line(&buf, head)), labels, "{out}");
     assert!(app.list.windows(2).all(|w| w[0].cost >= w[1].cost));
-    // Each row's and the total's: its cost over its time and over its tokens.
+    // Each row's: its cost over its time and over its tokens; the total's of the priced rows
+    // alone, an unpriced model's tokens and time left out.
     let dollars = |x: &str| x.trim_start_matches('$').replace(',', "").parse::<f64>().ok();
     let total = find(&buf, "total");
-    let rows = app.list.iter().chain([&app.total]);
+    let priced = app.list.iter().filter(|x| !x.unpriced);
+    let priced = Row {
+      active: Some(priced.clone().map(|x| x.active.unwrap()).sum()),
+      tokens: priced.clone().map(|x| x.tokens).sum(),
+      cost: priced.map(|x| x.cost).sum(),
+      ..Default::default()
+    };
+    assert!(app.list.iter().any(|x| x.unpriced) && priced.tokens < app.total.tokens);
+    let rows = app.list.iter().chain([&priced]);
     for (y, x) in (head + 1..=total).zip(rows) {
       let c = cells(&line(&buf, y));
       let hours = x.active.unwrap() as f64 / 3.6e9;
@@ -981,7 +990,17 @@ mod tests {
     let rates: Vec<f64> = app.list.iter().map(|x| Col::PerHour.of(x)).collect();
     assert!(rates.windows(2).all(|w| w[0] >= w[1]) && *rates.last().unwrap() == -1.0);
     assert_eq!(app.list.last().unwrap().key, "claude-unknown-1");
+    // Filtered to the unpriced model alone, the total has no cost per unit either.
+    press(&mut app, KeyCode::Char('/'));
+    for c in "unknown".chars() {
+      press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(app.list.len() == 1 && app.list[0].unpriced && app.total.tokens > 0);
+    let buf = frame(&app);
+    assert_eq!(cells(&line(&buf, find(&buf, "total")))[4..6], ["–", "–"], "{}", screen_of(&buf));
     // Other tabs never have them.
+    press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('1'));
     assert!(!screen(&app).contains("$/h"));
   }

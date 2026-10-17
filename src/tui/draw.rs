@@ -496,7 +496,9 @@ fn table(
 
   let of = sort.0.share();
   let share = shares(&rows.iter().map(|x| of.of(x)).collect::<Vec<_>>());
-  let cells = |x: &Row, label: &str, share: &str| {
+  // `rated`: the row the costs per unit are of; the total's are of the priced rows alone, as an
+  // unknown cost isn't one of 0.
+  let cells = |x: &Row, rated: &Row, label: &str, share: &str| {
     let dash = || num("–".into(), NONE);
     // Nothing in it (a day, or a period's total): dashes, not zeros.
     let blank = x.tokens == 0 && x.active.unwrap_or(0) == 0;
@@ -507,8 +509,8 @@ fn table(
       Col::Tokens => num(toks(x.tokens), TEXT),
       Col::Cost if x.unpriced => dash(),
       Col::Cost => num(money(x.cost), COST),
-      Col::PerHour => x.per_hour().map_or_else(dash, |v| num(hourly(v), COST)),
-      Col::PerMillion => x.per_million().map_or_else(dash, |v| num(money(v), COST)),
+      Col::PerHour => rated.per_hour().map_or_else(dash, |v| num(hourly(v), COST)),
+      Col::PerMillion => rated.per_million().map_or_else(dash, |v| num(money(v), COST)),
       Col::Sessions => num(x.sessions.map_or(String::new(), |x| x.to_string()), TEXT),
       // An unknown cost has no share of the cost either.
       Col::Share if x.unpriced && of == Col::Cost => dash(),
@@ -516,9 +518,16 @@ fn table(
     };
     TableRow::new(columns.iter().map(|c| cell(c.col)).collect::<Vec<_>>())
   };
-  let lines = rows.iter().zip(&share).map(|(x, s)| cells(x, &x.label, s)).collect();
+  let lines = rows.iter().zip(&share).map(|(x, s)| cells(x, x, &x.label, s)).collect();
   let all = if rows.iter().any(|x| of.of(x) > 0.0) { "100%" } else { "" };
-  let total = cells(total, "total", all);
+  let priced: Vec<&Row> = rows.iter().filter(|x| !x.unpriced).collect();
+  let rated = Row {
+    active: Some(priced.iter().filter_map(|x| x.active).sum()),
+    tokens: priced.iter().map(|x| x.tokens).fold(0, u64::saturating_add),
+    cost: priced.iter().map(|x| x.cost).sum(),
+    ..Default::default()
+  };
+  let total = cells(total, &rated, "total", all);
   grid(f, &columns, lines, total, area, sel, first, hits)
 }
 
