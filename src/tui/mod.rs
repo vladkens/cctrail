@@ -61,7 +61,7 @@ impl Col {
   fn cycle(tab: Tab, sessions: bool) -> &'static [Col] {
     match (tab, sessions) {
       (Tab::Swears, _) => {
-        &[Col::Prompts, Col::Words, Col::Rate, Col::Msgs, Col::PerMsg, Col::Score, Col::Name]
+        &[Col::Prompts, Col::Msgs, Col::PerMsg, Col::Words, Col::Rate, Col::Score, Col::Name]
       }
       (_, true) => &[Col::Time, Col::Tokens, Col::Cost, Col::Sessions, Col::Name],
       (_, false) => &[Col::Time, Col::Tokens, Col::Cost, Col::Name],
@@ -1385,22 +1385,21 @@ mod tests {
       let head = cells(&line(&buf, find(&buf, "Model")));
       assert_eq!(
         head,
-        ["Model", "Msgs", "Words", "per 1k", "% msgs", "per msg", "Score ↓"],
+        ["Model", "Msgs", "% msgs", "per msg", "Words", "per 1k", "Score ↓"],
         "{width}"
       );
-      // By score: `small`'s 10 prompts below `sonnet`'s 100 though more of them swear, `tiny`
-      // without enough prompts last, with dashes.
-      let rows: Vec<Vec<String>> = ["sonnet", "small", "gpt", "tiny", "total"]
-        .iter()
-        .map(|x| cells(&line(&buf, find(&buf, x))))
-        .collect();
-      assert_eq!(rows[0], ["sonnet", "100", "2.0K", "50.0", "50.0%", "2.0", "47.5%"], "{width}");
-      assert_eq!(rows[1], ["small", "10", "100", "300.0", "60.0%", "5.0", "44.4%"], "{width}");
-      assert_eq!(rows[2], ["gpt", "50", "1.5K", "3.3", "10.0%", "1.0", "21.0%"], "{width}");
-      assert_eq!(rows[3], ["tiny", "3", "15", "–", "–", "–", "–"], "{width}");
-      assert_eq!(rows[4], ["total", "163", "3.6K", "39.0", "39.3%", "2.2", "39.3%"], "{width}");
-      let ys: Vec<u16> =
-        ["sonnet", "small", "gpt", "tiny", "total"].iter().map(|x| find(&buf, x)).collect();
+      // By score: `small`'s 10 prompts below `sonnet`'s 100 though more of them swear; the
+      // unknown model and `tiny` without enough prompts last, with dashes.
+      let names = ["sonnet", "small", "gpt", "<unknown>", "tiny", "total"];
+      let rows: Vec<Vec<String>> =
+        names.iter().map(|x| cells(&line(&buf, find(&buf, x)))).collect();
+      assert_eq!(rows[0], ["sonnet", "100", "50.0%", "2.0", "2.0K", "50.0", "47.5"], "{width}");
+      assert_eq!(rows[1], ["small", "10", "60.0%", "5.0", "100", "300.0", "44.3"], "{width}");
+      assert_eq!(rows[2], ["gpt", "50", "10.0%", "1.0", "1.5K", "3.3", "20.9"], "{width}");
+      assert_eq!(rows[3], ["<unknown>", "1", "–", "–", "2", "–", "–"], "{width}");
+      assert_eq!(rows[4], ["tiny", "3", "–", "–", "15", "–", "–"], "{width}");
+      assert_eq!(rows[5], ["total", "164", "39.0%", "2.2", "3.6K", "39.0", "39.0"], "{width}");
+      let ys: Vec<u16> = names.iter().map(|x| find(&buf, x)).collect();
       assert!(ys.windows(2).all(|x| x[0] + 1 == x[1]), "{}", screen_of(&buf));
       // A row of swears opens nothing.
       assert!(!raw(&buf, find(&buf, "Model") - 1).contains("open"));
@@ -1410,12 +1409,12 @@ mod tests {
     // `s` sorts by the next column: after the score the names, then the prompts; `S` reverses it.
     let keys = |app: &App| app.list.iter().map(|x| x.key.clone()).collect::<Vec<_>>();
     press(&mut app, KeyCode::Char('s'));
-    assert_eq!(keys(&app), ["gpt", "small", "sonnet", "tiny"]);
+    assert_eq!(keys(&app), ["unknown", "gpt", "small", "sonnet", "tiny"]);
     press(&mut app, KeyCode::Char('s'));
     assert_eq!(app.sort(), (Col::Prompts, true));
-    assert_eq!(keys(&app), ["sonnet", "gpt", "small", "tiny"]);
+    assert_eq!(keys(&app), ["sonnet", "gpt", "small", "tiny", "unknown"]);
     press(&mut app, KeyCode::Char('S'));
-    assert_eq!(keys(&app), ["tiny", "small", "gpt", "sonnet"]);
+    assert_eq!(keys(&app), ["unknown", "tiny", "small", "gpt", "sonnet"]);
     // The filter totals what it shows, at those rows' own share.
     press(&mut app, KeyCode::Char('/'));
     for c in "s".chars() {
