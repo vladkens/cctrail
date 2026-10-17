@@ -67,6 +67,11 @@ fn money(x: f64) -> String {
   format!("${out}.{frac}")
 }
 
+/// A cost per hour as a cost, without the cents from $100: `$1,560`, `$44.10`.
+fn hourly(x: f64) -> String {
+  if x.round() >= 100.0 { money(x.round()).trim_end_matches(".00").to_string() } else { money(x) }
+}
+
 /// Tokens with one decimal in every unit: `2.4B`, `58.5M`, `12.4K`, `882`.
 fn toks(x: u64) -> String {
   match x {
@@ -462,18 +467,24 @@ fn table(
     column(Col::Tokens, "Tokens", 7),
     column(Col::Cost, "Cost", 10),
   ];
+  // A model's costs per unit: in the models tab and a model's drill-down.
+  if app.tab == Tab::Models {
+    columns.push(column(Col::PerHour, "$/h", 7));
+    columns.push(column(Col::PerMillion, "$/M", 7));
+  }
   if sessions {
     columns.push(column(Col::Sessions, "Sessions", 9));
   }
   columns.push(column(Col::Share, "Share", 6));
-  // Columns go when the names would get too few cells, as macmon's: Sessions first, then Share,
-  // Tokens, Cost; never the sorted one, so a number is never cut.
+  // Columns go when the names would get too few cells, as macmon's: $/M and $/h first, then
+  // Sessions, Share, Tokens, Cost; never the sorted one, so a number is never cut.
   let name_width = |columns: &[Column]| {
     let mut widths: Vec<Constraint> = columns.iter().map(|x| x.width).collect();
     widths.push(Constraint::Length(GUTTER - 1));
     layout(&widths, area)[0].width as usize
   };
-  for col in [Col::Sessions, Col::Share, Col::Tokens, Col::Cost] {
+  let drop = [Col::PerMillion, Col::PerHour, Col::Sessions, Col::Share, Col::Tokens, Col::Cost];
+  for col in drop {
     if name_width(&columns) >= NAME_MIN {
       break;
     }
@@ -485,7 +496,9 @@ fn table(
 
   let of = sort.0.share();
   let share = shares(&rows.iter().map(|x| of.of(x)).collect::<Vec<_>>());
-  let cells = |x: &Row, label: &str, share: &str| {
+  // `rated`: the row the costs per unit are of; the total's are of the priced rows alone, as an
+  // unknown cost isn't one of 0.
+  let cells = |x: &Row, rated: &Row, label: &str, share: &str| {
     let dash = || num("–".into(), NONE);
     // Nothing in it (a day, or a period's total): dashes, not zeros.
     let blank = x.tokens == 0 && x.active.unwrap_or(0) == 0;
@@ -496,6 +509,8 @@ fn table(
       Col::Tokens => num(toks(x.tokens), TEXT),
       Col::Cost if x.unpriced => dash(),
       Col::Cost => num(money(x.cost), COST),
+      Col::PerHour => rated.per_hour().map_or_else(dash, |v| num(hourly(v), COST)),
+      Col::PerMillion => rated.per_million().map_or_else(dash, |v| num(money(v), COST)),
       Col::Sessions => num(x.sessions.map_or(String::new(), |x| x.to_string()), TEXT),
       // An unknown cost has no share of the cost either.
       Col::Share if x.unpriced && of == Col::Cost => dash(),
@@ -503,9 +518,16 @@ fn table(
     };
     TableRow::new(columns.iter().map(|c| cell(c.col)).collect::<Vec<_>>())
   };
-  let lines = rows.iter().zip(&share).map(|(x, s)| cells(x, &x.label, s)).collect();
+  let lines = rows.iter().zip(&share).map(|(x, s)| cells(x, x, &x.label, s)).collect();
   let all = if rows.iter().any(|x| of.of(x) > 0.0) { "100%" } else { "" };
-  let total = cells(total, "total", all);
+  let priced: Vec<&Row> = rows.iter().filter(|x| !x.unpriced).collect();
+  let rated = Row {
+    active: Some(priced.iter().filter_map(|x| x.active).sum()),
+    tokens: priced.iter().map(|x| x.tokens).fold(0, u64::saturating_add),
+    cost: priced.iter().map(|x| x.cost).sum(),
+    ..Default::default()
+  };
+  let total = cells(total, &rated, "total", all);
   grid(f, &columns, lines, total, area, sel, first, hits)
 }
 
@@ -611,10 +633,9 @@ fn timeline(f: &mut Frame, app: &App, area: Rect, hits: &mut Hits) {
   table(f, app, rows, &app.total, true, inner, Some(app.sel()), hits);
 }
 
-/// The model's name without its provider, for the legend.
+/// The model's name without `claude-`, for the legend.
 fn short(key: &str) -> &str {
-  let name = key.split_once('/').map_or(key, |x| x.1);
-  name.strip_prefix("claude-").unwrap_or(name)
+  key.strip_prefix("claude-").unwrap_or(key)
 }
 
 /// The chart box: bars of what `app.bars` picks, a bar per day stacked by model, the dates under
@@ -843,7 +864,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
     ("1 2 3 4", "projects / models / timeline / swears"),
     ("t T", "period: today, week, month, 30 days, all; wraps around"),
     ("↑ ↓", "select a row or a day; wraps around"),
-    ("→ enter", "open: project → models, model → speed and effort, day → projects"),
+    ("→ enter", "open: project → models, model → harness, speed and effort, day → projects"),
     ("← esc ⌫", "back"),
     ("PgUp PgDn", "a page up / down"),
     ("Home End", "the first / last row"),
@@ -855,6 +876,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
       "mouse",
       "click a row, bar or choice to select it, a row or bar again to open it; a header sorts, again reverses; the wheel moves 3 rows",
     ),
+    ("models", "$/h: cost per active hour · $/M: cost per million tokens as paid"),
     ("swears", SWEARS),
     ("?", "this help"),
     ("q", "back; quits from a list"),
@@ -915,6 +937,10 @@ mod tests {
     assert_eq!(money(18080.184), "$18,080.18");
     assert_eq!(money(999.5), "$999.50");
     assert_eq!(money(1234567.0), "$1,234,567.00");
+    assert_eq!(
+      (hourly(1559.6), hourly(44.1), hourly(99.996)),
+      ("$1,560".into(), "$44.10".into(), "$100".into())
+    );
     assert_eq!(toks(2_400_000_000), "2.4B");
     assert_eq!(toks(58_000_000), "58.0M");
     assert_eq!(toks(12_400), "12.4K");

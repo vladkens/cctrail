@@ -37,7 +37,10 @@ pub enum Col {
   Tokens,
   Cost,
   Sessions,
-  /// The sorted column's share, Time's when sorted by name.
+  /// The models' cost per active hour and per million tokens.
+  PerHour,
+  PerMillion,
+  /// The sorted column's share, Time's when sorted by name, Cost's by a cost per unit.
   Share,
   /// The swears tab's: prompts, words typed, % of prompts swearing at the listener, % with any
   /// swearing, score.
@@ -62,6 +65,9 @@ impl Col {
       (Tab::Swears, _) => {
         &[Col::Prompts, Col::Words, Col::Directed, Col::Any, Col::Score, Col::Name]
       }
+      (Tab::Models, _) => {
+        &[Col::Time, Col::Tokens, Col::Cost, Col::PerHour, Col::PerMillion, Col::Name]
+      }
       (_, true) => &[Col::Time, Col::Tokens, Col::Cost, Col::Sessions, Col::Name],
       (_, false) => &[Col::Time, Col::Tokens, Col::Cost, Col::Name],
     }
@@ -78,6 +84,9 @@ impl Col {
       Self::Tokens => x.tokens as f64,
       Self::Cost => x.cost,
       Self::Sessions => x.sessions.unwrap_or(0) as f64,
+      // A cost per unit that can't be told sorts below every other.
+      Self::PerHour => x.per_hour().unwrap_or(-1.0),
+      Self::PerMillion => x.per_million().unwrap_or(-1.0),
       Self::Name | Self::Time | Self::Share => x.active.unwrap_or(0) as f64,
       Self::Prompts => x.prompts as f64,
       Self::Words => x.words as f64,
@@ -90,7 +99,11 @@ impl Col {
 
   /// The column a share is of.
   pub fn share(self) -> Self {
-    if matches!(self, Self::Name | Self::Share) { Self::Time } else { self }
+    match self {
+      Self::Name | Self::Share => Self::Time,
+      Self::PerHour | Self::PerMillion => Self::Cost,
+      _ => self,
+    }
   }
 }
 
@@ -202,7 +215,7 @@ impl App {
       data,
       span: Span::Month,
       prov: None,
-      sorts: [Col::Time.sorted(), Col::Time.sorted(), (Col::Name, true), Col::Score.sorted()],
+      sorts: [Col::Time.sorted(), Col::Cost.sorted(), (Col::Name, true), Col::Score.sorted()],
       bars: Col::Time,
       tab: Tab::Projects,
       sel: [0; 4],
@@ -303,8 +316,8 @@ impl App {
     let parts = match self.tab {
       Tab::Projects => vec![("Model", self.data.models(span, prov, Some(&row.key)))],
       Tab::Models => {
-        let [speed, effort] = self.data.model_usage(span, prov, &row.key);
-        vec![("Speed", speed), ("Effort", effort)]
+        let [harness, speed, effort] = self.data.model_usage(span, prov, &row.key);
+        vec![("Harness", harness), ("Speed", speed), ("Effort", effort)]
       }
       Tab::Timeline => vec![("Project", self.data.bucket_projects(span, prov, day))],
       Tab::Swears => vec![],
@@ -838,15 +851,15 @@ mod tests {
     let d = app.open.as_ref().unwrap();
     let times: i64 = d.rows().into_iter().map(|x| x.active.unwrap()).sum();
     assert_eq!(times, d.row.active.unwrap(), "{out}");
-    let y = find(&buf, "claude/claude-sonnet-5");
-    assert_eq!(fg(&buf, y, "claude/claude-sonnet-5"), Color::Reset);
+    let y = find(&buf, "claude-sonnet-5");
+    assert_eq!(fg(&buf, y, "claude-sonnet-5"), Color::Reset);
     // Backspace goes back; the same model looks the same in the models tab.
     press(&mut app, KeyCode::Backspace);
     assert!(app.open.is_none());
     press(&mut app, KeyCode::Char('2'));
     let buf = frame(&app);
-    let y = find(&buf, "claude/claude-sonnet-5");
-    assert_eq!(fg(&buf, y, "claude/claude-sonnet-5"), Color::Reset);
+    let y = find(&buf, "claude-sonnet-5");
+    assert_eq!(fg(&buf, y, "claude-sonnet-5"), Color::Reset);
     // The help is a box over the screen, without hints under it.
     press(&mut app, KeyCode::Char('?'));
     let buf = frame(&app);
@@ -910,20 +923,86 @@ mod tests {
     let i = app.list.iter().position(|x| x.key == "w/api").unwrap();
     let tokens = app.list[i].tokens as f64 / app.total.tokens as f64 * 100.0;
     assert!((share(first + i as u16) as f64 - tokens).abs() <= 1.0);
-    // By name, the share is of the time; models have no sessions to sort by.
+    // Models open by cost, most first; they have no sessions to sort by, but a cost per hour and
+    // per million tokens.
     press(&mut app, KeyCode::Char('2'));
-    for col in [Col::Tokens, Col::Cost, Col::Name, Col::Time] {
+    assert_eq!(app.sort(), (Col::Cost, true));
+    let order = [Col::PerHour, Col::PerMillion, Col::Name, Col::Time, Col::Tokens, Col::Cost];
+    for col in order {
       press(&mut app, KeyCode::Char('s'));
       assert_eq!(app.sort().0, col);
     }
-    // A model without a price has no cost nor a share of it, both faint.
-    press(&mut app, KeyCode::Char('s'));
-    press(&mut app, KeyCode::Char('s'));
+    // A model without a price has no cost, nor a share of it or a cost per unit, all faint.
     let buf = frame(&app);
     let y = find(&buf, "claude-unknown-1");
-    assert_eq!(cells(&line(&buf, y))[3..], ["–", "–"]);
+    assert_eq!(cells(&line(&buf, y))[3..], ["–", "–", "–", "–"]);
     let x = col(&buf, y, "–");
     assert_eq!((buf[(x, y)].fg, buf[(x, y)].modifier), (Color::Reset, Modifier::DIM));
+  }
+
+  #[test]
+  fn models_show_their_cost_per_hour_and_per_million() {
+    let mut app = many();
+    press(&mut app, KeyCode::Char('2'));
+    let buf = frame(&app);
+    let out = screen_of(&buf);
+    let head = find(&buf, "Model");
+    let labels = ["Model", "Time", "Tokens", "Cost ↓", "$/h", "$/M", "Share"];
+    assert_eq!(cells(&line(&buf, head)), labels, "{out}");
+    assert!(app.list.windows(2).all(|w| w[0].cost >= w[1].cost));
+    // Each row's: its cost over its time and over its tokens; the total's of the priced rows
+    // alone, an unpriced model's tokens and time left out.
+    let dollars = |x: &str| x.trim_start_matches('$').replace(',', "").parse::<f64>().ok();
+    let total = find(&buf, "total");
+    let priced = app.list.iter().filter(|x| !x.unpriced);
+    let priced = Row {
+      active: Some(priced.clone().map(|x| x.active.unwrap()).sum()),
+      tokens: priced.clone().map(|x| x.tokens).sum(),
+      cost: priced.map(|x| x.cost).sum(),
+      ..Default::default()
+    };
+    assert!(app.list.iter().any(|x| x.unpriced) && priced.tokens < app.total.tokens);
+    let rows = app.list.iter().chain([&priced]);
+    for (y, x) in (head + 1..=total).zip(rows) {
+      let c = cells(&line(&buf, y));
+      let hours = x.active.unwrap() as f64 / 3.6e9;
+      if x.unpriced {
+        assert_eq!(c[4..6], ["–", "–"], "{out}");
+        continue;
+      }
+      let (per_hour, per_million) = (dollars(&c[4]).unwrap(), dollars(&c[5]).unwrap());
+      assert!((per_hour - x.cost / hours).abs() <= 0.5, "{out}");
+      assert!((per_million - x.cost / x.tokens as f64 * 1e6).abs() <= 0.005, "{out}");
+      assert_eq!(c[5].split_once('.').map(|x| x.1.len()), Some(2), "{out}");
+    }
+    // When narrow, $/M goes first, then $/h, before the share.
+    for (width, kept) in
+      [(84, &["$/h", "$/M", "Share"][..]), (80, &["$/h", "Share"]), (72, &["Share"])]
+    {
+      let buf = frame_of(&app, width, 30);
+      let labels = cells(&line(&buf, find(&buf, "Model")));
+      let labels: Vec<&str> = labels.iter().skip(4).map(|x| x.as_str()).collect();
+      assert_eq!(labels, kept, "{width}");
+    }
+    // Sorted by either, the models that can't be told go last.
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.sort(), (Col::PerHour, true));
+    let rates: Vec<f64> = app.list.iter().map(|x| Col::PerHour.of(x)).collect();
+    assert!(rates.windows(2).all(|w| w[0] >= w[1]) && *rates.last().unwrap() == -1.0);
+    assert_eq!(app.list.last().unwrap().key, "claude-unknown-1");
+    // Filtered to the unpriced model alone, the total has no cost per unit either.
+    press(&mut app, KeyCode::Char('/'));
+    for c in "unknown".chars() {
+      press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(app.list.len() == 1 && app.list[0].unpriced && app.total.tokens > 0);
+    let buf = frame(&app);
+    assert_eq!(cells(&line(&buf, find(&buf, "total")))[4..6], ["–", "–"], "{}", screen_of(&buf));
+    // Other tabs never have them.
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('1'));
+    assert!(!screen(&app).contains("$/h"));
   }
 
   #[test]
@@ -1027,7 +1106,7 @@ mod tests {
     let mut app = app();
     press(&mut app, KeyCode::Enter);
     let out = screen(&app);
-    assert!(out.contains("claude/claude-sonnet-5") && out.contains(data::tests::REPO), "{out}");
+    assert!(out.contains("claude-sonnet-5") && out.contains(data::tests::REPO), "{out}");
     let models = app.open.as_ref().unwrap().rows().len();
     press(&mut app, KeyCode::Down);
     assert_eq!(app.osel, 1.min(models - 1));
@@ -1041,7 +1120,7 @@ mod tests {
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Char('p'));
     let open = app.open.as_ref().unwrap();
-    assert!(open.rows().into_iter().all(|x| x.key.starts_with("codex/")));
+    assert!(open.rows().into_iter().all(|x| x.key.starts_with("gpt-")));
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Char('p'));
     press(&mut app, KeyCode::Char('p'));
@@ -1049,30 +1128,34 @@ mod tests {
     assert!(app.open.is_none());
 
     press(&mut app, KeyCode::Char('2'));
-    assert!(screen(&app).contains("codex/gpt-5.4"));
+    assert!(screen(&app).contains("gpt-5.4"));
     press(&mut app, KeyCode::Enter);
     let out = screen(&app);
-    assert!(out.contains("Speed") && out.contains("Effort") && out.contains("standard"), "{out}");
+    assert!(out.contains("Harness") && out.contains("Speed") && out.contains("Effort"), "{out}");
+    assert!(out.contains("standard"), "{out}");
     press(&mut app, KeyCode::Char('3'));
     assert!(app.list.iter().all(|x| x.day.is_some()));
   }
 
   #[test]
-  fn a_model_shows_its_speeds_and_efforts() {
+  fn a_model_shows_its_harnesses_speeds_and_efforts() {
     let mut app = many();
     press(&mut app, KeyCode::Char('2'));
     // One row per model: fast and standard together.
     assert_eq!(app.list.iter().filter(|x| x.key.contains("gpt-5.4")).count(), 1);
-    app.sel[1] = app.list.iter().position(|x| x.key == "codex/gpt-5.4").unwrap();
+    app.sel[1] = app.list.iter().position(|x| x.key == "gpt-5.4").unwrap();
     press(&mut app, KeyCode::Enter);
     let buf = frame(&app);
     let out = screen_of(&buf);
-    // A speed table and an effort table, each totalling the model.
-    let (speed, effort) = (find(&buf, "Speed"), find(&buf, "Effort"));
-    assert!(speed < effort && !out.contains("w/api"), "{out}");
+    // A harness, a speed and an effort table, each totalling the model.
+    let (harness, speed, effort) =
+      (find(&buf, "Harness"), find(&buf, "Speed"), find(&buf, "Effort"));
+    assert!(harness < speed && speed < effort && !out.contains("w/api"), "{out}");
     let names = |from: u16, to: u16| {
       (from + 1..to).map(|y| cells(&line(&buf, y))[0].clone()).collect::<Vec<_>>()
     };
+    assert_eq!(names(harness, speed - 2), ["codex"], "{out}");
+    assert!(line(&buf, harness).contains("$/h") && line(&buf, effort).contains("$/M"), "{out}");
     let mut speeds = names(speed, effort - 2);
     speeds.sort();
     assert_eq!(speeds, ["fast", "standard"], "{out}");
@@ -1082,13 +1165,13 @@ mod tests {
     assert_eq!(efforts, ["high", "low"], "{out}");
     let model = crate::output::duration(app.open.as_ref().unwrap().row.active.unwrap());
     assert_eq!(cells(&line(&buf, total))[1], model);
-    // The selection goes through both tables.
+    // The selection goes through all the tables.
     press(&mut app, KeyCode::End);
-    assert_eq!(app.osel, 3);
+    assert_eq!(app.osel, 4);
     assert!(line(&frame(&app), total - 1).trim_start().starts_with('▶'));
     // An effort that isn't logged reads `–`.
     press(&mut app, KeyCode::Esc);
-    app.sel[1] = app.list.iter().position(|x| x.key == "claude/claude-unknown-1").unwrap();
+    app.sel[1] = app.list.iter().position(|x| x.key == "claude-unknown-1").unwrap();
     press(&mut app, KeyCode::Enter);
     let buf = frame(&app);
     assert_eq!(cells(&line(&buf, find(&buf, "Effort") + 1))[0], "–");
@@ -1560,16 +1643,16 @@ mod tests {
   fn a_drill_down_scrolls_to_the_selected_table() {
     let mut app = many();
     press(&mut app, KeyCode::Char('2'));
-    app.sel[1] = app.list.iter().position(|x| x.key == "codex/gpt-5.4").unwrap();
+    app.sel[1] = app.list.iter().position(|x| x.key == "gpt-5.4").unwrap();
     press(&mut app, KeyCode::Enter);
-    // Too low for both tables: the selection in the effort table brings it into view.
+    // Too low for all the tables: the selection in the effort table brings it into view.
     press(&mut app, KeyCode::End);
     let buf = frame_of(&app, 100, 12);
     let out = screen_of(&buf);
     assert!(out.contains("Effort") && out.contains(" ▶ "), "{out}");
     press(&mut app, KeyCode::Home);
     let out = screen_of(&frame_of(&app, 100, 12));
-    assert!(out.contains("Speed") && out.contains(" ▶ "), "{out}");
+    assert!(out.contains("Harness") && out.contains(" ▶ "), "{out}");
   }
 
   #[test]

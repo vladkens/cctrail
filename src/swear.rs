@@ -61,10 +61,11 @@ fn normalize(text: &str) -> String {
   text.to_lowercase().replace('ё', "е")
 }
 
-/// What the user typed in a prompt, without what looks pasted: no harness marks a paste in the
-/// history (Claude Code only in its own `history.jsonl`, and not for every prompt), so code in
-/// backticks, quoted lines (`> `) and runs of `PASTED_LINES` lines that aren't prose go. Typed or
-/// dictated words are prose, usually one long line.
+/// What the user typed in a prompt, without what looks pasted: code in backticks, quoted lines
+/// (`> `) and runs of `PASTED_LINES` lines that aren't prose go. Typed or dictated words are prose,
+/// usually one long line. Harness paste markers (Claude Code's `[Pasted text #N]`,
+/// `pastedContents` in `history.jsonl`) are deliberately not used: dictation tools insert text
+/// through the clipboard, so dictated prompts arrive marked as pastes and would be dropped.
 fn typed(text: &str) -> String {
   let mut lines: Vec<&str> = vec![];
   let mut fenced = false;

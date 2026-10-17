@@ -87,12 +87,26 @@ impl Row {
   pub fn any_share(&self) -> Option<f64> {
     self.share(self.swearing)
   }
+
+  /// Cost per active hour: none under a minute of time, with no cost or an unknown one.
+  pub fn per_hour(&self) -> Option<f64> {
+    let micros = self.active.unwrap_or(0);
+    let known = !self.unpriced && self.cost > 0.0 && micros >= 60 * MICROS;
+    known.then(|| self.cost / micros as f64 * 3600.0 * MICROS as f64)
+  }
+
+  /// Cost per million tokens as paid, cache, fast and effort included: none without tokens or with
+  /// an unknown cost.
+  pub fn per_million(&self) -> Option<f64> {
+    (!self.unpriced && self.tokens > 0).then(|| self.cost / self.tokens as f64 * 1e6)
+  }
 }
 
-/// Time per project, model, speed and effort, for one span and provider.
+/// Time per project, harness, model, speed and effort, for one span and provider.
 type Times = HashMap<Part, i64>;
-/// A project, a model, whether fast, an effort (`UNKNOWN` where none is logged).
-type Part = (String, String, bool, String);
+/// A project, a harness, a model as logged, whether fast, an effort (`UNKNOWN` where none is
+/// logged).
+type Part = (String, Provider, String, bool, String);
 /// Each timeline bucket's models.
 pub type Buckets = HashMap<Date, Vec<Row>>;
 /// A value with the span and provider it is for.
@@ -191,13 +205,9 @@ impl Data {
       if !range.contains(x.ts) {
         continue;
       }
-      let key = x.model.as_deref().unwrap_or(UNKNOWN);
-      // A model's name, which an unknown model lacks.
-      let new = |k: &String| Row {
-        label: if k == UNKNOWN { "<unknown>".into() } else { k.clone() },
-        ..row_of(k)
-      };
-      for row in [rows.entry(key.to_string()).or_insert_with_key(new), &mut total] {
+      let key = model_key(x.model.as_deref().unwrap_or(UNKNOWN));
+      let new = |k: &String| Row { label: model_label(k), ..row_of(k) };
+      for row in [rows.entry(key).or_insert_with_key(new), &mut total] {
         row.prompts += 1;
         row.words += u64::from(x.words);
         row.directed += u64::from(x.directed);
@@ -213,29 +223,38 @@ impl Data {
     (rows, total)
   }
 
-  /// Models, fast and standard together, with their time; within a project or of everything.
+  /// Models by name, every harness, fast and standard together, with their time; within a
+  /// project or of everything.
   pub fn models(&self, span: Span, prov: Option<Provider>, project: Option<&str>) -> Vec<Row> {
     let keep = |si: usize, _: &Event| project.is_none_or(|p| self.names[si].0 == p);
-    let rows = self.usage(span, prov, keep, |s, e| model_key(s.provider, model(e)));
+    let rows = self.usage(span, prov, keep, |_, e| model_key(model(e)));
     let times = self.times(span, prov);
     let mine = times.iter().filter(|x| project.is_none_or(|p| p == x.0.0));
-    timed(rows, mine.map(|(k, v)| (k.1.clone(), *v)))
+    let mut rows = timed(rows, mine.map(|(k, v)| (model_key(&k.2), *v)));
+    for x in &mut rows {
+      x.label = model_label(&x.key);
+    }
+    rows
   }
 
-  /// A model's use by speed (standard, fast) and by effort (as logged, `–` where it isn't).
-  pub fn model_usage(&self, span: Span, prov: Option<Provider>, key: &str) -> [Vec<Row>; 2] {
-    let keep = |si: usize, e: &Event| model_key(self.sessions[si].provider, model(e)) == key;
-    let speed = |e: &Event| if is_fast(e) { "fast" } else { "standard" }.to_string();
-    let effort = |e: &Event| e.effort.clone().unwrap_or(UNKNOWN.into());
+  /// A model's use by harness, by speed (standard, fast) and by effort (as logged, `–` where it
+  /// isn't).
+  pub fn model_usage(&self, span: Span, prov: Option<Provider>, key: &str) -> [Vec<Row>; 3] {
+    let keep = |_: usize, e: &Event| model_key(model(e)) == key;
+    let speed = |fast: bool| if fast { "fast" } else { "standard" }.to_string();
     let times = self.times(span, prov);
     let by = |part: &dyn Fn(&Part) -> String, rows: Vec<Row>| {
-      let mine = times.iter().filter(|x| x.0.1 == key);
+      let mine = times.iter().filter(|x| model_key(&x.0.2) == key);
       timed(rows, mine.map(|(k, v)| (part(k), *v)))
     };
-    let speeds = self.usage(span, prov, keep, |_, e| speed(e));
-    let efforts = self.usage(span, prov, keep, |_, e| effort(e));
-    let fast = |k: &Part| if k.2 { "fast" } else { "standard" }.to_string();
-    [by(&fast, speeds), by(&|k: &Part| k.3.clone(), efforts)]
+    let harnesses = self.usage(span, prov, keep, |s, _| s.provider.name().to_string());
+    let speeds = self.usage(span, prov, keep, |_, e| speed(is_fast(e)));
+    let efforts = self.usage(span, prov, keep, |_, e| e.effort.clone().unwrap_or(UNKNOWN.into()));
+    [
+      by(&|k| k.1.name().to_string(), harnesses),
+      by(&|k| speed(k.3), speeds),
+      by(&|k| k.4.clone(), efforts),
+    ]
   }
 
   /// Tokens and cost of the events `keep` takes in the span, per `key`; `UNKNOWN` reads `–`.
@@ -262,10 +281,10 @@ impl Data {
     rows.into_values().collect()
   }
 
-  /// Active time split within each project between its models, speeds and efforts, summing to
-  /// the project's time: each activity stamp belongs to the session's last response (its first
-  /// one before any), simultaneous time is divided as between projects, and each project's parts
-  /// are scaled to its time. Kept for the last span and provider.
+  /// Active time split within each project between its harnesses, models, speeds and efforts,
+  /// summing to the project's time: each activity stamp belongs to the session's last response (its
+  /// first one before any), simultaneous time is divided as between projects, and each project's
+  /// parts are scaled to its time. Kept for the last span and provider.
   fn times(&self, span: Span, prov: Option<Provider>) -> std::cell::Ref<'_, Times> {
     let fresh = self.times.borrow().as_ref().is_some_and(|x| x.0 == (span, prov));
     if !fresh {
@@ -293,39 +312,29 @@ impl Data {
       }
       let part = |e: &Event| {
         let effort = e.effort.as_deref().unwrap_or(UNKNOWN);
-        // A failed response answered nothing, cache warming ran unattended: the time stays with
-        // the model before it.
-        e.model
-          .as_ref()
-          .filter(|_| e.active())
-          .map(|_| format!("{}\0{}\0{effort}", model_key(s.provider, model(e)), is_fast(e)))
+        named(e).map(|m| format!("{}\0{effort}\0{m}", is_fast(e)))
       };
       // A session that names no model is the unknown one, as its usage is.
-      let unknown = || format!("{}\0false\0{UNKNOWN}", model_key(s.provider, "unknown"));
+      let unknown = || format!("false\0{UNKNOWN}\0{UNKNOWN}");
       let mut last = s.events.iter().find_map(part).unwrap_or_else(unknown);
-      let project = &self.names[si].0;
+      let (prov, project) = (s.provider.name(), &self.names[si].0);
       for e in &s.events {
         last = part(e).unwrap_or(last);
         if let Some(ts) = e.ts.filter(|x| e.active() && (!range.bounded() || range.contains(*x))) {
-          stamps.entry(format!("{project}\0{last}")).or_default().push(ts);
+          stamps.entry(format!("{prov}\0{project}\0{last}")).or_default().push(ts);
         }
       }
     }
     let by: HashMap<&str, Vec<Ts>> = stamps.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-    let mut per: HashMap<&str, Vec<(String, i64)>> = HashMap::new();
+    let mut per: HashMap<String, Vec<(Part, i64)>> = HashMap::new();
     for (k, v) in metrics::active_by_name(&by, &range) {
-      let (project, part) = k.split_once('\0').unwrap();
-      per.entry(project).or_default().push((part.to_string(), v));
+      let Some(part) = part_of(k) else { continue };
+      per.entry(part.0.clone()).or_default().push((part, v));
     }
     let mut out = Times::new();
     for (project, parts) in per {
-      let total = totals.get(project).copied().unwrap_or(0);
-      for (part, v) in scale(parts, total) {
-        let mut x = part.splitn(3, '\0');
-        let (model, fast, effort) = (x.next().unwrap(), x.next().unwrap(), x.next().unwrap());
-        let key = (project.to_string(), model.to_string(), fast == "true", effort.to_string());
-        out.insert(key, v * MICROS);
-      }
+      let total = totals.get(&project).copied().unwrap_or(0);
+      out.extend(scale(parts, total).into_iter().map(|(k, v)| (k, v * MICROS)));
     }
     out
   }
@@ -390,8 +399,8 @@ impl Data {
     if self.rank.borrow().is_none() {
       let mut tokens: HashMap<String, u64> = HashMap::new();
       for (si, ei) in self.events(None) {
-        let (s, e) = (&self.sessions[si], &self.sessions[si].events[ei]);
-        let t = tokens.entry(model_key(s.provider, model(e))).or_default();
+        let e = &self.sessions[si].events[ei];
+        let t = tokens.entry(model_key(model(e))).or_default();
         *t = t.saturating_add(e.usage.unwrap_or_default().total());
       }
       let mut rank: Vec<(String, u64)> = tokens.into_iter().collect();
@@ -419,22 +428,21 @@ impl Data {
     for (si, ei) in self.events(prov) {
       let (s, e) = (&self.sessions[si], &self.sessions[si].events[ei]);
       let Some(ts) = e.ts.filter(|x| range.contains(*x)) else { continue };
-      let key = model_key(s.provider, model(e));
+      let key = model_key(model(e));
       let row = out.entry(bucket(ts)).or_default().entry(key).or_insert_with_key(|k| row_of(k));
       let usage = e.usage.unwrap_or_default();
       row.tokens = row.tokens.saturating_add(usage.total());
       row.cost += pricing::cost(s.provider, e);
     }
-    // Activity stamps, as the timeline counts them, to the model of the session's last response,
-    // as in `model_times`; the windows cut at midnight, so a day gets the part of a window from
-    // the day before.
+    // Activity stamps, as the timeline counts them, to the harness and model of the session's
+    // last response, as in `model_times`, folded into the model's name after; the windows cut at
+    // midnight, so a day gets the part of a window from the day before.
     let counted = self.counted(span, prov);
     let mut stamps: HashMap<String, Vec<Ts>> = HashMap::new();
     for s in self.sessions.iter().filter(|s| prov.is_none_or(|p| s.provider == p)) {
-      let key = |e: &Event| {
-        e.model.as_ref().filter(|_| e.active()).map(|_| model_key(s.provider, model(e)))
-      };
-      let mut last = s.events.iter().find_map(key).unwrap_or(model_key(s.provider, "unknown"));
+      let key = |e: &Event| named(e).map(|m| format!("{}\0{m}", s.provider.name()));
+      let unknown = || format!("{}\0{UNKNOWN}", s.provider.name());
+      let mut last = s.events.iter().find_map(key).unwrap_or_else(unknown);
       for e in &s.events {
         last = key(e).unwrap_or(last);
         if let Some(ts) = e.ts.filter(|x| e.active() && counted(s, *x)) {
@@ -443,9 +451,10 @@ impl Data {
       }
     }
     let mut per: HashMap<Date, HashMap<String, i64>> = HashMap::new();
-    for ((model, day), micros) in by_name_and_day(&stamps) {
+    for ((name, day), micros) in by_name_and_day(&stamps) {
+      let Some((_, model)) = name.split_once('\0') else { continue };
       if range.contains_day(day) {
-        *per.entry(gran.bucket(day)).or_default().entry(model).or_default() += micros;
+        *per.entry(gran.bucket(day)).or_default().entry(model_key(model)).or_default() += micros;
       }
     }
     let per = per
@@ -638,12 +647,12 @@ fn timed(mut rows: Vec<Row>, times: impl Iterator<Item = (String, i64)>) -> Vec<
 }
 
 /// Seconds per name scaled to sum to `total`; the largest remainders get the rest.
-fn scale(parts: Vec<(String, i64)>, total: i64) -> HashMap<String, i64> {
+fn scale<K: Ord + std::hash::Hash>(parts: Vec<(K, i64)>, total: i64) -> HashMap<K, i64> {
   let sum: i64 = parts.iter().map(|x| x.1).sum();
   if sum == 0 {
     return parts.into_iter().map(|(k, _)| (k, 0)).collect();
   }
-  let mut out: Vec<(String, i64, i64)> = parts
+  let mut out: Vec<(K, i64, i64)> = parts
     .into_iter()
     .map(|(k, v)| {
       let x = v as i128 * total as i128;
@@ -660,7 +669,8 @@ fn scale(parts: Vec<(String, i64)>, total: i64) -> HashMap<String, i64> {
 
 const MICROS: i64 = 1_000_000;
 
-/// The effort of turns that log none; it reads `–`.
+/// The model of sessions and the effort of turns that log none; it reads `–`, `<unknown>` as a
+/// model.
 const UNKNOWN: &str = "unknown";
 
 /// An event counts in a span as `stats_by` counts it: by its day, and always for all time, even
@@ -674,11 +684,36 @@ fn is_fast(e: &Event) -> bool {
 }
 
 fn model(e: &Event) -> &str {
-  e.model.as_deref().unwrap_or("unknown")
+  e.model.as_deref().unwrap_or(UNKNOWN)
 }
 
-pub fn model_key(provider: Provider, model: &str) -> String {
-  format!("{}/{model}", provider.name())
+/// The model an event's time goes to: none for a failed response, which answered nothing, for
+/// cache warming, which ran unattended, or for Claude Code's own messages (an interruption, an
+/// error), which name the model `<synthetic>`; their time stays with the model before.
+fn named(e: &Event) -> Option<&str> {
+  e.model.as_deref().filter(|x| e.active() && *x != "<synthetic>")
+}
+
+/// A model's row: its name without a date at the end (`claude-sonnet-4-5-20250929`), so one
+/// model is one row in every harness. Usage is priced per event, by the name as logged.
+fn model_key(model: &str) -> String {
+  let (name, date) = model.rsplit_once('-').unwrap_or((model, ""));
+  let dated = !name.is_empty() && date.len() == 8 && date.bytes().all(|x| x.is_ascii_digit());
+  if dated { name } else { model }.to_string()
+}
+
+/// A model's name, which an unknown model lacks.
+fn model_label(key: &str) -> String {
+  if key == UNKNOWN { "<unknown>".into() } else { key.to_string() }
+}
+
+/// The part a `model_times` stamp encodes: `harness\0project\0fast\0effort\0model`, the model last,
+/// as logged.
+fn part_of(key: &str) -> Option<Part> {
+  let mut x = key.splitn(5, '\0');
+  let prov = Provider::parse(x.next()?)?;
+  let (project, fast, effort, model) = (x.next()?, x.next()?, x.next()?, x.next()?);
+  Some((project.to_string(), prov, model.to_string(), fast == "true", effort.to_string()))
 }
 
 fn label(day: Date, gran: Granularity) -> String {
@@ -853,6 +888,18 @@ pub mod tests {
   }
 
   #[test]
+  fn costs_per_unit_need_time_tokens_and_a_price() {
+    let row =
+      Row { active: Some(1800 * MICROS), tokens: 2_000_000, cost: 3.0, ..Default::default() };
+    let rates = |x: Row| (x.per_hour(), x.per_million());
+    assert_eq!(rates(row.clone()), (Some(6.0), Some(1.5)));
+    assert_eq!(rates(Row { active: Some(59 * MICROS), ..row.clone() }), (None, Some(1.5)));
+    assert_eq!(rates(Row { cost: 0.0, ..row.clone() }), (None, Some(0.0)));
+    assert_eq!(rates(Row { tokens: 0, ..row.clone() }), (Some(6.0), None));
+    assert_eq!(rates(Row { unpriced: true, ..row }), (None, None));
+  }
+
+  #[test]
   fn totals_match_the_report() {
     let data = data();
     let (rows, total) = data.projects(Span::All, None, false);
@@ -873,8 +920,8 @@ pub mod tests {
   fn drills_into_projects_models_and_days() {
     let data = data();
     let models = data.models(Span::All, None, Some("oss/demo"));
-    assert!(models.iter().any(|x| x.key == "claude/claude-sonnet-5"));
-    let [speeds, _] = data.model_usage(Span::All, None, "claude/claude-sonnet-5");
+    assert!(models.iter().any(|x| x.key == "claude-sonnet-5"));
+    let [_, speeds, _] = data.model_usage(Span::All, None, "claude-sonnet-5");
     assert_eq!(speeds.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), ["standard"]);
 
     let days = data.timeline(Span::All, None, Some("oss/demo"));
@@ -894,7 +941,7 @@ pub mod tests {
     let (_, total) = data.projects(Span::All, None, false);
     let models = data.models(Span::All, None, None);
     assert_eq!(models.iter().map(|x| x.tokens).sum::<u64>(), total.tokens);
-    let model = models.iter().find(|x| x.key == "claude/claude-sonnet-5").unwrap();
+    let model = models.iter().find(|x| x.key == "claude-sonnet-5").unwrap();
     for part in data.model_usage(Span::All, None, &model.key) {
       assert_eq!(part.iter().map(|x| x.tokens).sum::<u64>(), model.tokens);
     }
@@ -919,24 +966,27 @@ pub mod tests {
     for p in projects.iter().filter(|x| !x.key.is_empty()) {
       assert_eq!(time(&data.models(Span::All, None, Some(&p.key))), p.active.unwrap(), "{}", p.key);
     }
-    // One row per model, fast and standard together; its speeds and efforts add up to it.
-    let gpt = models.iter().filter(|x| x.key.starts_with("codex/gpt-5.4")).count();
+    // One row per model, fast and standard together; its harnesses, speeds and efforts add up to
+    // it.
+    let gpt = models.iter().filter(|x| x.key.starts_with("gpt-5.4")).count();
     assert_eq!(gpt, 1);
     for m in &models {
       for part in data.model_usage(Span::All, None, &m.key) {
         assert_eq!(time(&part), m.active.unwrap(), "{}", m.key);
+        assert_eq!(part.iter().map(|x| x.tokens).sum::<u64>(), m.tokens, "{}", m.key);
         let cost: f64 = part.iter().map(|x| x.cost).sum();
         assert!((cost - m.cost).abs() < 1e-9, "{}", m.key);
       }
     }
-    let [speeds, efforts] = data.model_usage(Span::All, None, "codex/gpt-5.4");
+    let [harnesses, speeds, efforts] = data.model_usage(Span::All, None, "gpt-5.4");
+    assert_eq!(harnesses.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(), ["codex"]);
     let mut keys: Vec<_> = speeds.iter().map(|x| x.key.as_str()).collect();
     keys.sort();
     assert_eq!(keys, ["fast", "standard"]);
     let mut keys: Vec<_> = efforts.iter().map(|x| x.label.as_str()).collect();
     keys.sort();
     assert_eq!(keys, ["high", "low"]);
-    let [_, efforts] = data.model_usage(Span::All, None, "claude/claude-unknown-1");
+    let [_, _, efforts] = data.model_usage(Span::All, None, "claude-unknown-1");
     let unknown: Vec<_> = efforts.iter().map(|x| (x.key.as_str(), x.label.as_str())).collect();
     assert_eq!(unknown, [("unknown", "–")]);
   }
@@ -977,7 +1027,7 @@ pub mod tests {
     assert_eq!(total.active, Some(10 * 60_000_000));
     let models = data.models(Span::Today, None, None);
     assert_eq!(minutes(&models), 10, "{models:?}");
-    for part in data.model_usage(Span::Today, None, "claude/a") {
+    for part in data.model_usage(Span::Today, None, "a") {
       assert_eq!(minutes(&part), 5, "{part:?}");
     }
   }
@@ -987,7 +1037,8 @@ pub mod tests {
     let s = session("s", &[(600, None, 10), (602, None, 10)]);
     let data = data_with(vec![s], jiff::civil::date(2026, 1, 8));
     let models = data.models(Span::All, None, None);
-    assert_eq!(models.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), ["claude/unknown"]);
+    let names: Vec<_> = models.iter().map(|x| (x.key.as_str(), x.label.as_str())).collect();
+    assert_eq!(names, [(UNKNOWN, "<unknown>")]);
     assert_eq!(minutes(&models), 7);
     let days = data.bucket_models(Span::Days30, None);
     assert_eq!(minutes(days.values().next().unwrap()), 7);
@@ -1013,7 +1064,7 @@ pub mod tests {
     let day = &models[&jiff::civil::date(2026, 1, 8)];
     let of =
       |key: &str| day.iter().find(|x| x.key == key).map_or(0, |x| minutes(std::slice::from_ref(x)));
-    assert_eq!((of("claude/a"), of("claude/b")), (4, 5), "{day:?}");
+    assert_eq!((of("a"), of("b")), (4, 5), "{day:?}");
   }
 
   #[test]
@@ -1040,11 +1091,10 @@ pub mod tests {
     };
     let models = times(data.models(Span::All, None, None));
     assert!(
-      models.contains(&("claude/a".into(), 9))
-        && !models.iter().any(|x| x.0 == "claude/b" && x.1 > 0),
+      models.contains(&("a".into(), 9)) && !models.iter().any(|x| x.0 == "b" && x.1 > 0),
       "{models:?}"
     );
-    let [_, effort] = data.model_usage(Span::All, None, "claude/a");
+    let [_, _, effort] = data.model_usage(Span::All, None, "a");
     assert_eq!(times(effort).iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["high"]);
     let days = data.bucket_models(Span::Month, None);
     let keys: Vec<(&str, i64)> = days
@@ -1052,10 +1102,64 @@ pub mod tests {
       .flatten()
       .map(|x| (x.key.as_str(), x.active.unwrap_or(0) / 60_000_000))
       .collect();
-    assert!(
-      keys.contains(&("claude/a", 9)) && !keys.iter().any(|x| x.0 == "claude/b" && x.1 > 0),
-      "{keys:?}"
-    );
+    assert!(keys.contains(&("a", 9)) && !keys.iter().any(|x| x.0 == "b" && x.1 > 0), "{keys:?}");
+  }
+
+  #[test]
+  fn merges_a_model_across_harnesses() {
+    // Claude Code on `claude-sonnet-5` at 10:00, pi on its dated id at 12:00.
+    let (undated, dated) = (Some("claude-sonnet-5"), Some("claude-sonnet-5-20260101"));
+    let claude = session("c", &[(600, undated, 1000), (603, undated, 1000)]);
+    let mut pi = session("p", &[(720, dated, 500), (722, dated, 500), (724, None, 0)]);
+    pi.provider = Provider::Pi;
+    let data = data_with(vec![claude, pi], jiff::civil::date(2026, 1, 10));
+    let (_, total) = data.projects(Span::All, None, true);
+    let models = data.models(Span::All, None, None);
+    assert_eq!(models.len(), 1, "{models:?}");
+    let m = &models[0];
+    assert_eq!((m.key.as_str(), m.tokens, m.active), ("claude-sonnet-5", 3000, total.active));
+    assert!(m.cost > 0.0 && (m.cost - total.cost).abs() < 1e-9, "{m:?}");
+    // Each harness's row is the model as that harness alone shows it; they add up to the model.
+    let [harnesses, ..] = data.model_usage(Span::All, None, &m.key);
+    assert_eq!(harnesses.len(), 2);
+    for prov in [Provider::Claude, Provider::Pi] {
+      let row = harnesses.iter().find(|x| x.key == prov.name()).unwrap();
+      let alone = &data.models(Span::All, Some(prov), None)[0];
+      assert_eq!((row.tokens, row.active), (alone.tokens, alone.active), "{prov:?}");
+      assert!((row.cost - alone.cost).abs() < 1e-9, "{prov:?}");
+    }
+    assert_eq!(minutes(&harnesses), minutes(&models));
+    let cost: f64 = harnesses.iter().map(|x| x.cost).sum();
+    assert!((cost - m.cost).abs() < 1e-9);
+    // One model on the timeline, with the day's time.
+    let days = data.bucket_models(Span::Month, None);
+    let keys: Vec<&str> = days.values().flatten().map(|x| x.key.as_str()).collect();
+    assert_eq!(keys, ["claude-sonnet-5"]);
+    let day = data.timeline(Span::Month, None, None).into_iter().filter(|x| x.tokens > 0);
+    assert_eq!(minutes(days.values().next().unwrap()), minutes(&day.collect::<Vec<_>>()));
+    assert_eq!(*data.model_rank(), ["claude-sonnet-5"]);
+  }
+
+  #[test]
+  fn keys_models_without_their_date() {
+    let keys =
+      ["claude-sonnet-4-5-20250929", "gpt-4o-2024-08-06", "gpt-5.4", "-20250929", "a-2025"];
+    let keys = keys.map(model_key);
+    assert_eq!(keys, ["claude-sonnet-4-5", "gpt-4o-2024-08-06", "gpt-5.4", "-20250929", "a-2025"]);
+  }
+
+  #[test]
+  fn synthetic_messages_own_no_time() {
+    // Model A, an interruption Claude Code logs as `<synthetic>`, then the user: all A's time.
+    let s = session("s", &[(600, Some("a"), 10), (602, Some("<synthetic>"), 0), (604, None, 0)]);
+    let data = data_with(vec![s], jiff::civil::date(2026, 1, 10));
+    let models = data.models(Span::All, None, None);
+    let rows: Vec<_> =
+      models.iter().map(|x| (x.key.as_str(), minutes(std::slice::from_ref(x)))).collect();
+    assert_eq!(rows, [("a", 9)]);
+    let days = data.bucket_models(Span::Month, None);
+    let keys: Vec<&str> = days.values().flatten().map(|x| x.key.as_str()).collect();
+    assert_eq!((keys, minutes(days.values().next().unwrap())), (vec!["a"], 9));
   }
 
   #[test]
@@ -1066,9 +1170,9 @@ pub mod tests {
     s.events[1].failed = true;
     let data = data_with(vec![s], jiff::civil::date(2026, 1, 10));
     let models = data.models(Span::All, None, None);
-    assert_eq!(models.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), ["claude/a"]);
+    assert_eq!(models.iter().map(|x| x.key.as_str()).collect::<Vec<_>>(), ["a"]);
     let days = data.bucket_models(Span::Month, None);
     let keys: Vec<&str> = days.values().flatten().map(|x| x.key.as_str()).collect();
-    assert_eq!(keys, ["claude/a"]);
+    assert_eq!(keys, ["a"]);
   }
 }
