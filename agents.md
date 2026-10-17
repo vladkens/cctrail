@@ -37,7 +37,7 @@ CI the `Makefile` and `.github/workflows/main.yml`.
 - One binary crate, flat modules: `cli` (arguments, commands), `config`, `model`,
   `parser/{claude,codex,pi}`, `workdir` (worktrees and same-named clones folded into their
   repository), `metrics`, `output` (tables, JSON), `pricing`, `tui` (the interactive view, on the
-  same accounting). Keep it within ~3500 lines of Rust, tests excluded; simplify before growing
+  same accounting). Keep it within ~7000 lines of Rust, tests excluded; simplify before growing
   past it.
 - Treat history as untrusted input: harnesses change formats and leave truncated lines. Skip what
   doesn't parse, never panic or fail the run on it.
