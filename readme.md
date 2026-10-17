@@ -149,9 +149,11 @@ The Swears view: how often you scold each model, adjusted for how much you used 
 - **Text:** your own prompts in main sessions. Not the harness's (tool output, slash commands and
   their output, reminders, environment context, skills, notifications, compaction summaries), not
   the prompts agents get from a model, not `codex exec` or the Claude Agent SDK, which scripts send.
-- **Pastes:** no harness marks them, so these go: code in backticks or ` ``` ` fences, quoted
-  lines (`> `), and runs of 3+ lines that aren't prose (few letters, times, dates, paths,
-  `key: value`, table rows, code).
+- **Pastes:** these go: code in backticks or ` ``` ` fences, quoted lines (`> `), and runs of 3+
+  lines that aren't prose (few letters, times, dates, paths, `key: value`, table rows, code).
+  Harness paste markers (Claude Code's `[Pasted text #N]`, `pastedContents` in `history.jsonl`)
+  aren't used: dictation tools insert text through the clipboard, so dictated prompts arrive
+  marked as pastes and would be dropped.
 - **Swearing:** a word in [`en.txt`](src/swear/en.txt), [`ru.txt`](src/swear/ru.txt) or the
   insult lists [`insult-en.txt`](src/swear/insult-en.txt), [`insult-ru.txt`](src/swear/insult-ru.txt).
   One entry a line: `word`, `stem*` (every word it starts), `!word` or `!stem*` (never: a stem's
