@@ -2,6 +2,8 @@
 
 use std::ops::{Add, AddAssign};
 
+use serde::{Deserialize, Serialize};
+
 /// Microseconds since the Unix epoch, the precision of the history timestamps.
 pub type Ts = i64;
 
@@ -43,7 +45,7 @@ impl Provider {
   }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Speed {
   Standard,
   Fast,
@@ -59,7 +61,7 @@ impl Speed {
   }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Usage {
   pub input: u64,
   pub cache_write_5m: u64,

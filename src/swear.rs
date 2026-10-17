@@ -33,7 +33,7 @@ const ADDRESSEES: &str = "ты тебе тебя тобой тебой твой 
 
 /// What a word is: swearing, swearing only next to an addressee (`>` in an insult file, as
 /// `тупишь`), or an insult, aimed at the listener wherever it is. Of entries alike, the later wins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Class {
   Swear,
   Near,
@@ -41,7 +41,7 @@ pub enum Class {
 }
 
 /// In this order an exact word wins over a stem of its length, and an exception over both.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Kind {
   Stem,
   Word,
@@ -126,6 +126,18 @@ impl Dict {
     dict.entries.sort();
     dict.entries.dedup();
     Ok(dict)
+  }
+
+  /// The bundled dictionaries and the user's, in `swear` of the config directory.
+  pub fn user() -> Result<Self> {
+    Self::load(crate::config::config_dir().map(|x| x.join("swear")).as_deref())
+  }
+
+  /// Tells dictionaries apart: the ledger counts prompts read with another one again.
+  pub fn fingerprint(&self) -> i64 {
+    let mut hash = DefaultHasher::new();
+    self.entries.hash(&mut hash);
+    hash.finish() as i64
   }
 
   /// Adds the entries of a dictionary file: one per line, `#` starts a comment.

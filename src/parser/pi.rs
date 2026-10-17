@@ -5,10 +5,10 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{Obj, Replies, Val, jsonl, jsonl_files, model_id, own_words, parse_ts};
+use super::{Obj, Replies, Source, Unit, Val, jsonl, jsonl_files, model_id, own_words, parse_ts};
 use crate::config::{expand_path, home_dir};
 use crate::model::{Event, Provider, Session, Ts, Usage};
 use crate::swear::Dict;
@@ -98,7 +98,19 @@ impl RawUsage {
 /// time and its usage. `/fork`, `/clone` and `--fork` copy the entries of the source session into
 /// the new file verbatim, but a v1 source migrated on the way gets new entry ids, and a branch
 /// copied alone lacks the model changes of the others.
-type Key = (&'static str, Option<Ts>, Option<i64>, Option<Usage>);
+type Key = (u8, Option<Ts>, Option<i64>, Option<Usage>);
+
+/// The kinds of entries a key tells apart.
+const KINDS: [&str; 5] = ["user", "assistant", "tool", "usage", "summary"];
+
+/// A session's header (when it was created, the path of the session it was forked from) and the
+/// rest of its events' keys: their kinds and messages' times.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Links {
+  created: Option<Ts>,
+  pub parent: Option<String>,
+  keys: Vec<(u8, Option<i64>)>,
+}
 
 struct Parsed {
   /// When the session was created, from its header.
@@ -154,22 +166,44 @@ fn base(path: &str) -> &str {
 /// copied between forks counts once in their lineage (the sessions forked from one another): in
 /// the session that holds it nearest its oldest ancestor. A fork of a gone session can't name the
 /// rest of its lineage, so its copies are looked for in every other session.
-pub fn parse(roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
+pub fn find(roots: &[PathBuf]) -> Vec<Source> {
   // The pi-subagents extension keeps debug copies of its agents' sessions in `subagent-artifacts`.
   let files: Vec<PathBuf> = jsonl_files(roots)
     .into_iter()
     .filter(|x| !x.components().any(|x| x.as_os_str() == "subagent-artifacts"))
     .collect();
-  let parsed: Vec<Parsed> = files.par_iter().map(|x| parse_file(x, swears)).collect();
+  files.into_par_iter().map(|x| Source::found(Provider::Pi, Path::new(""), x, &[])).collect()
+}
+
+pub fn read(path: &Path, swears: Option<&Dict>) -> Unit {
+  let x = parse_file(path, swears);
+  let keys = x.keys.iter().map(|x| (x.0, x.2)).collect();
+  let links = Links { created: x.created, parent: x.parent, keys };
+  Unit { session: Some(x.session), links: super::Links::Pi(links) }
+}
+
+/// Sessions of the files in found order, each its own main session in the directory of its
+/// header. An entry copied between forks counts once in their lineage (the sessions forked from one
+/// another): in the session that holds it nearest its oldest ancestor. A fork of a gone session
+/// can't name the rest of its lineage, so its copies are looked for in every other session.
+pub fn combine(items: Vec<Source>) -> Vec<Session> {
+  let (mut files, mut sizes, mut parsed) = (vec![], vec![], vec![]);
+  for x in items {
+    let (Some(session), super::Links::Pi(links)) = (x.unit.session, x.unit.links) else { continue };
+    let key = |(e, k): (&Event, &(u8, Option<i64>))| (k.0, e.ts, k.1, e.usage);
+    let keys = session.events.iter().zip(&links.keys).map(key).collect();
+    files.push(x.path);
+    sizes.push(x.size);
+    parsed.push(Parsed { created: links.created, parent: links.parent, session, keys });
+  }
 
   // A session file found under two roots, the same name and id, counts once: the longest copy.
   // `--session` may give independent sessions the same name.
   let name = |x: &Path| x.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
-  let size = |x: &Path| std::fs::metadata(x).map_or(0, |x| x.len());
   let mut longest: HashMap<(String, &str), usize> = HashMap::new();
   for (i, x) in parsed.iter().enumerate() {
     let best = longest.entry((name(&files[i]), x.session.id.as_str())).or_insert(i);
-    if size(&files[i]) > size(&files[*best]) {
+    if sizes[i] > sizes[*best] {
       *best = i;
     }
   }
@@ -346,6 +380,7 @@ fn parse_file(path: &Path, swears: Option<&Dict>) -> Parsed {
       _ => None,
     };
     if let Some((kind, event)) = event {
+      let kind = KINDS.iter().position(|x| *x == kind).unwrap_or_default() as u8;
       keys.push((kind, ts, millis, event.usage));
       session.events.push(event);
     }
@@ -359,6 +394,10 @@ fn parse_file(path: &Path, swears: Option<&Dict>) -> Parsed {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn parse(roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
+    crate::parser::parse(Provider::Pi, roots, swears)
+  }
 
   fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pi/sessions")

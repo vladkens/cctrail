@@ -5,12 +5,13 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-  Content, Obj, Present, Replies, Val, codex, inherit_roots, jsonl, model_id, own_words,
+  Content, Obj, Present, Replies, Source, Unit, Val, codex, inherit_roots, jsonl, model_id,
+  own_words,
 };
 use crate::config::home_dir;
 use crate::metrics::local_date;
@@ -116,7 +117,7 @@ struct Summary {
   completed_at_ms: Val,
 }
 
-fn read<T: DeserializeOwned>(path: &Path) -> Option<T> {
+fn read_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
   serde_json::from_slice::<Obj<T>>(&std::fs::read(path).ok()?).ok()?.0
 }
 
@@ -129,17 +130,29 @@ fn millis(x: &Val) -> Option<Ts> {
 /// A moment of agent activity and the session it is in.
 type Moment = (Ts, usize);
 
-struct Parsed {
+/// A session's parent, its agent activity, its times and usage per model.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Links {
   parent: Option<String>,
   /// When the agent worked: responses, tool results, turn ends.
   agent: Vec<Ts>,
   /// When the session was created and last updated, for usage without any activity.
   meta: Vec<Ts>,
-  models: Vec<ModelUsage>,
+  models: Vec<Model>,
   /// The session's model in `session.json`.
   model: Option<String>,
   speed: Option<Speed>,
   effort: Option<String>,
+}
+
+/// A model's totals in a session.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct Model {
+  model: Option<String>,
+  usage: Usage,
+  requests: u64,
+  /// fx's cost as `f64` bits: JSON doesn't keep every number exactly.
+  cost: Option<u64>,
 }
 
 /// fx's home: `FX_HOME` when set (cctrail's own, fx has no override), else `~/.fx`.
@@ -158,13 +171,35 @@ pub fn root() -> PathBuf {
 /// each model's totals are split into its requests over the agent activity of the main session
 /// and its agents (`spread`), each request at one of those moments: totals per session and project
 /// are exact, their split by day approximate.
-pub fn parse(root: &Path, swears: Option<&Dict>) -> Vec<Session> {
+pub fn find(root: &Path) -> Vec<Source> {
   let dirs = std::fs::read_dir(root.join("sessions")).into_iter().flatten().flatten();
   let mut dirs: Vec<PathBuf> = dirs.map(|x| x.path()).filter(|x| x.is_dir()).collect();
   dirs.sort();
-  let parsed: Vec<(Session, Parsed)> =
-    dirs.par_iter().filter_map(|x| parse_dir(x, swears)).collect();
-  let (mut sessions, parsed): (Vec<Session>, Vec<Parsed>) = parsed.into_iter().unzip();
+  let files = ["session.json", "subagent/owner.json", "usage-v2.json", "events.jsonl"];
+  let found = |x: PathBuf| {
+    let beside: Vec<PathBuf> = files.iter().map(|f| x.join(f)).collect();
+    Source::found(Provider::Fx, Path::new(""), x, &beside)
+  };
+  dirs.into_par_iter().map(found).collect()
+}
+
+pub fn read(dir: &Path, swears: Option<&Dict>) -> Unit {
+  match parse_dir(dir, swears) {
+    Some((session, links)) => Unit { session: Some(session), links: super::Links::Fx(links) },
+    None => Unit::default(),
+  }
+}
+
+/// Sessions of the directories in found order; subagents carry their main session's root and
+/// directory.
+pub fn combine(items: Vec<Source>) -> Vec<Session> {
+  let (mut sessions, mut parsed) = (vec![], vec![]);
+  for x in items {
+    if let (Some(session), super::Links::Fx(links)) = (x.unit.session, x.unit.links) {
+      sessions.push(session);
+      parsed.push(links);
+    }
+  }
 
   let index: HashMap<&str, usize> =
     sessions.iter().enumerate().map(|(i, x)| (x.id.as_str(), i)).collect();
@@ -192,14 +227,11 @@ pub fn parse(root: &Path, swears: Option<&Dict>) -> Vec<Session> {
     };
     let at = trees.get(s.root_id.as_str()).filter(|x| !x.is_empty()).unwrap_or(&own);
     for m in &x.models {
-      let usage = m.usage();
-      let cost = m.total_cost.float().filter(|x| *x > 0.0);
-      let requests = m.request_count.int();
-      for (at, usage, cost) in spread(usage, requests, cost, at) {
+      for (at, usage, cost) in spread(m.usage, m.requests, m.cost.map(f64::from_bits), at) {
         let event = Event {
           ts: at.map(|x| x.0),
           usage: Some(usage),
-          model: m.model.str().map(model_id),
+          model: m.model.clone(),
           speed: x.speed,
           effort: x.effort.clone(),
           cost,
@@ -296,10 +328,10 @@ fn spread(
   shares.into_iter().map(|(at, usage)| (at, usage, cost)).collect()
 }
 
-fn parse_dir(dir: &Path, swears: Option<&Dict>) -> Option<(Session, Parsed)> {
+fn parse_dir(dir: &Path, swears: Option<&Dict>) -> Option<(Session, Links)> {
   let id = dir.file_name()?.to_string_lossy().to_string();
-  let meta: Meta = read(&dir.join("session.json"))?;
-  let owner: Option<Owner> = read(&dir.join("subagent/owner.json"));
+  let meta: Meta = read_json(&dir.join("session.json"))?;
+  let owner: Option<Owner> = read_json(&dir.join("subagent/owner.json"));
   let parent = owner.and_then(|x| x.parent_id.str().map(String::from));
   let is_main = !meta.subagent_child.truthy() && parent.is_none();
   let workdir = meta.workspace_root.str().unwrap_or("unknown");
@@ -347,17 +379,23 @@ fn parse_dir(dir: &Path, swears: Option<&Dict>) -> Option<(Session, Parsed)> {
   replies.finish(&mut session.events);
   session.events.extend(agent.iter().map(|x| Event::activity(*x)));
 
-  let usage: Option<UsageFile> = read(&dir.join("usage-v2.json"));
+  let usage: Option<UsageFile> = read_json(&dir.join("usage-v2.json"));
   let snapshot = usage.and_then(|x| x.snapshot.0);
+  let model = |x: ModelUsage| Model {
+    model: x.model.str().map(model_id),
+    usage: x.usage(),
+    requests: x.request_count.int(),
+    cost: x.total_cost.float().filter(|x| *x > 0.0).map(f64::to_bits),
+  };
   let models = match snapshot.map(|x| x.models) {
-    Some(Content::Blocks(x)) => x.into_iter().filter_map(|x| x.0).collect(),
+    Some(Content::Blocks(x)) => x.into_iter().filter_map(|x| x.0).map(model).collect(),
     _ => vec![],
   };
   let speed = match meta.fast_mode {
     Val::Bool(x) => Some(if x { Speed::Fast } else { Speed::Standard }),
     _ => None,
   };
-  let parsed = Parsed {
+  let parsed = Links {
     parent,
     agent,
     meta: [&meta.created_at_ms, &meta.updated_at_ms].into_iter().filter_map(millis).collect(),
@@ -372,6 +410,10 @@ fn parse_dir(dir: &Path, swears: Option<&Dict>) -> Option<(Session, Parsed)> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn parse(root: &Path, swears: Option<&Dict>) -> Vec<Session> {
+    crate::parser::parse(Provider::Fx, &[root.to_path_buf()], swears)
+  }
 
   fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fx")

@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-  AgentCall, Content, Obj, Present, Replies, Text, Val, inherit_roots, jsonl, jsonl_files,
-  own_words, parse_ts,
+  AgentCall, Content, Obj, Present, Replies, Source, Text, Unit, Val, inherit_roots, jsonl,
+  jsonl_files, own_words, parse_ts,
 };
 use crate::model::{Event, Provider, Session, Speed, Usage};
 use crate::swear::Dict;
@@ -146,20 +146,34 @@ fn delta(cur: Signature, prev: Option<Signature>) -> Signature {
 
 // MARK: Rollouts
 
-struct Rollout {
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Rollout {
+  #[serde(skip)]
   path: PathBuf,
   id: String,
   parent_id: Option<String>,
   forked_from_id: Option<String>,
   has_history_base: bool,
-  workdir: String,
+  pub workdir: String,
   /// The git remote Codex logged for the working directory, normalized.
+  #[serde(skip)]
   remote: Option<String>,
   /// Lines with a smaller `ordinal` are the parent's history, copied into an agent's rollout.
   own_start: Option<i64>,
   /// Its prompts are typed: not an agent's (a `source` that isn't a string, its parent linked or
   /// not, as a review's) nor of `codex exec`, which scripts and other agents start.
+  #[serde(skip)]
   typed: bool,
+}
+
+/// A rollout's meta, agent calls, the rest of its records (whether each gave no event, its
+/// signature) and, when they aren't the records' alone, the signatures of all its token counts.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Links {
+  pub rollout: Rollout,
+  calls: Vec<AgentCall>,
+  records: Vec<(bool, Option<Signature>)>,
+  signatures: Option<Vec<Signature>>,
 }
 
 #[derive(Default)]
@@ -175,45 +189,78 @@ struct Parsed {
   signatures: Vec<Signature>,
 }
 
-/// Sessions under each root's `sessions` and `archived_sessions` (or the root itself); spawned
-/// agents carry their main session's root and working directory. A rollout id seen twice counts
-/// once: within a root the later file wins (`sessions` over `archived_sessions`), across roots (a
-/// copied profile) the longest file, whole.
+/// The rollouts under each root's `sessions` and `archived_sessions` (or the root itself).
+pub fn find(roots: &[PathBuf]) -> Vec<Source> {
+  let files: Vec<(&PathBuf, PathBuf)> =
+    roots.iter().flat_map(|x| history_files(x).into_iter().map(move |f| (x, f))).collect();
+  files
+    .into_par_iter()
+    .map(|(root, path)| Source::found(Provider::Codex, root, path, &[]))
+    .collect()
+}
+
+pub fn read(path: &Path, swears: Option<&Dict>) -> Unit {
+  let Some(rollout) = read_meta(path) else { return Unit::default() };
+  let x = parse_file(&rollout, swears);
+  let records: Vec<(bool, Option<Signature>)> =
+    x.records.iter().map(|x| (x.event.is_none(), x.signature)).collect();
+  let mut session = x.session;
+  session.events = x.records.into_iter().map(|x| x.event.unwrap_or_default()).collect();
+  let own: Vec<Signature> = records.iter().filter_map(|x| x.1).collect();
+  let signatures = (x.signatures != own).then_some(x.signatures);
+  let links = Links { rollout, calls: x.calls, records, signatures };
+  Unit { session: Some(session), links: super::Links::Codex(links) }
+}
+
+#[cfg(test)]
 pub fn parse(roots: &[PathBuf], swears: Option<&Dict>) -> Vec<Session> {
-  let files: Vec<(usize, PathBuf)> = roots
-    .iter()
-    .enumerate()
-    .flat_map(|(i, x)| history_files(x).into_iter().map(move |x| (i, x)))
-    .collect();
-  let metas: Vec<Option<(usize, Rollout)>> =
-    files.par_iter().map(|(i, x)| read_meta(x).map(|x| (*i, x))).collect();
+  super::parse(Provider::Codex, roots, swears)
+}
+
+/// Sessions of the rollouts in found order; spawned agents carry their main session's root and
+/// working directory. A rollout id seen twice counts once: within a root the later file wins
+/// (`sessions` over `archived_sessions`), across roots (a copied profile) the longest file, whole.
+pub fn combine(items: Vec<Source>) -> Vec<Session> {
   // Each root on its own first (the later file wins), then the longest of the roots' winners.
-  let mut by_root: Vec<Vec<Rollout>> = roots.iter().map(|_| vec![]).collect();
-  let mut in_root: Vec<HashMap<String, usize>> = roots.iter().map(|_| HashMap::new()).collect();
-  for (root, x) in metas.into_iter().flatten() {
-    match in_root[root].get(&x.id) {
-      Some(i) => by_root[root][*i] = x,
+  let mut kept: Vec<(u64, Rollout, Parsed)> = vec![];
+  let mut in_root: HashMap<(String, String), usize> = HashMap::new();
+  for x in items {
+    let (Some(mut session), super::Links::Codex(links)) = (x.unit.session, x.unit.links) else {
+      continue;
+    };
+    let events = std::mem::take(&mut session.events);
+    let record = |(e, r): (Event, &(bool, Option<Signature>))| Record {
+      event: (!r.0).then_some(e),
+      signature: r.1,
+    };
+    let records = events.into_iter().zip(&links.records).map(record).collect();
+    let own = || links.records.iter().filter_map(|x| x.1).collect();
+    let signatures = links.signatures.unwrap_or_else(own);
+    let parsed = Parsed { session, calls: links.calls, records, signatures };
+    let key = (x.root, links.rollout.id.clone());
+    match in_root.get(&key) {
+      Some(i) => kept[*i] = (x.size, links.rollout, parsed),
       None => {
-        in_root[root].insert(x.id.clone(), by_root[root].len());
-        by_root[root].push(x);
+        in_root.insert(key, kept.len());
+        kept.push((x.size, links.rollout, parsed));
       }
     }
   }
-  let size = |x: &Rollout| std::fs::metadata(&x.path).map_or(0, |x| x.len());
-  let mut rollouts: Vec<Rollout> = vec![];
+  let (mut rollouts, mut parsed, mut sizes) = (vec![], vec![], vec![]);
   let mut indexes: HashMap<String, usize> = HashMap::new();
-  for x in by_root.into_iter().flatten() {
-    match indexes.get(&x.id) {
-      Some(i) if size(&x) > size(&rollouts[*i]) => rollouts[*i] = x,
+  for (size, rollout, x) in kept {
+    match indexes.get(&rollout.id) {
+      Some(&i) if size > sizes[i] => (sizes[i], rollouts[i], parsed[i]) = (size, rollout, x),
       Some(_) => {}
       None => {
-        indexes.insert(x.id.clone(), rollouts.len());
-        rollouts.push(x);
+        indexes.insert(rollout.id.clone(), rollouts.len());
+        sizes.push(size);
+        rollouts.push(rollout);
+        parsed.push(x);
       }
     }
   }
 
-  let mut parsed: Vec<Parsed> = rollouts.par_iter().map(|x| parse_file(x, swears)).collect();
   let signatures: HashMap<&str, Vec<Signature>> =
     rollouts.iter().zip(&parsed).map(|(r, p)| (r.id.as_str(), p.signatures.clone())).collect();
   for (rollout, item) in rollouts.iter().zip(&mut parsed) {

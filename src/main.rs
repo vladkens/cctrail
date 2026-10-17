@@ -2,6 +2,7 @@
 
 mod cli;
 mod config;
+mod ledger;
 mod metrics;
 mod model;
 mod output;

@@ -66,6 +66,8 @@ struct Run {
   config: Option<PathBuf>,
   cwd: Option<PathBuf>,
   cache: PathBuf,
+  /// The data directory of the ledger, off without one.
+  ledger: Option<PathBuf>,
 }
 
 impl Run {
@@ -79,6 +81,7 @@ impl Run {
       config,
       cwd: None,
       cache: fixtures().join("missing"),
+      ledger: None,
     }
   }
 
@@ -99,6 +102,11 @@ impl Run {
 
   fn exec(&self, args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
+    match &self.ledger {
+      // Without the user's swear lists.
+      Some(x) => cmd.env("XDG_DATA_HOME", x).env("XDG_CONFIG_HOME", fixtures().join("missing")),
+      None => cmd.env("CCTRAIL_NO_LEDGER", "1"),
+    };
     cmd.args(args).env("CLAUDE_CONFIG_DIR", &self.claude).env("CODEX_HOME", &self.codex);
     cmd.env("PI_CODING_AGENT_DIR", &self.pi).env_remove("PI_CODING_AGENT_SESSION_DIR");
     cmd.env("FX_HOME", &self.fx);
@@ -208,6 +216,7 @@ fn explains_missing_project_config() {
   let mut run = Run::new("claude/projects", "missing");
   run.config = None;
   let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
+  cmd.env("CCTRAIL_NO_LEDGER", "1");
   cmd.args(["--provider", "claude"]).env("XDG_CONFIG_HOME", &dir).env_remove("CCTRAIL_CONFIG");
   cmd.env("CLAUDE_CONFIG_DIR", &run.claude).env("XDG_CACHE_HOME", fixtures().join("missing"));
   cmd.env("CCTRAIL_NO_UPDATE", "1");
@@ -523,6 +532,7 @@ fn prices_each_day_at_its_rate() {
   // Days in a given time zone, with their costs.
   let days = |tz: &str| {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cctrail"));
+    cmd.env("CCTRAIL_NO_LEDGER", "1");
     cmd.args(["days", "--json"]).env("TZ", tz).env("CCTRAIL_NO_UPDATE", "1");
     cmd.env("CLAUDE_CONFIG_DIR", &run.claude).env("CODEX_HOME", &run.codex);
     cmd.env("PI_CODING_AGENT_DIR", &run.pi).env_remove("PI_CODING_AGENT_SESSION_DIR");
@@ -553,4 +563,34 @@ fn prints_version() {
     let out = Run::new("missing", "missing").stdout(&[flag]);
     assert_eq!(out, format!("cctrail {}\n", env!("CARGO_PKG_VERSION")));
   }
+}
+
+#[test]
+fn keeps_history_in_the_ledger_and_moves_it() {
+  let dir = tmp("ledger");
+  copy_tree(&fixtures().join("claude"), &dir.join("claude"));
+  let mut run = Run::new("missing", "codex").pi("pi");
+  run.claude = dir.join("claude");
+  let expected = run.stdout(&["days", "--json"]);
+  run.ledger = Some(dir.join("a"));
+  assert_eq!(run.stdout(&["days", "--json"]), expected);
+  // The logs gone, the ledger keeps their sessions.
+  std::fs::remove_dir_all(&run.claude).unwrap();
+  assert_eq!(run.stdout(&["days", "--json"]), expected);
+
+  let file = dir.join("export.db");
+  let file = file.to_str().unwrap();
+  assert_eq!(run.stdout(&["export", file]), format!("Exported 7 sessions to {file}\n"));
+  // Another machine without any logs.
+  run.codex = fixtures().join("missing");
+  run.pi = fixtures().join("missing");
+  run.ledger = Some(dir.join("b"));
+  let out = run.stdout(&["import", file]);
+  assert_eq!(out, format!("Imported {file}: 7 added, 0 replaced, 0 kept\n"));
+  assert_eq!(run.stdout(&["days", "--json"]), expected);
+  run.ledger = None;
+  let err = String::from_utf8(run.exec(&["import", file]).stderr).unwrap();
+  assert!(err.contains("the ledger is off"), "{err}");
+  assert!(run.exec(&["export"]).stderr.ends_with(b"`cctrail export` needs a FILE\n"));
+  std::fs::remove_dir_all(&dir).unwrap();
 }
