@@ -76,7 +76,8 @@ start on Monday. `cctrail --help` lists it all.
 `cctrail` without arguments on a terminal opens the interactive view: projects, models, a
 timeline (a chart of the days stacked by model over their list) and swears for today, this week,
 this month, the last 30 days or all time. A model is one row whichever harness ran it, its dated
-id (`-20250929`) included; opening it splits it by harness. Press `?` in it to see the keys.
+id (`-20250929`) included; opening it splits it by harness. Its `$/h` is the cost per active hour, its `$/M` the cost per
+million tokens as paid, with the cache, Fast and effort in it. Press `?` in it to see the keys.
 
 Swears shows how often you scold each model: `% dir`, the share of your messages scolding it, and
 a Score that pulls it toward your average, so a model you barely used doesn't top the list.

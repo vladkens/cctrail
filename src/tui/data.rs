@@ -87,6 +87,19 @@ impl Row {
   pub fn any_share(&self) -> Option<f64> {
     self.share(self.swearing)
   }
+
+  /// Cost per active hour: none under a minute of time, with no cost or an unknown one.
+  pub fn per_hour(&self) -> Option<f64> {
+    let micros = self.active.unwrap_or(0);
+    let known = !self.unpriced && self.cost > 0.0 && micros >= 60 * MICROS;
+    known.then(|| self.cost / micros as f64 * 3600.0 * MICROS as f64)
+  }
+
+  /// Cost per million tokens as paid, cache, fast and effort included: none without tokens or with
+  /// an unknown cost.
+  pub fn per_million(&self) -> Option<f64> {
+    (!self.unpriced && self.tokens > 0).then(|| self.cost / self.tokens as f64 * 1e6)
+  }
 }
 
 /// Time per project, harness, model, speed and effort, for one span and provider.
@@ -872,6 +885,18 @@ pub mod tests {
     let (rows, total) = data.swears(Span::Week, Some(Provider::Codex));
     assert_eq!((rows.len(), total.score, rows[0].score), (1, Some(10.0), Some(10.0)));
     assert!(data.swears(Span::Today, None).0.is_empty());
+  }
+
+  #[test]
+  fn costs_per_unit_need_time_tokens_and_a_price() {
+    let row =
+      Row { active: Some(1800 * MICROS), tokens: 2_000_000, cost: 3.0, ..Default::default() };
+    let rates = |x: Row| (x.per_hour(), x.per_million());
+    assert_eq!(rates(row.clone()), (Some(6.0), Some(1.5)));
+    assert_eq!(rates(Row { active: Some(59 * MICROS), ..row.clone() }), (None, Some(1.5)));
+    assert_eq!(rates(Row { cost: 0.0, ..row.clone() }), (None, Some(0.0)));
+    assert_eq!(rates(Row { tokens: 0, ..row.clone() }), (Some(6.0), None));
+    assert_eq!(rates(Row { unpriced: true, ..row }), (None, None));
   }
 
   #[test]

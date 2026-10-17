@@ -37,7 +37,10 @@ pub enum Col {
   Tokens,
   Cost,
   Sessions,
-  /// The sorted column's share, Time's when sorted by name.
+  /// The models' cost per active hour and per million tokens.
+  PerHour,
+  PerMillion,
+  /// The sorted column's share, Time's when sorted by name, Cost's by a cost per unit.
   Share,
   /// The swears tab's: prompts, words typed, % of prompts swearing at the listener, % with any
   /// swearing, score.
@@ -62,6 +65,9 @@ impl Col {
       (Tab::Swears, _) => {
         &[Col::Prompts, Col::Words, Col::Directed, Col::Any, Col::Score, Col::Name]
       }
+      (Tab::Models, _) => {
+        &[Col::Time, Col::Tokens, Col::Cost, Col::PerHour, Col::PerMillion, Col::Name]
+      }
       (_, true) => &[Col::Time, Col::Tokens, Col::Cost, Col::Sessions, Col::Name],
       (_, false) => &[Col::Time, Col::Tokens, Col::Cost, Col::Name],
     }
@@ -78,6 +84,9 @@ impl Col {
       Self::Tokens => x.tokens as f64,
       Self::Cost => x.cost,
       Self::Sessions => x.sessions.unwrap_or(0) as f64,
+      // A cost per unit that can't be told sorts below every other.
+      Self::PerHour => x.per_hour().unwrap_or(-1.0),
+      Self::PerMillion => x.per_million().unwrap_or(-1.0),
       Self::Name | Self::Time | Self::Share => x.active.unwrap_or(0) as f64,
       Self::Prompts => x.prompts as f64,
       Self::Words => x.words as f64,
@@ -90,7 +99,11 @@ impl Col {
 
   /// The column a share is of.
   pub fn share(self) -> Self {
-    if matches!(self, Self::Name | Self::Share) { Self::Time } else { self }
+    match self {
+      Self::Name | Self::Share => Self::Time,
+      Self::PerHour | Self::PerMillion => Self::Cost,
+      _ => self,
+    }
   }
 }
 
@@ -202,7 +215,7 @@ impl App {
       data,
       span: Span::Month,
       prov: None,
-      sorts: [Col::Time.sorted(), Col::Time.sorted(), (Col::Name, true), Col::Score.sorted()],
+      sorts: [Col::Time.sorted(), Col::Cost.sorted(), (Col::Name, true), Col::Score.sorted()],
       bars: Col::Time,
       tab: Tab::Projects,
       sel: [0; 4],
@@ -910,20 +923,67 @@ mod tests {
     let i = app.list.iter().position(|x| x.key == "w/api").unwrap();
     let tokens = app.list[i].tokens as f64 / app.total.tokens as f64 * 100.0;
     assert!((share(first + i as u16) as f64 - tokens).abs() <= 1.0);
-    // By name, the share is of the time; models have no sessions to sort by.
+    // Models open by cost, most first; they have no sessions to sort by, but a cost per hour and
+    // per million tokens.
     press(&mut app, KeyCode::Char('2'));
-    for col in [Col::Tokens, Col::Cost, Col::Name, Col::Time] {
+    assert_eq!(app.sort(), (Col::Cost, true));
+    let order = [Col::PerHour, Col::PerMillion, Col::Name, Col::Time, Col::Tokens, Col::Cost];
+    for col in order {
       press(&mut app, KeyCode::Char('s'));
       assert_eq!(app.sort().0, col);
     }
-    // A model without a price has no cost nor a share of it, both faint.
-    press(&mut app, KeyCode::Char('s'));
-    press(&mut app, KeyCode::Char('s'));
+    // A model without a price has no cost, nor a share of it or a cost per unit, all faint.
     let buf = frame(&app);
     let y = find(&buf, "claude-unknown-1");
-    assert_eq!(cells(&line(&buf, y))[3..], ["–", "–"]);
+    assert_eq!(cells(&line(&buf, y))[3..], ["–", "–", "–", "–"]);
     let x = col(&buf, y, "–");
     assert_eq!((buf[(x, y)].fg, buf[(x, y)].modifier), (Color::Reset, Modifier::DIM));
+  }
+
+  #[test]
+  fn models_show_their_cost_per_hour_and_per_million() {
+    let mut app = many();
+    press(&mut app, KeyCode::Char('2'));
+    let buf = frame(&app);
+    let out = screen_of(&buf);
+    let head = find(&buf, "Model");
+    let labels = ["Model", "Time", "Tokens", "Cost ↓", "$/h", "$/M", "Share"];
+    assert_eq!(cells(&line(&buf, head)), labels, "{out}");
+    assert!(app.list.windows(2).all(|w| w[0].cost >= w[1].cost));
+    // Each row's and the total's: its cost over its time and over its tokens.
+    let dollars = |x: &str| x.trim_start_matches('$').replace(',', "").parse::<f64>().ok();
+    let total = find(&buf, "total");
+    let rows = app.list.iter().chain([&app.total]);
+    for (y, x) in (head + 1..=total).zip(rows) {
+      let c = cells(&line(&buf, y));
+      let hours = x.active.unwrap() as f64 / 3.6e9;
+      if x.unpriced {
+        assert_eq!(c[4..6], ["–", "–"], "{out}");
+        continue;
+      }
+      let (per_hour, per_million) = (dollars(&c[4]).unwrap(), dollars(&c[5]).unwrap());
+      assert!((per_hour - x.cost / hours).abs() <= 0.5, "{out}");
+      assert!((per_million - x.cost / x.tokens as f64 * 1e6).abs() <= 0.005, "{out}");
+      assert_eq!(c[5].split_once('.').map(|x| x.1.len()), Some(2), "{out}");
+    }
+    // When narrow, $/M goes first, then $/h, before the share.
+    for (width, kept) in
+      [(84, &["$/h", "$/M", "Share"][..]), (80, &["$/h", "Share"]), (72, &["Share"])]
+    {
+      let buf = frame_of(&app, width, 30);
+      let labels = cells(&line(&buf, find(&buf, "Model")));
+      let labels: Vec<&str> = labels.iter().skip(4).map(|x| x.as_str()).collect();
+      assert_eq!(labels, kept, "{width}");
+    }
+    // Sorted by either, the models that can't be told go last.
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.sort(), (Col::PerHour, true));
+    let rates: Vec<f64> = app.list.iter().map(|x| Col::PerHour.of(x)).collect();
+    assert!(rates.windows(2).all(|w| w[0] >= w[1]) && *rates.last().unwrap() == -1.0);
+    assert_eq!(app.list.last().unwrap().key, "claude-unknown-1");
+    // Other tabs never have them.
+    press(&mut app, KeyCode::Char('1'));
+    assert!(!screen(&app).contains("$/h"));
   }
 
   #[test]
@@ -1076,6 +1136,7 @@ mod tests {
       (from + 1..to).map(|y| cells(&line(&buf, y))[0].clone()).collect::<Vec<_>>()
     };
     assert_eq!(names(harness, speed - 2), ["codex"], "{out}");
+    assert!(line(&buf, harness).contains("$/h") && line(&buf, effort).contains("$/M"), "{out}");
     let mut speeds = names(speed, effort - 2);
     speeds.sort();
     assert_eq!(speeds, ["fast", "standard"], "{out}");
