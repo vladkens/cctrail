@@ -420,6 +420,34 @@ impl Data {
     std::cell::Ref::map(self.buckets.borrow(), |x| &x.as_ref().unwrap().1)
   }
 
+  /// A model's timeline buckets, those it was used in, newest first; their time scaled to the
+  /// model's `active` (microseconds), as split between projects, so they add up to its row.
+  pub fn model_buckets(
+    &self,
+    span: Span,
+    prov: Option<Provider>,
+    key: &str,
+    active: i64,
+  ) -> Vec<Row> {
+    let gran = span.gran();
+    let buckets = self.bucket_models(span, prov);
+    let mut rows: Vec<Row> = buckets
+      .iter()
+      .filter_map(|(day, models)| {
+        let x = models.iter().find(|x| x.key == key)?;
+        Some(Row { key: day.to_string(), label: label(*day, gran), day: Some(*day), ..x.clone() })
+      })
+      .collect();
+    let parts = rows.iter().map(|x| (x.key.clone(), x.active.unwrap_or(0) / MICROS)).collect();
+    let times = scale(parts, active / MICROS);
+    for row in &mut rows {
+      row.active = Some(times[&row.key] * MICROS);
+    }
+
+    rows.sort_by_key(|x| std::cmp::Reverse(x.day));
+    rows
+  }
+
   fn models_by_bucket(&self, span: Span, prov: Option<Provider>) -> Buckets {
     let range = span.range(self.today);
     let gran = span.gran();
@@ -433,6 +461,7 @@ impl Data {
       let usage = e.usage.unwrap_or_default();
       row.tokens = row.tokens.saturating_add(usage.total());
       row.cost += pricing::cost(s.provider, e);
+      row.unpriced |= !pricing::priced(s.provider, e);
     }
     // Activity stamps, as the timeline counts them, to the harness and model of the session's
     // last response, as in `model_times`, folded into the model's name after; the windows cut at
@@ -966,12 +995,13 @@ pub mod tests {
     for p in projects.iter().filter(|x| !x.key.is_empty()) {
       assert_eq!(time(&data.models(Span::All, None, Some(&p.key))), p.active.unwrap(), "{}", p.key);
     }
-    // One row per model, fast and standard together; its harnesses, speeds and efforts add up to
-    // it.
+    // One row per model, fast and standard together; its harnesses, speeds, efforts and weeks add
+    // up to it.
     let gpt = models.iter().filter(|x| x.key.starts_with("gpt-5.4")).count();
     assert_eq!(gpt, 1);
     for m in &models {
-      for part in data.model_usage(Span::All, None, &m.key) {
+      let weeks = data.model_buckets(Span::All, None, &m.key, m.active.unwrap());
+      for part in data.model_usage(Span::All, None, &m.key).into_iter().chain([weeks]) {
         assert_eq!(time(&part), m.active.unwrap(), "{}", m.key);
         assert_eq!(part.iter().map(|x| x.tokens).sum::<u64>(), m.tokens, "{}", m.key);
         let cost: f64 = part.iter().map(|x| x.cost).sum();

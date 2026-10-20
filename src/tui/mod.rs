@@ -130,8 +130,10 @@ impl Detail {
 
   fn sort(&mut self, by: Sort) {
     self.sort = by;
+    // A model's weeks or days stay newest first.
     for part in &mut self.parts {
-      sort(&mut part.1, by);
+      let dated = part.1.first().is_some_and(|x| x.day.is_some());
+      sort(&mut part.1, if dated { (Col::Name, true) } else { by });
     }
   }
 }
@@ -317,13 +319,21 @@ impl App {
       Tab::Projects => vec![("Model", self.data.models(span, prov, Some(&row.key)))],
       Tab::Models => {
         let [harness, speed, effort] = self.data.model_usage(span, prov, &row.key);
-        vec![("Harness", harness), ("Speed", speed), ("Effort", effort)]
+        let week = span.gran() == crate::metrics::Granularity::Week;
+        let buckets = self.data.model_buckets(span, prov, &row.key, row.active.unwrap_or(0));
+        let dated = if week { "Week" } else { "Day" };
+        vec![("Harness", harness), ("Speed", speed), ("Effort", effort), (dated, buckets)]
       }
       Tab::Timeline => vec![("Project", self.data.bucket_projects(span, prov, day))],
       Tab::Swears => vec![],
     };
     let sessions = self.tab == Tab::Timeline;
-    let sort = if sort.0 == Col::Sessions && !sessions { Col::Time.sorted() } else { sort };
+    // A day's projects have no costs per unit.
+    let sort = match sort.0 {
+      Col::Sessions if !sessions => Col::Time.sorted(),
+      Col::PerHour | Col::PerMillion if self.tab != Tab::Models => Col::Time.sorted(),
+      _ => sort,
+    };
     let mut row = row;
     if sessions {
       row.sessions = Some(parts[0].1.iter().filter_map(|x| x.sessions).sum());
@@ -1165,10 +1175,18 @@ mod tests {
     assert_eq!(efforts, ["high", "low"], "{out}");
     let model = crate::output::duration(app.open.as_ref().unwrap().row.active.unwrap());
     assert_eq!(cells(&line(&buf, total))[1], model);
-    // The selection goes through all the tables.
+    // Its weeks under them, newest first, adding up to it; the selection goes through all the
+    // tables.
+    let week = find(&buf, "Week");
+    assert!(week > total && line(&buf, week).contains("$/M"), "{out}");
+    let d = app.open.as_ref().unwrap();
+    let weeks = &d.parts[3].1;
+    assert!(weeks.windows(2).all(|w| w[0].day > w[1].day), "{out}");
+    assert_eq!(weeks.iter().filter_map(|x| x.active).sum::<i64>(), d.row.active.unwrap());
+    let n = weeks.len();
     press(&mut app, KeyCode::End);
-    assert_eq!(app.osel, 4);
-    assert!(line(&frame(&app), total - 1).trim_start().starts_with('▶'));
+    assert_eq!(app.osel, 4 + n);
+    assert!(line(&frame(&app), week + n as u16).trim_start().starts_with('▶'));
     // An effort that isn't logged reads `–`.
     press(&mut app, KeyCode::Esc);
     app.sel[1] = app.list.iter().position(|x| x.key == "claude-unknown-1").unwrap();
@@ -1289,9 +1307,17 @@ mod tests {
     assert_eq!(list, 16, "{out}");
     let divider = list;
     let head = cells(&line(&buf, divider + 1));
-    assert_eq!(head, ["Day ↓", "Time", "Tokens", "Cost", "Sessions", "Share"], "{out}");
+    let named = ["Day ↓", "Time", "Tokens", "Cost", "$/h", "$/M", "Sessions", "Share"];
+    assert_eq!(head, named, "{out}");
     let newest = cells(&line(&buf, divider + 2));
-    assert_eq!(newest, ["2026-01-10 Sa", "–", "–", "–", "–", "–"], "{out}");
+    assert_eq!(newest[1..], ["–"; 7], "{out}");
+    // A busy day's cost per active hour and per million tokens.
+    let busy = cells(&line(&buf, divider + 3));
+    let day = &app.list[1];
+    let hours = day.active.unwrap() as f64 / 3600e6;
+    let money = |x: f64| format!("${x:.2}");
+    let rates = [money(day.cost / hours), money(day.cost * 1e6 / day.tokens as f64)];
+    assert_eq!(busy[4..6], rates, "{out}");
     assert!(line(&buf, 28).trim_start().starts_with("total"), "{out}");
     // One bar per busy day, all as wide, one cell apart, stacked in the models' colors.
     let axis = (4..divider).find(|y| line(&buf, *y).contains('━')).unwrap();
@@ -1553,7 +1579,7 @@ mod tests {
     assert_eq!(app.span, Span::Today);
     let buf = frame(&app);
     let total = cells(&line(&buf, find(&buf, "total")));
-    assert_eq!(total[1..], ["–", "–", "–", "–", "–"], "{}", screen_of(&buf));
+    assert_eq!(total[1..], ["–"; 7], "{}", screen_of(&buf));
     // At 140 columns over 30 days, the dates under the bars are as far apart from each other.
     let mut app = many();
     press(&mut app, KeyCode::Char('3'));
@@ -1645,11 +1671,11 @@ mod tests {
     press(&mut app, KeyCode::Char('2'));
     app.sel[1] = app.list.iter().position(|x| x.key == "gpt-5.4").unwrap();
     press(&mut app, KeyCode::Enter);
-    // Too low for all the tables: the selection in the effort table brings it into view.
+    // Too low for all the tables: the selection in the last one brings it into view.
     press(&mut app, KeyCode::End);
     let buf = frame_of(&app, 100, 12);
     let out = screen_of(&buf);
-    assert!(out.contains("Effort") && out.contains(" ▶ "), "{out}");
+    assert!(out.contains("Week") && out.contains(" ▶ "), "{out}");
     press(&mut app, KeyCode::Home);
     let out = screen_of(&frame_of(&app, 100, 12));
     assert!(out.contains("Harness") && out.contains(" ▶ "), "{out}");
