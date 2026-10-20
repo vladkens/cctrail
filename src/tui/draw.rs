@@ -455,7 +455,9 @@ fn table(
     empty(f, app, area, hits);
     return 1;
   }
-  let sort = app.sort();
+  // A model's weeks or days stay newest first, whatever the other tables are sorted by.
+  let dated = app.open.is_some() && rows.iter().any(|x| x.day.is_some());
+  let sort = if dated { (Col::Name, true) } else { app.sort() };
   let column = |col, label, width| Column {
     head: head_label(sort, col, label),
     col,
@@ -467,8 +469,8 @@ fn table(
     column(Col::Tokens, "Tokens", 7),
     column(Col::Cost, "Cost", 10),
   ];
-  // A model's costs per unit: in the models tab and a model's drill-down.
-  if app.tab == Tab::Models {
+  // Costs per unit: in the models tab, a model's drill-down and the timeline's list.
+  if app.tab == Tab::Models || (app.tab == Tab::Timeline && app.open.is_none()) {
     columns.push(column(Col::PerHour, "$/h", 7));
     columns.push(column(Col::PerMillion, "$/M", 7));
   }
@@ -484,11 +486,12 @@ fn table(
     layout(&widths, area)[0].width as usize
   };
   let drop = [Col::PerMillion, Col::PerHour, Col::Sessions, Col::Share, Col::Tokens, Col::Cost];
+  // By the sort on screen, so a drill-down's tables keep one layout under its header clicks.
   for col in drop {
     if name_width(&columns) >= NAME_MIN {
       break;
     }
-    if col != sort.0 {
+    if col != app.sort().0 {
       columns.retain(|x| x.col != col);
     }
   }
@@ -496,7 +499,7 @@ fn table(
 
   let of = sort.0.share();
   let share = shares(&rows.iter().map(|x| of.of(x)).collect::<Vec<_>>());
-  // `rated`: the row the costs per unit are of; the total's are of the priced rows alone, as an
+  // `rated`: the row the costs per unit are of; the total's are of the priced part alone, as an
   // unknown cost isn't one of 0.
   let cells = |x: &Row, rated: &Row, label: &str, share: &str| {
     let dash = || num("–".into(), NONE);
@@ -520,14 +523,7 @@ fn table(
   };
   let lines = rows.iter().zip(&share).map(|(x, s)| cells(x, x, &x.label, s)).collect();
   let all = if rows.iter().any(|x| of.of(x) > 0.0) { "100%" } else { "" };
-  let priced: Vec<&Row> = rows.iter().filter(|x| !x.unpriced).collect();
-  let rated = Row {
-    active: Some(priced.iter().filter_map(|x| x.active).sum()),
-    tokens: priced.iter().map(|x| x.tokens).fold(0, u64::saturating_add),
-    cost: priced.iter().map(|x| x.cost).sum(),
-    ..Default::default()
-  };
-  let total = cells(total, &rated, "total", all);
+  let total = cells(total, &super::data::priced(rows), "total", all);
   grid(f, &columns, lines, total, area, sel, first, hits)
 }
 
@@ -864,7 +860,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
     ("1 2 3 4", "projects / models / timeline / swears"),
     ("t T", "period: today, week, month, 30 days, all; wraps around"),
     ("↑ ↓", "select a row or a day; wraps around"),
-    ("→ enter", "open: project → models, model → harness, speed and effort, day → projects"),
+    ("→ enter", "open: project → models, model → harness, speed, effort and weeks, day → projects"),
     ("← esc ⌫", "back"),
     ("PgUp PgDn", "a page up / down"),
     ("Home End", "the first / last row"),
@@ -876,7 +872,7 @@ fn help(f: &mut Frame, area: Rect, top: u16) -> u16 {
       "mouse",
       "click a row, bar or choice to select it, a row or bar again to open it; a header sorts, again reverses; the wheel moves 3 rows",
     ),
-    ("models", "$/h: cost per active hour · $/M: cost per million tokens as paid"),
+    ("$/h $/M", "cost per active hour / per million tokens as paid: models and timeline"),
     ("swears", SWEARS),
     ("?", "this help"),
     ("q", "back; quits from a list"),
