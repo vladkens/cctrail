@@ -469,12 +469,32 @@ impl Data {
       x.cost += pricing::cost(s.provider, e);
       x.unpriced |= !pricing::priced(s.provider, e);
     }
+    // Each part's day: its share of its project's parts that day, of the project's time that day,
+    // simultaneous time divided between projects first, as `times` does over the span.
+    let stamps = self.part_stamps(span, prov);
+    let mut projects: HashMap<String, Vec<Ts>> = HashMap::new();
+    for (name, ts) in &stamps {
+      let Some(part) = part_of(name) else { continue };
+      projects.entry(part.0).or_default().extend(ts);
+    }
+    projects.values_mut().for_each(|x| x.sort_unstable());
+    let project_days = by_name_and_day(&projects);
+    let parts = by_name_and_day(&stamps);
+    let mut sums: HashMap<(String, Date), i64> = HashMap::new();
+    for ((name, day), v) in &parts {
+      let Some(part) = part_of(name) else { continue };
+      *sums.entry((part.0, *day)).or_default() += v;
+    }
     let mut spread: HashMap<String, HashMap<Date, i64>> = HashMap::new();
-    for ((name, day), micros) in by_name_and_day(&self.part_stamps(span, prov)) {
-      let mine = part_of(&name).is_some_and(|x| model_key(&x.2) == key);
-      if mine && range.contains_day(day) {
-        *spread.entry(name).or_default().entry(gran.bucket(day)).or_default() += micros;
+    for ((name, day), v) in parts {
+      let Some(part) = part_of(&name).filter(|x| model_key(&x.2) == key) else { continue };
+      if !range.contains_day(day) {
+        continue;
       }
+      let project = (part.0, day);
+      let (sum, whole) = (sums[&project], project_days.get(&project).copied().unwrap_or(0));
+      let share = (whole as i128 * v as i128 / sum.max(1) as i128) as i64;
+      *spread.entry(name).or_default().entry(gran.bucket(day)).or_default() += share;
     }
     let times = self.times(span, prov);
     for (name, days) in spread {
@@ -1133,6 +1153,27 @@ pub mod tests {
     assert_eq!(days[0].day, Some(jiff::civil::date(2026, 1, 8)));
     assert_eq!(minutes(&days[..1]), 10, "{days:?}");
     assert_eq!(days.iter().map(|x| x.active.unwrap()).sum::<i64>(), a.active.unwrap());
+  }
+
+  #[test]
+  fn a_models_days_keep_its_projects_share_of_each_day() {
+    // `a` alone in its project two days running, `b` and `c` beside it in another project on the
+    // first: `a` has half of the first day and all of the second.
+    let at = |id: &str, model: &str, dir: &str, from: i64| {
+      let mut s = session(id, &[(from, Some(model), 10), (from + 10, Some(model), 10)]);
+      (s.workdir, s.cwd) = (format!("{ROOT}/{dir}"), format!("{ROOT}/{dir}"));
+      s
+    };
+    let sessions = vec![
+      at("s", "b", "p", 600),
+      at("t", "c", "p", 600),
+      at("u", "a", "q", 600),
+      at("v", "a", "q", DAY + 600),
+    ];
+    let data = data_with(sessions, jiff::civil::date(2026, 1, 8));
+    let days = data.model_buckets(Span::Days30, None, "a");
+    let times: Vec<i64> = days.iter().map(|x| x.active.unwrap() / 1_000_000).collect();
+    assert_eq!(times, [600, 300], "{days:?}");
   }
 
   #[test]
