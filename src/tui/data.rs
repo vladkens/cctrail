@@ -298,6 +298,24 @@ impl Data {
     let (projects, _) = self.projects(span, prov, true);
     let totals: HashMap<String, i64> =
       projects.into_iter().map(|x| (x.key, x.active.unwrap_or(0) / MICROS)).collect();
+    let stamps = self.part_stamps(span, prov);
+    let by: HashMap<&str, Vec<Ts>> = stamps.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+    let mut per: HashMap<String, Vec<(Part, i64)>> = HashMap::new();
+    for (k, v) in metrics::active_by_name(&by, &range) {
+      let Some(part) = part_of(k) else { continue };
+      per.entry(part.0.clone()).or_default().push((part, v));
+    }
+    let mut out = Times::new();
+    for (project, parts) in per {
+      let total = totals.get(&project).copied().unwrap_or(0);
+      out.extend(scale(parts, total).into_iter().map(|(k, v)| (k, v * MICROS)));
+    }
+    out
+  }
+
+  /// The activity stamps `model_times` splits, per harness, project and part (`part_of`).
+  fn part_stamps(&self, span: Span, prov: Option<Provider>) -> HashMap<String, Vec<Ts>> {
+    let range = span.range(self.today);
     // The sessions the projects count: those with usage in the span.
     let billed: std::collections::HashSet<(Provider, &str)> = self
       .events(prov)
@@ -325,18 +343,7 @@ impl Data {
         }
       }
     }
-    let by: HashMap<&str, Vec<Ts>> = stamps.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-    let mut per: HashMap<String, Vec<(Part, i64)>> = HashMap::new();
-    for (k, v) in metrics::active_by_name(&by, &range) {
-      let Some(part) = part_of(k) else { continue };
-      per.entry(part.0.clone()).or_default().push((part, v));
-    }
-    let mut out = Times::new();
-    for (project, parts) in per {
-      let total = totals.get(&project).copied().unwrap_or(0);
-      out.extend(scale(parts, total).into_iter().map(|(k, v)| (k, v * MICROS)));
-    }
-    out
+    stamps
   }
 
   /// Time, tokens and cost of a project, or of everything, per bucket of the span, oldest first;
@@ -420,8 +427,9 @@ impl Data {
     std::cell::Ref::map(self.buckets.borrow(), |x| &x.as_ref().unwrap().1)
   }
 
-  /// A model's timeline buckets, those it was used in, newest first; their time scaled to the
-  /// model's `active` (microseconds), as split between projects, so they add up to its row.
+  /// A model's timeline buckets, those it was used or active in, newest first, its undated usage
+  /// last; the time from the same activity as its row's, split by day and scaled to the row's
+  /// `active` (microseconds), so they add up to it.
   pub fn model_buckets(
     &self,
     span: Span,
@@ -429,19 +437,42 @@ impl Data {
     key: &str,
     active: i64,
   ) -> Vec<Row> {
+    let range = span.range(self.today);
     let gran = span.gran();
-    let buckets = self.bucket_models(span, prov);
-    let mut rows: Vec<Row> = buckets
-      .iter()
-      .filter_map(|(day, models)| {
-        let x = models.iter().find(|x| x.key == key)?;
-        Some(Row { key: day.to_string(), label: label(*day, gran), day: Some(*day), ..x.clone() })
-      })
-      .collect();
-    let parts = rows.iter().map(|x| (x.key.clone(), x.active.unwrap_or(0) / MICROS)).collect();
-    let times = scale(parts, active / MICROS);
-    for row in &mut rows {
-      row.active = Some(times[&row.key] * MICROS);
+    let row = |day: Option<Date>| match day {
+      Some(day) => Row { day: Some(day), active: Some(0), ..row_of(&day.to_string()) },
+      None => Row { label: "undated".into(), active: Some(0), ..row_of("undated") },
+    };
+    let mut rows: HashMap<Option<Date>, Row> = HashMap::new();
+    for (si, ei) in self.events(prov) {
+      let (s, e) = (&self.sessions[si], &self.sessions[si].events[ei]);
+      if !in_span(&range, e) || model_key(model(e)) != key {
+        continue;
+      }
+      let day = e.ts.map(|ts| gran.bucket(metrics::local_date(ts)));
+      let x = rows.entry(day).or_insert_with(|| row(day));
+      x.tokens = x.tokens.saturating_add(e.usage.unwrap_or_default().total());
+      x.cost += pricing::cost(s.provider, e);
+      x.unpriced |= !pricing::priced(s.provider, e);
+    }
+    let mut times: HashMap<Option<Date>, i64> = HashMap::new();
+    for ((name, day), micros) in by_name_and_day(&self.part_stamps(span, prov)) {
+      let mine = part_of(&name).is_some_and(|x| model_key(&x.2) == key);
+      if mine && range.contains_day(day) {
+        *times.entry(Some(gran.bucket(day))).or_default() += micros;
+      }
+    }
+    for day in times.keys() {
+      rows.entry(*day).or_insert_with(|| row(*day));
+    }
+    let parts = rows.values().map(|x| (x.key.clone(), times.get(&x.day).copied().unwrap_or(0)));
+    let scaled = scale(parts.map(|(k, v)| (k, v / MICROS)).collect(), active / MICROS);
+    let mut rows: Vec<Row> = rows.into_values().collect();
+    for x in &mut rows {
+      x.active = Some(scaled[&x.key] * MICROS);
+      if let Some(day) = x.day {
+        x.label = label(day, gran);
+      }
     }
 
     rows.sort_by_key(|x| std::cmp::Reverse(x.day));
@@ -1057,9 +1088,24 @@ pub mod tests {
     assert_eq!(total.active, Some(10 * 60_000_000));
     let models = data.models(Span::Today, None, None);
     assert_eq!(minutes(&models), 10, "{models:?}");
-    for part in data.model_usage(Span::Today, None, "a") {
+    let a = models.iter().find(|x| x.key == "a").unwrap();
+    let days = data.model_buckets(Span::Today, None, "a", a.active.unwrap());
+    for part in data.model_usage(Span::Today, None, "a").into_iter().chain([days]) {
       assert_eq!(minutes(&part), 5, "{part:?}");
     }
+  }
+
+  #[test]
+  fn a_models_undated_usage_is_a_row_of_its_own() {
+    let mut s = session("s", &[(600, Some("a"), 10), (605, Some("a"), 10)]);
+    let usage = crate::model::Usage { input: 7, ..Default::default() };
+    s.events.push(Event { usage: Some(usage), model: Some("a".into()), ..Default::default() });
+    let data = data_with(vec![s], jiff::civil::date(2026, 1, 8));
+    let model = &data.models(Span::All, None, None)[0];
+    let weeks = data.model_buckets(Span::All, None, "a", model.active.unwrap());
+    let rows: Vec<_> = weeks.iter().map(|x| (x.label.as_str(), x.tokens)).collect();
+    assert_eq!(rows, [("2026-01-05", 20), ("undated", 7)]);
+    assert_eq!(model.tokens, 27);
   }
 
   #[test]

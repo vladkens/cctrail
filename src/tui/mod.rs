@@ -130,10 +130,12 @@ impl Detail {
 
   fn sort(&mut self, by: Sort) {
     self.sort = by;
-    // A model's weeks or days stay newest first.
+    // A model's weeks or days stay newest first, its undated usage last.
     for part in &mut self.parts {
-      let dated = part.1.first().is_some_and(|x| x.day.is_some());
-      sort(&mut part.1, if dated { (Col::Name, true) } else { by });
+      match part.1.iter().any(|x| x.day.is_some()) {
+        true => part.1.sort_by_key(|x| std::cmp::Reverse(x.day)),
+        false => sort(&mut part.1, by),
+      }
     }
   }
 }
@@ -1311,13 +1313,19 @@ mod tests {
     assert_eq!(head, named, "{out}");
     let newest = cells(&line(&buf, divider + 2));
     assert_eq!(newest[1..], ["–"; 7], "{out}");
-    // A busy day's cost per active hour and per million tokens.
+    // A busy day's cost per active hour and per million tokens, of its priced models alone: an
+    // unknown cost isn't one of 0.
     let busy = cells(&line(&buf, divider + 3));
-    let day = &app.list[1];
-    let hours = day.active.unwrap() as f64 / 3600e6;
+    let models = app.data.bucket_models(app.span, app.prov);
+    let day = &models[&app.list[1].day.unwrap()];
+    assert!(day.iter().any(|x| x.unpriced), "{out}");
+    let priced: Vec<&Row> = day.iter().filter(|x| !x.unpriced).collect();
+    let cost: f64 = priced.iter().map(|x| x.cost).sum();
+    let hours = priced.iter().filter_map(|x| x.active).sum::<i64>() as f64 / 3600e6;
+    let tokens = priced.iter().map(|x| x.tokens).sum::<u64>() as f64;
     let money = |x: f64| format!("${x:.2}");
-    let rates = [money(day.cost / hours), money(day.cost * 1e6 / day.tokens as f64)];
-    assert_eq!(busy[4..6], rates, "{out}");
+    assert_eq!(busy[4..6], [money(cost / hours), money(cost * 1e6 / tokens)], "{out}");
+    drop(models);
     assert!(line(&buf, 28).trim_start().starts_with("total"), "{out}");
     // One bar per busy day, all as wide, one cell apart, stacked in the models' colors.
     let axis = (4..divider).find(|y| line(&buf, *y).contains('━')).unwrap();
