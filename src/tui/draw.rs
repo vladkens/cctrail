@@ -499,15 +499,8 @@ fn table(
 
   let of = sort.0.share();
   let share = shares(&rows.iter().map(|x| of.of(x)).collect::<Vec<_>>());
-  // `rated`: the row the costs per unit are of, its priced part, as an unknown cost isn't one of
-  // 0: a timeline bucket's priced models; the total's are of the priced rows alone.
-  let buckets = (app.tab == Tab::Timeline && app.open.is_none())
-    .then(|| app.data.bucket_models(app.span, app.prov));
-  let rated_of = |x: &Row| match (&buckets, x.day) {
-    (Some(b), Some(day)) => priced(b.get(&day).into_iter().flatten()),
-    _ => x.clone(),
-  };
-  let rated: Vec<Row> = rows.iter().map(rated_of).collect();
+  // `rated`: the row the costs per unit are of; the total's are of the priced part alone, as an
+  // unknown cost isn't one of 0.
   let cells = |x: &Row, rated: &Row, label: &str, share: &str| {
     let dash = || num("–".into(), NONE);
     // Nothing in it (a day, or a period's total): dashes, not zeros.
@@ -528,22 +521,10 @@ fn table(
     };
     TableRow::new(columns.iter().map(|c| cell(c.col)).collect::<Vec<_>>())
   };
-  let lines = rows.iter().zip(&share).zip(&rated).map(|((x, s), r)| cells(x, r, &x.label, s));
-  let lines = lines.collect();
+  let lines = rows.iter().zip(&share).map(|(x, s)| cells(x, x, &x.label, s)).collect();
   let all = if rows.iter().any(|x| of.of(x) > 0.0) { "100%" } else { "" };
-  let total = cells(total, &priced(&rated), "total", all);
+  let total = cells(total, &super::data::priced(rows), "total", all);
   grid(f, &columns, lines, total, area, sel, first, hits)
-}
-
-/// The time, tokens and cost of the rows with a known price.
-fn priced<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Row {
-  let rows: Vec<&Row> = rows.into_iter().filter(|x| !x.unpriced).collect();
-  Row {
-    active: Some(rows.iter().filter_map(|x| x.active).sum()),
-    tokens: rows.iter().map(|x| x.tokens).fold(0, u64::saturating_add),
-    cost: rows.iter().map(|x| x.cost).sum(),
-    ..Default::default()
-  }
 }
 
 /// What the swears tab's numbers are: in the help, and short on its bottom border beside the keys.

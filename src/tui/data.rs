@@ -70,6 +70,9 @@ pub struct Row {
   pub directed: u64,
   pub swearing: u64,
   pub score: Option<f64>,
+  /// The time, tokens and cost of its part with a known price where that isn't all of it: a
+  /// timeline bucket's priced models. Its costs per unit are of that part.
+  pub rated: Option<(i64, u64, f64)>,
 }
 
 /// The swears tab's shares of prompts, in percent, from enough prompts.
@@ -88,18 +91,35 @@ impl Row {
     self.share(self.swearing)
   }
 
+  /// The time, tokens and cost its costs per unit are of; none with an unknown cost.
+  fn rated(&self) -> Option<(i64, u64, f64)> {
+    let all = (!self.unpriced).then(|| (self.active.unwrap_or(0), self.tokens, self.cost));
+    self.rated.or(all)
+  }
+
   /// Cost per active hour: none under a minute of time, with no cost or an unknown one.
   pub fn per_hour(&self) -> Option<f64> {
-    let micros = self.active.unwrap_or(0);
-    let known = !self.unpriced && self.cost > 0.0 && micros >= 60 * MICROS;
-    known.then(|| self.cost / micros as f64 * 3600.0 * MICROS as f64)
+    let (micros, _, cost) = self.rated()?;
+    (cost > 0.0 && micros >= 60 * MICROS).then(|| cost / micros as f64 * 3600.0 * MICROS as f64)
   }
 
   /// Cost per million tokens as paid, cache, fast and effort included: none without tokens or with
   /// an unknown cost.
   pub fn per_million(&self) -> Option<f64> {
-    (!self.unpriced && self.tokens > 0).then(|| self.cost / self.tokens as f64 * 1e6)
+    let (_, tokens, cost) = self.rated()?;
+    (tokens > 0).then(|| cost / tokens as f64 * 1e6)
   }
+}
+
+/// The rows' part with a known price, as a row: what a total's costs per unit are of.
+pub fn priced<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Row {
+  let mut out = Row { active: Some(0), ..Default::default() };
+  for (active, tokens, cost) in rows.into_iter().filter_map(Row::rated) {
+    *out.active.get_or_insert(0) += active;
+    out.tokens = out.tokens.saturating_add(tokens);
+    out.cost += cost;
+  }
+  out
 }
 
 /// Time per project, harness, model, speed and effort, for one span and provider.
@@ -428,15 +448,9 @@ impl Data {
   }
 
   /// A model's timeline buckets, those it was used or active in, newest first, its undated usage
-  /// last; the time from the same activity as its row's, split by day and scaled to the row's
-  /// `active` (microseconds), so they add up to it.
-  pub fn model_buckets(
-    &self,
-    span: Span,
-    prov: Option<Provider>,
-    key: &str,
-    active: i64,
-  ) -> Vec<Row> {
+  /// last; each of its parts' time as in `times` (split between projects) spread over the days
+  /// of that part's activity, so they add up to its row.
+  pub fn model_buckets(&self, span: Span, prov: Option<Provider>, key: &str) -> Vec<Row> {
     let range = span.range(self.today);
     let gran = span.gran();
     let row = |day: Option<Date>| match day {
@@ -455,21 +469,25 @@ impl Data {
       x.cost += pricing::cost(s.provider, e);
       x.unpriced |= !pricing::priced(s.provider, e);
     }
-    let mut times: HashMap<Option<Date>, i64> = HashMap::new();
+    let mut spread: HashMap<String, HashMap<Date, i64>> = HashMap::new();
     for ((name, day), micros) in by_name_and_day(&self.part_stamps(span, prov)) {
       let mine = part_of(&name).is_some_and(|x| model_key(&x.2) == key);
       if mine && range.contains_day(day) {
-        *times.entry(Some(gran.bucket(day))).or_default() += micros;
+        *spread.entry(name).or_default().entry(gran.bucket(day)).or_default() += micros;
       }
     }
-    for day in times.keys() {
-      rows.entry(*day).or_insert_with(|| row(*day));
+    let times = self.times(span, prov);
+    for (name, days) in spread {
+      let total = part_of(&name).and_then(|x| times.get(&x)).copied().unwrap_or(0);
+      let days = days.into_iter().map(|(d, v)| (d.to_string(), v / MICROS)).collect();
+      for (day, v) in scale(days, total / MICROS) {
+        let Ok(day) = day.parse::<Date>() else { continue };
+        let x = rows.entry(Some(day)).or_insert_with(|| row(Some(day)));
+        *x.active.get_or_insert(0) += v * MICROS;
+      }
     }
-    let parts = rows.values().map(|x| (x.key.clone(), times.get(&x.day).copied().unwrap_or(0)));
-    let scaled = scale(parts.map(|(k, v)| (k, v / MICROS)).collect(), active / MICROS);
     let mut rows: Vec<Row> = rows.into_values().collect();
     for x in &mut rows {
-      x.active = Some(scaled[&x.key] * MICROS);
       if let Some(day) = x.day {
         x.label = label(day, gran);
       }
@@ -1031,7 +1049,7 @@ pub mod tests {
     let gpt = models.iter().filter(|x| x.key.starts_with("gpt-5.4")).count();
     assert_eq!(gpt, 1);
     for m in &models {
-      let weeks = data.model_buckets(Span::All, None, &m.key, m.active.unwrap());
+      let weeks = data.model_buckets(Span::All, None, &m.key);
       for part in data.model_usage(Span::All, None, &m.key).into_iter().chain([weeks]) {
         assert_eq!(time(&part), m.active.unwrap(), "{}", m.key);
         assert_eq!(part.iter().map(|x| x.tokens).sum::<u64>(), m.tokens, "{}", m.key);
@@ -1088,11 +1106,33 @@ pub mod tests {
     assert_eq!(total.active, Some(10 * 60_000_000));
     let models = data.models(Span::Today, None, None);
     assert_eq!(minutes(&models), 10, "{models:?}");
-    let a = models.iter().find(|x| x.key == "a").unwrap();
-    let days = data.model_buckets(Span::Today, None, "a", a.active.unwrap());
+    let days = data.model_buckets(Span::Today, None, "a");
     for part in data.model_usage(Span::Today, None, "a").into_iter().chain([days]) {
       assert_eq!(minutes(&part), 5, "{part:?}");
     }
+  }
+
+  #[test]
+  fn a_models_days_keep_its_split_between_projects() {
+    // `b` and `c` in one project beside `a` in another, then `a` alone in a third the next day:
+    // that day has the ten minutes `a` had in the third project.
+    let at = |id: &str, model: &str, dir: &str, from: i64| {
+      let mut s = session(id, &[(from, Some(model), 10), (from + 10, Some(model), 10)]);
+      (s.workdir, s.cwd) = (format!("{ROOT}/{dir}"), format!("{ROOT}/{dir}"));
+      s
+    };
+    let sessions = vec![
+      at("s", "b", "p", 600),
+      at("t", "c", "p", 600),
+      at("u", "a", "q", 600),
+      at("v", "a", "r", DAY + 600),
+    ];
+    let data = data_with(sessions, jiff::civil::date(2026, 1, 8));
+    let a = data.models(Span::Days30, None, None).into_iter().find(|x| x.key == "a").unwrap();
+    let days = data.model_buckets(Span::Days30, None, "a");
+    assert_eq!(days[0].day, Some(jiff::civil::date(2026, 1, 8)));
+    assert_eq!(minutes(&days[..1]), 10, "{days:?}");
+    assert_eq!(days.iter().map(|x| x.active.unwrap()).sum::<i64>(), a.active.unwrap());
   }
 
   #[test]
@@ -1102,7 +1142,7 @@ pub mod tests {
     s.events.push(Event { usage: Some(usage), model: Some("a".into()), ..Default::default() });
     let data = data_with(vec![s], jiff::civil::date(2026, 1, 8));
     let model = &data.models(Span::All, None, None)[0];
-    let weeks = data.model_buckets(Span::All, None, "a", model.active.unwrap());
+    let weeks = data.model_buckets(Span::All, None, "a");
     let rows: Vec<_> = weeks.iter().map(|x| (x.label.as_str(), x.tokens)).collect();
     assert_eq!(rows, [("2026-01-05", 20), ("undated", 7)]);
     assert_eq!(model.tokens, 27);

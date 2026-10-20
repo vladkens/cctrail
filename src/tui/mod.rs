@@ -269,7 +269,16 @@ impl App {
     let mut list = match self.tab {
       Tab::Projects => projects,
       Tab::Models => self.data.models(self.span, self.prov, None),
-      Tab::Timeline => self.data.timeline(self.span, self.prov, None),
+      Tab::Timeline => {
+        // Each bucket's costs per unit are of its priced models.
+        let models = self.data.bucket_models(self.span, self.prov);
+        let mut rows = self.data.timeline(self.span, self.prov, None);
+        for x in &mut rows {
+          let priced = data::priced(x.day.and_then(|d| models.get(&d)).into_iter().flatten());
+          x.rated = Some((priced.active.unwrap_or(0), priced.tokens, priced.cost));
+        }
+        rows
+      }
       Tab::Swears => {
         let (rows, total) = self.data.swears(self.span, self.prov);
         self.total = total;
@@ -322,7 +331,7 @@ impl App {
       Tab::Models => {
         let [harness, speed, effort] = self.data.model_usage(span, prov, &row.key);
         let week = span.gran() == crate::metrics::Granularity::Week;
-        let buckets = self.data.model_buckets(span, prov, &row.key, row.active.unwrap_or(0));
+        let buckets = self.data.model_buckets(span, prov, &row.key);
         let dated = if week { "Week" } else { "Day" };
         vec![("Harness", harness), ("Speed", speed), ("Effort", effort), (dated, buckets)]
       }
@@ -1325,6 +1334,8 @@ mod tests {
     let tokens = priced.iter().map(|x| x.tokens).sum::<u64>() as f64;
     let money = |x: f64| format!("${x:.2}");
     assert_eq!(busy[4..6], [money(cost / hours), money(cost * 1e6 / tokens)], "{out}");
+    // A header click sorts by the same rates.
+    assert!((Col::PerMillion.of(&app.list[1]) - cost * 1e6 / tokens).abs() < 1e-9);
     drop(models);
     assert!(line(&buf, 28).trim_start().starts_with("total"), "{out}");
     // One bar per busy day, all as wide, one cell apart, stacked in the models' colors.
