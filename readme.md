@@ -205,19 +205,7 @@ models are listed below the report.
 
 ## 🤝 Contributing
 
-Pull requests are welcome, and so are your agents: point them at [agents.md](agents.md).
-
-<details>
-<summary>Installing a branch</summary>
-
-```sh
-cargo install --git https://github.com/vladkens/cctrail --branch feat/NAME --locked  # a PR branch
-cargo install --git https://github.com/vladkens/cctrail --locked --force             # back to main
-cargo install --path . --locked                                                      # a local checkout
-cargo uninstall cctrail                                                              # remove it
-```
-
-</details>
+Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md). To try a pull request's branch, install it with `cargo install --git https://github.com/vladkens/cctrail --branch NAME --locked`.
 
 ## 🙏 Credits
 

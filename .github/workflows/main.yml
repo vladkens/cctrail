@@ -5,12 +5,13 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Main runs queue instead, so a dev release is never cut off; a release commit gets its own group.
+# PR runs cancel older ones. A main run is never cancelled mid-way (a newer push replaces only a waiting one), so a dev release is never cut off; a release commit gets its own group, so it is never replaced.
 concurrency:
   group: ${{ github.workflow }}-${{ startsWith(github.event.head_commit.message, 'release:') && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -36,7 +37,7 @@ jobs:
   # `publish` never compiles. Users check an archive with
   # `gh attestation verify FILE -R vladkens/cctrail`.
   build:
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: "github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || startsWith(github.event.pull_request.title, 'release: v')"
     runs-on: macos-latest # the macOS binary needs a Mac; Linux and Windows cross-compile
     steps:
       - uses: actions/checkout@v7
