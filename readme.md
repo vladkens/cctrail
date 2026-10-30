@@ -215,6 +215,12 @@ Pull requests are welcome, including ones made with agents: point yours at [agen
 - [SQLite](https://sqlite.org) (public domain) through
   [rusqlite](https://github.com/rusqlite/rusqlite) (MIT): `cctrail export` and `import`.
 
+## 🤖 How it's made
+
+cctrail is written by AI agents (Claude Code, Codex) following [agents.md](agents.md); I choose what to build and review every pull request. Its tests run the CLI on sample Claude Code, Codex, pi and fx sessions ([fixtures](tests/fixtures/)), and a change to parsing or accounting must give the same tokens, sessions and costs as the main build on a real local history. I've written software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)); agents are how I build now.
+
+Releases are rare, and an update doesn't break what you rely on: the CLI, the config and your data stay compatible; a breaking change waits for a major version and is listed in [changelog.md](changelog.md).
+
 ## 📝 License
 
 Distributed under the [MIT License](LICENSE).
