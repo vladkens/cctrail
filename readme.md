@@ -203,10 +203,6 @@ fx's `codex/gpt-6-astra` as `gpt-6-astra`), at the harness's own estimate for a 
 lacks; an fx session in Fast mode counts at the fast rate throughout. Tokens on other unpriced
 models are listed below the report.
 
-## 🤝 Contributing
-
-Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md). To try a pull request's branch, install it with `cargo install --git https://github.com/vladkens/cctrail --branch NAME --locked`.
-
 ## 🙏 Credits
 
 - [models.dev](https://github.com/anomalyco/models.dev) (MIT): the model prices, read from its git
@@ -217,9 +213,11 @@ Pull requests are welcome, including ones made with agents: point yours at [agen
 
 ## 🤖 How it's made
 
-cctrail is written by AI agents (Claude Code, Codex) following [agents.md](agents.md); I choose what to build and review every pull request. Its tests run the CLI on sample Claude Code, Codex, pi and fx sessions ([fixtures](tests/fixtures/)), and a change to parsing or accounting must give the same tokens, sessions and costs as the main build on a real local history. I've written software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)); agents are how I build now.
+cctrail is written by AI agents (Claude Code, Codex) following [agents.md](agents.md); I choose what to build and review every pull request. Its tests run the CLI on sample Claude Code, Codex, pi and fx sessions ([fixtures](tests/fixtures/)), and a change to parsing or accounting must give the same tokens, sessions and costs as the main build on a real local history. I've written software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)); agents are how I build now. Releases are rare, and an update doesn't break what you rely on: the CLI, the config and your data stay compatible; a breaking change waits for a major version and is listed in [changelog.md](changelog.md).
 
-Releases are rare, and an update doesn't break what you rely on: the CLI, the config and your data stay compatible; a breaking change waits for a major version and is listed in [changelog.md](changelog.md).
+## 🤝 Contributing
+
+Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md). To try a pull request's branch, install it with `cargo install --git https://github.com/vladkens/cctrail --branch NAME --locked`.
 
 ## 📝 License
 
