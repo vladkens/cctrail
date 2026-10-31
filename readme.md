@@ -203,22 +203,6 @@ fx's `codex/gpt-6-astra` as `gpt-6-astra`), at the harness's own estimate for a 
 lacks; an fx session in Fast mode counts at the fast rate throughout. Tokens on other unpriced
 models are listed below the report.
 
-## 🤝 Contributing
-
-Pull requests are welcome, and so are your agents: point them at [agents.md](agents.md).
-
-<details>
-<summary>Installing a branch</summary>
-
-```sh
-cargo install --git https://github.com/vladkens/cctrail --branch feat/NAME --locked  # a PR branch
-cargo install --git https://github.com/vladkens/cctrail --locked --force             # back to main
-cargo install --path . --locked                                                      # a local checkout
-cargo uninstall cctrail                                                              # remove it
-```
-
-</details>
-
 ## 🙏 Credits
 
 - [models.dev](https://github.com/anomalyco/models.dev) (MIT): the model prices, read from its git
@@ -226,6 +210,14 @@ cargo uninstall cctrail                                                         
 - [ratatui](https://github.com/ratatui/ratatui) (MIT): the interactive view.
 - [SQLite](https://sqlite.org) (public domain) through
   [rusqlite](https://github.com/rusqlite/rusqlite) (MIT): `cctrail export` and `import`.
+
+## 🤖 How it's made
+
+cctrail is built with AI agents following [agents.md](agents.md): I choose what to build, review the changes and test them on real machines. Before agents, I wrote software by hand for years ([macmon](https://github.com/vladkens/macmon), [twscrape](https://github.com/vladkens/twscrape), [ecloop](https://github.com/vladkens/ecloop)). Releases are rare on purpose: I'd rather test and polish a set of changes than ship each one as it lands, and I try not to break your config or data; when something has to break, [changelog.md](changelog.md) says so.
+
+## 🤝 Contributing
+
+Pull requests are welcome, including ones made with agents: point yours at [agents.md](agents.md). To try a pull request's branch, install it with `cargo install --git https://github.com/vladkens/cctrail --branch NAME --locked`.
 
 ## 📝 License
 
